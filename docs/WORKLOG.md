@@ -201,3 +201,183 @@ screenshot renders in the reader.
 147 backend tests passing at this point — up from 136 (the count when
 `docs/ERD.md` was first written): +2 for the forced-new-tab sanitize
 behavior, +3 for Referer derivation, +6 for magic-byte sniffing.
+
+## 2026-08-12 — Four Gmail newsletters added, and four more real bugs found live
+
+Feedback: *"there is no email pulled into the reader... I want 'WSJ What's
+News', Snacks from hello@snacks.robinhood.com, The Batch @
+DeepLearning.AI from thebatch@deeplearning.ai"*, then *"Also BiggerPockets
+from info@m.biggerpockets.com"*.
+
+Looked up each newsletter's actual sender address via the connected Gmail
+account before writing config (rather than guessing): `access@interactive
+.wsj.com` for WSJ What's News (subject varies day to day, so filtered on
+sender + an exclude rule for the "do you still want to receive" retention
+email, not on subject), `hello@snacks.robinhood.com`, `thebatch@deeplearning.ai`,
+`info@m.biggerpockets.com`. Added all four as `type: gmail` sources in a
+new `Newsletters` folder, `newer_than:30d` as the initial bound.
+
+Gmail OAuth hadn't been set up on this machine at all. Walked through it
+live: Cloud project → enable Gmail API → OAuth consent screen → **hit a
+real gotcha**: consent failed with `Error 403: access_denied` /
+"has not completed the Google verification process" until the account was
+added under **Test users** on the consent screen (undocumented in the
+original Gmail setup doc — added to `README.md` afterward so the next
+setup doesn't hit the same wall blind).
+
+**Bug (checked for, not found): `cid:` inline-image attachments.** Before
+assuming the existing image pipeline would "just work" for newsletters,
+fetched real messages from all four senders via the Gmail connector and
+grepped for `cid:` references — none of the four sources use inline MIME
+attachments for images (all hosted HTTPS, via cmail20.com, HubSpot,
+Sailthru, etc.), so the existing `/api/img` proxy handled them with zero
+code changes. Verified by actually fetching a sample image URL from each
+sender through the proxy logic and confirming 200s.
+
+**Bug: mobile horizontal scroll on email-sourced articles.** *"Email
+source doesn't respect max width on mobile device causing page to be able
+to scroll left & right."* Root cause: WSJ/BiggerPockets newsletters build
+their layout from deeply nested `<table>` markup (up to 4 levels deep,
+sometimes 45+ tables in one message) meant for a fixed-width email client,
+not a responsive one. Verified concretely rather than guessing: rendered
+all 74 ingested Gmail articles' `content_html` in a sandboxed 343px-wide
+div with and without a candidate fix — confirmed 0/74 overflowed with
+`.reader-body table { display: block; max-width: 100%; overflow-x: auto }`,
+and 19/74 (all BiggerPockets) overflowed to 522–568px without it.
+
+**Bug: excessive blank space in newsletter articles.** *"For email
+sources, automatically reduce excessive newlines"* → found empty spacer
+`<p>` tags (email builders' `<p>&nbsp;</p>` vertical-padding trick, meant
+to be handled by CSS margins that get stripped along with every other
+inline style) and runs of consecutive `<br>` — added
+`tighten_newsletter_whitespace()` (empty-`<p>` removal + `<br>` run
+collapse), scoped to `origin == "gmail"` only since RSS content doesn't
+share this markup pattern. Backfilled the 74 already-ingested articles
+(27 changed). Follow-up: *"I still see excessive spaces between text
+content"* — a second, distinct cause: newsletters pad paragraphs with
+dozens of consecutive `&nbsp;` to control inbox preview-snippet length,
+normally invisible because it sits inside a hidden (`display:none`)
+element — but since every inline style is stripped for sanitization, the
+padding surfaced as a literal wall of spaces mid-paragraph. Extended the
+same function to collapse 3+ consecutive `&nbsp;` to a single space;
+backfilled the 2 affected articles.
+
+**Bug: Gmail refresh re-listed the same messages every time.** *"Make
+sure it's as scoped as possible — only fetch for time range that hasn't
+fetched before... record the timestamp and future refresh would go from
+there."* `refresh_gmail_source` was already recording `last_fetched_at`
+but never reading it back — every refresh reused the source's full
+configured query (`newer_than:30d`) rather than narrowing to what's new.
+Fixed by appending `after:<epoch of last_fetched_at, minus a 5-minute
+overlap>` to the query on every refresh after the first. Verified live:
+first refresh of `wsj-whats-news` listed 25 messages; the very next
+refresh, scoped, listed 0.
+
+**Bug: article list silently capped at 50 with no way to see more.**
+*"All items shows '50 items' when unread is 90. Did we max it at 50?"*
+Yes — `GET /api/articles` always had a `limit=50` default, but the
+frontend never paginated past it (no `offset` ever sent, no load-more
+affordance), so any view exceeding 50 items just... stopped. This had
+been latent since the RSS-only version rarely crossed 50 unread; adding
+four active newsletters pushed a real user over that line for the first
+time. Fixed with `useInfiniteQuery` + a "Load more" button in the list
+(the natural place to add the trigger, since `.article-list` is the
+actual scroll container, not `.main`), reusing the existing `offset` param
+`store.list_articles` already supported server-side but the client never
+used.
+
+148 backend tests passing at this point (+1 for Gmail query scoping).
+Frontend changes verified via `tsc --noEmit` plus live Chrome sessions —
+including sandboxed-iframe overflow testing across all 74 ingested Gmail
+articles at real mobile width, both with and without each candidate fix,
+rather than trusting a single visual spot-check.
+
+## 2026-08-12 — Four more live-found bugs: stale build, two table-CSS
+## regressions, and cross-browser reload state loss
+
+**Bug: `:8787`/LAN was silently serving a stale frontend build.**
+*"biggerpockets's '23,000 Jobs Are Gone' email still scrolls left to
+right"* — re-tested the exact table-overflow fix from the previous entry
+against that specific article and found **zero** overflow, contradicting
+the report. Root cause wasn't the fix — it was `frontend/dist`'s mtime
+predating `index.css`'s last edit: `npm run build` had been run once,
+then more CSS changes landed after it, and the backend (`:8787`, what the
+LAN/phone URL hits) has no way to know its static build is stale — it
+just keeps serving whatever was last built, forever, with no error.
+Rebuilt, verified the fix byte in the served CSS matched. **Follow-up
+fix**: added `scripts/serve.sh` (build, then start the backend) and
+pointed the README's production-style-run section at it, so this specific
+trap — "I edited frontend/src, restarted nothing, and `:8787` looks
+unchanged" — doesn't recur silently.
+
+**Bug: the table-overflow fix itself caused giant blank gaps.**
+*"Email content nested tables... still large gap for email"* (BiggerPockets
+"23,000 Jobs" between "0.6% on the day" and "FOOD FIGHT"). Root cause was
+the earlier `.reader-body table { display: block; margin: 0 0 22px }` fix:
+email templates nest tables 4-5 levels deep purely for layout padding
+(a real, common pattern, not malformed markup), and `display: block` turns
+each nested level into its own block box — so every level independently
+added the 22px margin, compounding into 100px+ of blank space with nothing
+structurally wrong to point to. Two-part fix: (1) `.reader-body table
+table { margin: 0 }` so only the outermost table in a nest gets the
+visual-break margin; (2) extended `tighten_newsletter_whitespace()` to
+recursively prune genuinely empty `<table>` chains (no text, no `<img>`,
+bottom-up to a fixed point) the same way it already pruned empty `<p>`
+spacers, since those are pure layout artifacts contributing nothing.
+Backfilled all 74 Gmail articles (46 changed). Verified by measuring the
+actual pixel gap between the two text nodes in a sandboxed reader-body div
+before/after: ~380px → ~36px (normal paragraph spacing), then confirmed
+visually via screenshot.
+
+**Bug: a photo credit rendered as a giant heading.** *"Why is the 'Marcin
+Golba/Getty Images' part that big? It looks small on email client"* — the
+Snacks template wraps that caption in a real `<h1>` tag, purely to reuse
+its predefined small-caption CSS class, with no semantic weight intended.
+Sanitization strips the class/inline-style that made it small in the
+original template, so it fell back to the browser's unset UA default for
+`h1` (~2em) — a caption showing at ~38px. Underlying bug: `.reader-body
+h1/h2/h3` never had an explicit `font-size`, relying entirely on that
+default; usually invisible because most content doesn't misuse heading
+tags this way. Fixed with explicit, modest sizes (1.5em/1.3em/1.15em) —
+applied to all origins, not just gmail, since RSS/blog headings inheriting
+the same oversized default was the identical latent bug, just less
+visible there.
+
+**Bug: reader state (open article, current view) lost on any page
+reload**, including the one iOS forces on a tab that's sat idle/backgrounded
+for a while — the app has no hook into that, so it can't be caught or
+prevented, only survived. *"The app keeps refreshing in the browser if
+unused for a while. Post refresh, I would lose the article I was on."*
+First fix: mirror `selection`/`openArticleId` into the URL via
+`history.replaceState`, restore from `URLSearchParams` on mount. Verified
+live (open article → URL updates → hard-reload that exact URL → article
+reopens) and looked solid. **Then**: *"Back to previous issue — it
+refreshed and still back to feed view."* Asked for the exact address-bar
+contents post-reload: `?sel=view%3Aunread` — the *first* replaceState
+call from mount, missing the `article=` param that should have been
+written once an article was opened. Diagnosis: the user was on **Chrome**,
+not Safari — and Chrome on iOS runs on WKWebView (Apple requires every
+third-party iOS browser to), which doesn't reliably sync
+`history.replaceState` calls back to its own native tab-restoration
+bookkeeping. When the OS reclaims a backgrounded tab's memory, the browser
+can reload it from an older URL snapshot than the page's actual last
+state — a known class of gap for WKWebView-based (i.e. every non-Safari)
+iOS browser, not something fixable by calling replaceState more
+carefully. Fixed by adding `sessionStorage` as a second, fully independent
+persistence layer — a plain per-tab key/value write with no dependency on
+the navigation stack at all. Verified by reproducing the exact reported
+shape: loaded a URL deliberately missing the `article` param (mirroring
+what was observed) and confirmed the article still restored correctly
+from `sessionStorage`, which also re-synced the URL afterward.
+
+No backend changes in this entry — all four fixes are `frontend/src`
+(CSS + `App.tsx`) plus one backend HTML-cleanup extension
+(`textutil.tighten_newsletter_whitespace`) and one operational script
+(`scripts/serve.sh`). 148 backend tests still passing throughout (the
+table/heading/state fixes don't touch backend logic covered by tests,
+apart from the whitespace-pruning extension, which reused existing
+coverage). Every fix in this entry was caught by testing the *specific*
+article/browser the user reported, not a generic pass — the stale-build
+bug in particular would have been invisible without re-testing the exact
+one that was reported broken instead of trusting the previous general
+fix.

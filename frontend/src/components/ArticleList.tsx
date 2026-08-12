@@ -17,9 +17,19 @@ interface Props {
   articles: Article[]
   selectedId: number | null
   onOpen: (article: Article) => void
+  hasMore?: boolean
+  loadingMore?: boolean
+  onLoadMore?: () => void
 }
 
-export function ArticleList({ articles, selectedId, onOpen }: Props) {
+export function ArticleList({
+  articles,
+  selectedId,
+  onOpen,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+}: Props) {
   if (articles.length === 0) {
     return (
       <div className="empty-state">
@@ -59,6 +69,11 @@ export function ArticleList({ articles, selectedId, onOpen }: Props) {
           {a.is_starred && <span className="article-row__star">★</span>}
         </div>
       ))}
+      {hasMore && (
+        <button className="load-more-btn" onClick={onLoadMore} disabled={loadingMore}>
+          {loadingMore ? 'Loading…' : 'Load more'}
+        </button>
+      )}
     </div>
   )
 }

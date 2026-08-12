@@ -250,6 +250,28 @@ def test_refresh_gmail_source_isolates_a_single_bad_message(tmp_path):
     assert row[0] == 1
 
 
+def test_refresh_gmail_source_scopes_query_to_since_last_fetch(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="newsletters", type="gmail", title="Newsletters", folder="Test", query="label:x")
+    messages = {"m1": make_gmail_message("m1", "First newsletter")}
+    queries_seen = []
+
+    def list_fn(token, query):
+        queries_seen.append(query)
+        return list(messages.keys())
+
+    refresh_gmail_source(conn, source, access_token="t", list_fn=list_fn, get_fn=lambda t, m: messages[m])
+    # First-ever refresh: no last_fetched_at yet, so the configured query is
+    # used as-is — nothing to scope against.
+    assert queries_seen[0] == "label:x"
+
+    refresh_gmail_source(conn, source, access_token="t", list_fn=list_fn, get_fn=lambda t, m: messages[m])
+    # Second refresh: scoped to messages since the first refresh's recorded
+    # last_fetched_at, not a re-walk of the whole configured query.
+    assert queries_seen[1].startswith("label:x after:")
+
+
 def test_refresh_gmail_source_records_error_when_list_fails(tmp_path):
     conn = connect(tmp_path / "reader.db")
     init_schema(conn)

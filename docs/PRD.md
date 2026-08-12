@@ -57,6 +57,14 @@ other devices (phone, tablet) on the same LAN.
   each matching message becomes an article, same filtering rules apply.
 - One-time OAuth consent via a standalone script; the running server never
   handles your Google password and only ever calls list/get on messages.
+- **Scoped, incremental fetching.** After the first refresh, each Gmail
+  source's query is automatically narrowed to messages since that source's
+  last successful refresh (`after:<timestamp>`, with a small overlap
+  window) — a routine refresh lists only what's new rather than re-walking
+  the source's entire configured window (e.g. `newer_than:30d`) every time.
+- Newsletter HTML is cleaned up for readability: empty spacer paragraphs,
+  stacked `<br>` runs, and long `&nbsp;` runs (both artifacts of HTML email
+  templates, not article content) are collapsed at ingest time.
 
 ### 4.3 LLM-generated topic tracking
 
@@ -97,7 +105,12 @@ other devices (phone, tablet) on the same LAN.
   images (a real issue with several real-world feeds) still load, and the
   reader's IP/referrer is never leaked to third-party image hosts.
 - Dark and light themes; responsive down to phone width with a collapsible
-  sidebar drawer.
+  sidebar drawer. Newsletter HTML (deeply nested layout tables in
+  particular) is contained within its own scrollable region on narrow
+  viewports rather than blowing out the page's width.
+- Article list is paginated (50 at a time, "Load more" at the bottom)
+  rather than silently capping at the first page with no way to see older
+  items once a folder/view passes that count.
 - Subtitle/excerpt text filters out feed-boilerplate (e.g. auto-generated
   "Article URL: ... / Comments URL: ..." lines some feeds emit) so it
   actually helps decide whether to read something.

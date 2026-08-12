@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from pathlib import Path
@@ -118,7 +119,10 @@ def parse_message(raw: dict) -> NormalizedEntry:
     if html:
         content_html = html
     elif plain:
-        content_html = f"<pre>{plain}</pre>"
+        # Plain-text newsletters often pad sections with several blank
+        # lines; <pre> preserves whitespace literally, so left uncollapsed
+        # that reads as a wall of gaps.
+        content_html = f"<pre>{re.sub(r'\n{3,}', '\n\n', plain)}</pre>"
     else:
         content_html = ""
 

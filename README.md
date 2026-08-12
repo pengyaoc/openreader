@@ -48,13 +48,21 @@ backend on port 8787. Both bind to `0.0.0.0` by default, so the app is
 also reachable from other devices on your LAN (e.g. `http://<your-ip>:5173`
 from a phone).
 
-For a production-style run, build the frontend once and let the backend
-serve it directly:
+For a production-style run — one port, no separate Vite dev server, the
+way you'd access it from your phone over LAN — build the frontend and let
+the backend serve it directly:
 
 ```bash
-cd frontend && npm run build
-cd ../backend && uv run uvicorn app.asgi:app --host 0.0.0.0 --port 8787
+./scripts/serve.sh
 ```
+
+This always rebuilds `frontend/dist` before starting the backend. Run it
+this way (not the two-terminal dev setup above) any time you want
+`:8787`/your LAN URL to reflect the latest frontend changes — `frontend/dist`
+is a static build snapshot, so the backend will silently keep serving
+whatever was last built otherwise. (Equivalent to running `cd frontend &&
+npm run build` then `cd ../backend && uv run uvicorn app.asgi:app --host
+0.0.0.0 --port 8787` by hand, in order, every time.)
 
 ### Configuration
 
@@ -76,19 +84,51 @@ Environment variables (all optional, sensible defaults):
 
 ### Gmail (optional)
 
-1. In Google Cloud Console: enable the Gmail API, create an OAuth 2.0
-   client of type **Desktop app**, download the client secret JSON to
-   `config/gmail_client_secret.json` (gitignored).
-2. One-time consent:
+Pulls newsletters straight from your inbox as sources, read-only
+(`gmail.readonly` scope only — the connector only ever calls
+`messages.list`/`messages.get`/`history.list`; it never sends, labels,
+drafts, or deletes).
+
+1. **Create/select a Google Cloud project.**
+   https://console.cloud.google.com/projectcreate (or pick an existing
+   project from the switcher).
+2. **Enable the Gmail API** for that project.
+   https://console.cloud.google.com/apis/library/gmail.googleapis.com →
+   **Enable**.
+3. **Configure the OAuth consent screen** (once per project).
+   https://console.cloud.google.com/apis/credentials/consent → **External**
+   → fill in an app name and your email. You can leave it in **Testing**
+   mode (no Google review needed) — but you MUST add your own Google
+   account under **Test users**, or consent fails with `Error 403:
+   access_denied` / "has not completed the Google verification process".
+4. **Create OAuth credentials.**
+   https://console.cloud.google.com/apis/credentials → **Create
+   Credentials → OAuth client ID** → type **Desktop app** → **Create** →
+   **Download JSON**. Save it as `config/gmail_client_secret.json`
+   (gitignored).
+5. **One-time consent, run locally:**
    ```bash
    cd backend
    uv run --extra gmail-auth python ../scripts/gmail_auth.py
    ```
-   This writes `data/token.json` (gitignored). The running server only
-   ever reads it to mint short-lived access tokens — it never sees your
-   Google password, and `google-auth-oauthlib` is never imported outside
-   this one script.
-3. Add a `type: gmail` source to `feeds.yaml` with a Gmail search `query`.
+   Opens a browser for the read-only consent screen, then writes
+   `data/token.json` (gitignored). The running server only ever reads that
+   file to mint short-lived access tokens — it never sees your Google
+   password, and `google-auth-oauthlib` is never imported outside this one
+   script. Re-run this script any time the token is revoked or expires.
+6. **Add a `type: gmail` source** to `feeds.yaml`, with a Gmail search
+   `query` (same syntax as the Gmail search box):
+   ```yaml
+   - key: some-newsletter
+     type: gmail
+     title: Some Newsletter
+     folder: Newsletters
+     query: "from:sender@example.com newer_than:30d"
+   ```
+   `newer_than:N` in the query keeps the first refresh from backfilling
+   years of inbox history. Press **Refresh feeds** in the app (or `POST
+   /api/refresh`) to pull — like everything else in v1, there's no
+   scheduler, refresh is always a manual trigger.
 
 ### LLM generation (optional)
 

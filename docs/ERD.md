@@ -62,7 +62,8 @@ backend/app/
 ├── ingest/
 │   ├── rules.py             # regex include/exclude engine (pure)
 │   ├── dedup.py              # URL canonicalization + content hash (pure)
-│   ├── textutil.py            # excerpt extraction, sanitize, image-proxy rewrite
+│   ├── textutil.py            # excerpt extraction, sanitize, image-proxy
+│   │                          # rewrite, newsletter-HTML whitespace tightening
 │   ├── extract.py             # readability heuristic + relative->absolute URLs
 │   ├── hydrate.py              # lazy per-article full-text fetch (once, ever)
 │   └── refresh.py               # orchestrates one sync refresh pass
@@ -167,7 +168,7 @@ Notes on choices that aren't obvious from the columns alone:
 |---|---|---|
 | `GET /api/sources` | List sources with unread counts | No |
 | `POST /api/sources` | Structured add-source (validates, writes YAML, creates DB row) | No |
-| `GET /api/articles` | List articles (`view=all\|unread\|starred`, `source_id`, `folder`) | No |
+| `GET /api/articles` | List articles (`view=all\|unread\|starred`, `source_id`, `folder`, `limit`=50 default, `offset`) | No |
 | `GET /api/articles/:id` | Article detail; triggers lazy full-text hydration if applicable | **Yes** (one-time per article) |
 | `POST /api/articles/:id/read` | Mark read (idempotent, one-directional) | No |
 | `POST /api/articles/:id/toggle-read` | Manual read/unread toggle | No |
@@ -221,6 +222,53 @@ URLs, and the exact brief snapshot stored on the job row — because
 synthesized text sitting next to real reporting is easy to misread later,
 and the stored brief is what lets you debug a topic producing bad output.
 
+**Gmail refresh is scoped incrementally, not a fixed re-query.** A Gmail
+source's configured `query` (e.g. `from:x@example.com newer_than:30d`) is
+only ever used verbatim on the first refresh. Every refresh after that
+appends `after:<epoch of the source's last_fetched_at, minus a 5-minute
+overlap>` — so a routine refresh lists only messages since it last ran
+instead of re-listing (though not re-fetching bodies for, thanks to the
+`(source_id, guid)` dedup) the source's entire configured window every
+single time. The overlap window exists because Gmail's search index can
+lag slightly behind delivery; re-seeing a message id there is a no-op, not
+a duplicate, since persistence already dedupes on guid.
+
+**Article list is paginated at the API, not truncated.** `GET
+/api/articles` defaults to `limit=50` with an `offset` param; the frontend
+uses `useInfiniteQuery` and a "Load more" affordance rather than fetching
+everything at once or (the bug this replaced) silently showing only the
+first 50 with no way to reach anything past it.
+
+**Reader state persists through two independent layers, not one.** Which
+article/view is open lives only in frontend React state, so any reload —
+including one the app never gets a chance to react to, like iOS reclaiming
+a backgrounded tab's memory — would otherwise drop it. State is mirrored
+into both the URL (`history.replaceState`, `?sel=...&article=...`) and
+`sessionStorage` on every change. Neither is redundant: the URL layer
+gives a shareable/bookmarkable link, but on iOS, third-party browsers
+(Chrome, Firefox, Edge — all required by Apple to run on WKWebView) don't
+reliably sync `replaceState` calls back to their own native
+tab-restoration bookkeeping, so a reload can revert to an older URL
+snapshot than the page's actual last state. `sessionStorage` has no
+dependency on the navigation stack at all, so it survives that gap; the
+URL stays as the primary/shareable source when both are available (`App.tsx`,
+`parseSelectionFromQuery` / `readStoredViewState`).
+
+**Nested `<table>` layout in email content gets contained, not stripped.**
+HTML newsletters nest tables several levels deep for both padding
+(a real, common authoring pattern) and pure spacer chains (empty, no real
+purpose). Rather than extracting content out of that structure (e.g. a
+readability-style density-scored rewrite — considered, but risks silently
+dropping real content that doesn't score as dense prose, and this app's
+existing `ingest/extract.py` readability heuristic isn't wired up for
+table-laid-out input today), the reader keeps the original DOM and patches
+specific failure shapes as they're found live: tables become independently
+scrollable blocks capped at 100% width (mobile overflow), only the
+outermost table in a nest keeps a visual-break margin (nested padding
+tables would otherwise compound into large blank gaps), and fully empty
+table chains are pruned the same way empty `<p>` spacers are
+(`ingest/textutil.tighten_newsletter_whitespace`).
+
 **Dependency minimalism.** Deliberately avoided FastAPI/pydantic
 (Starlette + msgspec instead), feedparser (stdlib `defusedxml.ElementTree`
 + a ~150-line normalizer instead), and the Google API client library
@@ -235,7 +283,7 @@ auth script, never by the server.
 - **Unit, no network/subprocess**: every connector, the rules engine,
   dedup, date normalization, the readability extractor, the image proxy
   rewriter, and the `claude` CLI wrapper are tested via injected
-  fetch/runner functions against fixtures. 147 tests as of this writing —
+  fetch/runner functions against fixtures. 148 tests as of this writing —
   see `docs/WORKLOG.md` for what each new round added.
 - **Live verification for the pieces that can't be meaningfully faked**:
   real RSS feeds (including a CJK-language, hotlink-protected, non-UTF8

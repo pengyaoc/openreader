@@ -60,6 +60,47 @@ def sanitize_html(html: str | None) -> str:
     )
 
 
+def _is_visually_empty(node) -> bool:
+    text = node.text(deep=True, separator="").replace("\xa0", "").strip()
+    return not text and node.css_first("img") is None
+
+
+def tighten_newsletter_whitespace(html: str | None) -> str:
+    """Collapses the excessive blank space common in HTML newsletter markup:
+    empty <p> spacer paragraphs (e.g. `<p>&nbsp;</p>`, used by email builders
+    for vertical padding that CSS would normally handle), runs of consecutive
+    <br> tags, runs of consecutive &nbsp; (email builders pad inbox
+    preview-snippet length with dozens of them, usually inside a hidden
+    element — the hiding mechanism is CSS we strip, so left uncollapsed it
+    surfaces as a wall of visible spaces mid-paragraph), and empty spacer
+    <table> chains (email builders nest several table/tr/td levels — often
+    5-10 deep — around nothing but a stray &nbsp; purely to control layout
+    in old email clients; each becomes its own block box once the reader's
+    CSS makes tables scrollable, so left in place they stack into a wall of
+    blank vertical space). Applied only to email-sourced content — RSS feeds
+    don't share this markup pattern."""
+    if not html:
+        return html or ""
+    tree = HTMLParser(f"<body>{html}</body>")
+    for p in tree.css("p"):
+        if _is_visually_empty(p):
+            p.decompose()
+    # Bottom-up, to a fixed point: removing an innermost empty spacer table
+    # can leave its parent table empty too (that's exactly the nested-spacer
+    # shape), so keep sweeping until a pass removes nothing.
+    removed = True
+    while removed:
+        removed = False
+        for table in tree.css("table"):
+            if _is_visually_empty(table):
+                table.decompose()
+                removed = True
+    result = tree.body.html[len("<body>") : -len("</body>")] if tree.body else html
+    result = re.sub(r"(?:\s*<br\s*/?>\s*){2,}", "<br>", result)
+    result = re.sub(r"(?:&nbsp;\s*){3,}", " ", result)
+    return result
+
+
 def proxy_image_urls(html: str | None) -> str:
     """Sanitizes and rewrites every <img src> to go through /api/img — many
     sites (dapenti.com's image CDN among them) hotlink-protect on Referer,

@@ -18,7 +18,7 @@ from app.connectors.http_fetch import FetchResult, conditional_get
 from app.connectors.rss import FeedParseError, parse_feed
 from app.ingest.dedup import canonicalize_url, content_hash
 from app.ingest.rules import RawArticle, evaluate_rules
-from app.ingest.textutil import plain_text_excerpt, proxy_image_urls
+from app.ingest.textutil import plain_text_excerpt, proxy_image_urls, tighten_newsletter_whitespace
 
 Fetcher = Callable[[Source, str | None, str | None], FetchResult]
 GmailListFn = Callable[[str, str], list[str]]
@@ -83,6 +83,8 @@ def _persist_entry(
     raw_content = entry.content_html or entry.summary
     excerpt = plain_text_excerpt(raw_content, limit=EXCERPT_LIMIT)
     content_html = proxy_image_urls(raw_content)
+    if origin == "gmail":
+        content_html = tighten_newsletter_whitespace(content_html)
     matched_rule_str = (
         f"{matched_rule.action}/{matched_rule.field}/{matched_rule.pattern}" if matched_rule else None
     )
@@ -170,6 +172,24 @@ def refresh_source(conn: sqlite3.Connection, source: Source, fetcher: Fetcher) -
     }
 
 
+_GMAIL_OVERLAP_SECONDS = 300  # re-check a small trailing window on every
+# refresh so a message Gmail's search index hadn't caught up on yet during
+# the previous run isn't permanently missed. Cheap: overlap just means a
+# handful of message ids get re-listed, and _persist_entry already dedupes
+# on (source_id, guid), so re-seeing one is a no-op, not a duplicate.
+
+
+def _scoped_gmail_query(query: str, last_fetched_at: str | None) -> str:
+    """Narrows a source's Gmail query to messages since the last successful
+    refresh, so a routine refresh lists only what's new instead of
+    re-walking the source's entire configured window (e.g. `newer_than:30d`)
+    every single time."""
+    if not last_fetched_at:
+        return query
+    epoch = int(datetime.fromisoformat(last_fetched_at).timestamp()) - _GMAIL_OVERLAP_SECONDS
+    return f"{query} after:{epoch}"
+
+
 def refresh_gmail_source(
     conn: sqlite3.Connection,
     source: Source,
@@ -178,14 +198,19 @@ def refresh_gmail_source(
     get_fn: GmailGetFn = get_message,
 ) -> dict:
     """Mirrors refresh_source's shape but for Gmail: list message ids for
-    the source's query, fetch+persist only the ones not already ingested.
-    Read-only — only ever calls list/get, never touches labels or content.
+    the source's query — scoped to messages since the last successful
+    refresh — fetch+persist only the ones not already ingested. Read-only —
+    only ever calls list/get, never touches labels or content.
     """
     source_id, _, _ = get_or_create_source(conn, source)
+    last_fetched_at = conn.execute(
+        "SELECT last_fetched_at FROM sources WHERE id = ?", (source_id,)
+    ).fetchone()[0]
     now = datetime.now(UTC).isoformat()
 
+    scoped_query = _scoped_gmail_query(source.query, last_fetched_at)
     try:
-        message_ids = list_fn(access_token, source.query)
+        message_ids = list_fn(access_token, scoped_query)
     except Exception as exc:  # noqa: BLE001 — isolates this source, matches refresh_source
         conn.execute(
             "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",

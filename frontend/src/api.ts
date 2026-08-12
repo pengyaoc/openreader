@@ -112,11 +112,12 @@ async function json<T>(res: Response): Promise<T> {
 export const api = {
   sources: () => fetch('/api/sources').then((r) => json<Source[]>(r)),
 
-  articles: (params: { view?: string; source_id?: number; folder?: string }) => {
+  articles: (params: { view?: string; source_id?: number; folder?: string; offset?: number }) => {
     const qs = new URLSearchParams()
     if (params.view) qs.set('view', params.view)
     if (params.source_id) qs.set('source_id', String(params.source_id))
     if (params.folder) qs.set('folder', params.folder)
+    if (params.offset) qs.set('offset', String(params.offset))
     return fetch(`/api/articles?${qs}`).then((r) => json<Article[]>(r))
   },
 

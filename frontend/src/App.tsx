@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from '@tanstack/react-query'
 import { api, type Article, type Job, type RefreshReport, type Source } from './api'
 import type { ViewSelection } from './types'
 import { Sidebar } from './components/Sidebar'
@@ -15,12 +21,20 @@ const VIEW_TITLES: Record<string, string> = {
   starred: 'Starred',
 }
 
+// Matches the backend's default page size (app/api/articles.py) — the
+// article list is paginated, loaded a page at a time via "Load more"
+// rather than the old behavior of silently capping at the server default
+// with no way to see anything past it.
+const ARTICLES_PAGE_SIZE = 50
+
+type ArticlesPages = { pages: Article[][]; pageParams: number[] }
+
 // Patch cached article data in place rather than invalidating — marking an
 // article read should grey it out where it sits, not yank it out of the
 // "Unread" list or refetch/reflow the whole page underneath the reader.
 function patchArticleCaches(qc: QueryClient, id: number, patch: Partial<Article>) {
-  qc.setQueriesData<Article[]>({ queryKey: ['articles'] }, (old) =>
-    old?.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+  qc.setQueriesData<ArticlesPages>({ queryKey: ['articles'] }, (old) =>
+    old && { ...old, pages: old.pages.map((page) => page.map((a) => (a.id === id ? { ...a, ...patch } : a))) },
   )
   qc.setQueryData<Article>(['article', id], (prev) => (prev ? { ...prev, ...patch } : prev))
 }
@@ -33,10 +47,73 @@ function adjustSourceUnread(qc: QueryClient, sourceId: number, delta: number) {
   )
 }
 
+// The open article and current view live only in React state, so a page
+// reload always started blank — including the reload iOS Safari forces on
+// its own after a tab sits idle/backgrounded for a while, which has no
+// app-level trigger to hook and can't be prevented. Mirroring both into the
+// URL means that reload (from any cause) restores exactly where the reader
+// was, and it doubles as a shareable/bookmarkable link to a specific
+// article. `source` selection's title isn't known until sources load, so
+// it round-trips as an id and gets its title filled in by an effect below.
+function selectionToQueryValue(selection: ViewSelection): string {
+  if (selection.kind === 'saved') return `view:${selection.view}`
+  if (selection.kind === 'source') return `source:${selection.sourceId}`
+  return `folder:${encodeURIComponent(selection.folder)}`
+}
+
+function parseSelectionFromQuery(value: string | null): ViewSelection | null {
+  if (!value) return null
+  const sep = value.indexOf(':')
+  if (sep === -1) return null
+  const kind = value.slice(0, sep)
+  const raw = value.slice(sep + 1)
+  if (kind === 'view' && (raw === 'all' || raw === 'unread' || raw === 'starred')) {
+    return { kind: 'saved', view: raw }
+  }
+  if (kind === 'source') {
+    const sourceId = Number(raw)
+    if (!Number.isNaN(sourceId)) return { kind: 'source', sourceId, title: '' }
+  }
+  if (kind === 'folder' && raw) {
+    return { kind: 'folder', folder: decodeURIComponent(raw) }
+  }
+  return null
+}
+
+// Second, independent persistence layer for the same state, alongside the
+// URL. Needed because third-party iOS browsers (Chrome, Firefox, Edge — all
+// required by Apple to run on WKWebView) don't reliably sync
+// history.replaceState back to their own native tab-restoration
+// bookkeeping: when the OS reclaims a backgrounded tab's memory and the
+// browser later reloads it, it can revert to an older URL than the page's
+// actual last state. sessionStorage is a plain per-tab write with no
+// dependency on the navigation stack, so it survives that class of bug.
+// Stores the whole selection object (title included), so restoring from it
+// skips the URL path's title-backfill-after-sources-load step entirely.
+const STORAGE_KEY = 'reader-view-state'
+
+function readStoredViewState(): { selection: ViewSelection | null; articleId: number | null } {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_KEY)
+    if (!raw) return { selection: null, articleId: null }
+    const parsed = JSON.parse(raw)
+    return { selection: parsed.selection ?? null, articleId: parsed.articleId ?? null }
+  } catch {
+    return { selection: null, articleId: null }
+  }
+}
+
 export default function App() {
   const qc = useQueryClient()
-  const [selection, setSelection] = useState<ViewSelection>({ kind: 'saved', view: 'unread' })
-  const [openArticleId, setOpenArticleId] = useState<number | null>(null)
+  const [selection, setSelection] = useState<ViewSelection>(() => {
+    const fromUrl = parseSelectionFromQuery(new URLSearchParams(window.location.search).get('sel'))
+    return fromUrl ?? readStoredViewState().selection ?? { kind: 'saved', view: 'unread' }
+  })
+  const [openArticleId, setOpenArticleId] = useState<number | null>(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get('article')
+    if (fromUrl) return Number(fromUrl)
+    return readStoredViewState().articleId
+  })
   const [cursorId, setCursorId] = useState<number | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
   const [addSourceOpen, setAddSourceOpen] = useState(false)
@@ -55,15 +132,45 @@ export default function App() {
   const sourcesQuery = useQuery({ queryKey: ['sources'], queryFn: api.sources })
   const topicsQuery = useQuery({ queryKey: ['topics'], queryFn: api.topics })
 
+  // A source selection restored from the URL only has the id (see
+  // parseSelectionFromQuery) — fill in its title once sources have loaded.
+  useEffect(() => {
+    if (selection.kind === 'source' && selection.title === '' && sourcesQuery.data) {
+      const src = sourcesQuery.data.find((s) => s.id === selection.sourceId)
+      if (src) setSelection({ kind: 'source', sourceId: src.id, title: src.title })
+    }
+  }, [selection, sourcesQuery.data])
+
+  // Keep both persistence layers mirroring current view + open article, so
+  // a reload (from any cause, including a backgrounded tab's memory being
+  // reclaimed) restores it. Two independent layers because the URL one
+  // alone isn't reliable on iOS third-party browsers — see
+  // readStoredViewState's comment above for why.
+  useEffect(() => {
+    const params = new URLSearchParams()
+    params.set('sel', selectionToQueryValue(selection))
+    if (openArticleId !== null) params.set('article', String(openArticleId))
+    const qs = params.toString()
+    window.history.replaceState(null, '', qs ? `${window.location.pathname}?${qs}` : window.location.pathname)
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ selection, articleId: openArticleId }))
+    } catch {
+      /* storage unavailable (private browsing etc) — URL sync above still covers normal reloads */
+    }
+  }, [selection, openArticleId])
+
   const listParams = useMemo(() => {
     if (selection.kind === 'saved') return { view: selection.view }
     if (selection.kind === 'source') return { view: 'all', source_id: selection.sourceId }
     return { view: 'all', folder: selection.folder }
   }, [selection])
 
-  const articlesQuery = useQuery({
+  const articlesQuery = useInfiniteQuery({
     queryKey: ['articles', listParams],
-    queryFn: () => api.articles(listParams),
+    queryFn: ({ pageParam }) => api.articles({ ...listParams, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length === ARTICLES_PAGE_SIZE ? allPages.length * ARTICLES_PAGE_SIZE : undefined,
   })
 
   const openArticleQuery = useQuery({
@@ -161,7 +268,7 @@ export default function App() {
 
   const closeArticle = useCallback(() => setOpenArticleId(null), [])
 
-  const articles = articlesQuery.data ?? []
+  const articles = useMemo(() => articlesQuery.data?.pages.flat() ?? [], [articlesQuery.data])
 
   // openArticleQuery.data is undefined for a beat whenever openArticleId
   // changes (React Query resets it while the new query loads) — without a
@@ -266,11 +373,21 @@ export default function App() {
             </button>
             <div>
               <span className="main__title">{headerTitle}</span>
-              <span className="main__title-count">{articles.length} items</span>
+              <span className="main__title-count">
+                {articles.length}
+                {articlesQuery.hasNextPage ? '+' : ''} items
+              </span>
             </div>
           </div>
         </div>
-        <ArticleList articles={articles} selectedId={cursorId} onOpen={openArticle} />
+        <ArticleList
+          articles={articles}
+          selectedId={cursorId}
+          onOpen={openArticle}
+          hasMore={articlesQuery.hasNextPage}
+          loadingMore={articlesQuery.isFetchingNextPage}
+          onLoadMore={() => articlesQuery.fetchNextPage()}
+        />
       </div>
 
       {openArticleId !== null && openArticleDisplayData && (
