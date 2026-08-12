@@ -7,7 +7,7 @@ from pathlib import Path
 from app.config import Rule, Source
 from app.connectors.http_fetch import FetchResult
 from app.db import connect, init_schema
-from app.ingest.refresh import refresh_all, refresh_gmail_source
+from app.ingest.refresh import refresh_all, refresh_gmail_source, refresh_imap_source
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -287,3 +287,173 @@ def test_refresh_gmail_source_records_error_when_list_fails(tmp_path):
     assert report["status"] == "error"
     row = conn.execute("SELECT last_error FROM sources WHERE key='newsletters'").fetchone()
     assert row[0] and "auth expired" in row[0]
+
+
+def make_imap_message(message_id: str, subject: str, html: str = "<p>body</p>") -> bytes:
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Message-Id"] = f"<{message_id}@newsletter.example.com>"
+    msg["Subject"] = subject
+    msg["From"] = "Sender <sender@example.com>"
+    msg["Date"] = "Tue, 11 Aug 2026 05:30:24 +0000"
+    msg.set_content(html, subtype="html")
+    return bytes(msg)
+
+
+def test_refresh_imap_source_persists_new_messages(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
+
+    messages = {"1": make_imap_message("m1", "First newsletter")}
+    report = refresh_imap_source(
+        conn,
+        source,
+        imap_client=object(),  # unused directly — search_fn/fetch_fn are injected below
+        search_fn=lambda client, folder, **kw: list(messages.keys()),
+        fetch_fn=lambda client, mid: messages[mid],
+    )
+
+    assert report["status"] == "ok"
+    assert report["new"] == 1
+    row = conn.execute("SELECT title, origin FROM articles").fetchone()
+    assert row[0] == "First newsletter"
+    assert row[1] == "gmail"  # reuses the gmail origin category for mail-sourced articles
+
+
+def test_refresh_imap_source_dedupes_by_message_guid_even_when_refetched(tmp_path):
+    # Unlike Gmail's stable message id, IMAP sequence/UID numbers aren't a
+    # reliable cross-session guid, so refresh_imap_source can't skip a
+    # FETCH the way refresh_gmail_source skips a messages.get — it dedupes
+    # only after parsing, on the message's own Message-Id. That means a
+    # second refresh will refetch, but must still land zero new rows.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
+    messages = {"1": make_imap_message("m1", "First newsletter")}
+
+    refresh_imap_source(
+        conn, source, imap_client=object(),
+        search_fn=lambda client, folder, **kw: ["1"],
+        fetch_fn=lambda client, mid: messages[mid],
+    )
+    refresh_imap_source(
+        conn, source, imap_client=object(),
+        search_fn=lambda client, folder, **kw: ["1"],
+        fetch_fn=lambda client, mid: messages[mid],
+    )
+
+    row = conn.execute("SELECT COUNT(*) FROM articles").fetchone()
+    assert row[0] == 1
+
+
+def test_refresh_imap_source_applies_rules(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(
+        key="newsletters",
+        type="imap",
+        title="Newsletters",
+        folder="Test",
+        query="",
+        rules=[Rule(action="exclude", field="title", pattern="(?i)spam")],
+    )
+    messages = {
+        "1": make_imap_message("m1", "Real newsletter"),
+        "2": make_imap_message("m2", "This is Spam"),
+    }
+    report = refresh_imap_source(
+        conn, source, imap_client=object(),
+        search_fn=lambda client, folder, **kw: list(messages.keys()),
+        fetch_fn=lambda client, mid: messages[mid],
+    )
+
+    assert report["new"] == 1
+    assert report["filtered"] == 1
+
+
+def test_refresh_imap_source_isolates_a_single_bad_message(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
+    messages = {"1": make_imap_message("m1", "Good one")}
+
+    def fetch_fn(client, mid):
+        if mid == "bad":
+            raise ConnectionError("boom")
+        return messages[mid]
+
+    report = refresh_imap_source(
+        conn, source, imap_client=object(),
+        search_fn=lambda client, folder, **kw: ["bad", "1"],
+        fetch_fn=fetch_fn,
+    )
+
+    assert report["new"] == 1
+    row = conn.execute("SELECT COUNT(*) FROM articles").fetchone()
+    assert row[0] == 1
+
+
+def test_refresh_imap_source_scopes_since_to_last_fetch(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
+    messages = {"1": make_imap_message("m1", "First newsletter")}
+    sinces_seen = []
+
+    def search_fn(client, folder, since=None, **kw):
+        sinces_seen.append(since)
+        return list(messages.keys())
+
+    refresh_imap_source(conn, source, imap_client=object(), search_fn=search_fn, fetch_fn=lambda c, m: messages[m])
+    refresh_imap_source(conn, source, imap_client=object(), search_fn=search_fn, fetch_fn=lambda c, m: messages[m])
+
+    # First refresh has no last_fetched_at yet, so `since` falls back to the
+    # default window; second refresh scopes to just after the first's
+    # recorded last_fetched_at — strictly later than the first `since`.
+    assert sinces_seen[1] > sinces_seen[0]
+
+
+def test_refresh_imap_source_records_error_when_search_fails(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
+
+    def failing_search(client, folder, **kw):
+        raise ConnectionError("login expired")
+
+    report = refresh_imap_source(
+        conn, source, imap_client=object(), search_fn=failing_search, fetch_fn=lambda c, m: {}
+    )
+
+    assert report["status"] == "error"
+    row = conn.execute("SELECT last_error FROM sources WHERE key='newsletters'").fetchone()
+    assert row[0] and "login expired" in row[0]
+
+
+def test_refresh_imap_source_uses_configured_mailbox_folder(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(
+        key="newsletters", type="imap", title="Newsletters", folder="Test",
+        query="", mailbox_folder="Newsletters",
+    )
+    folders_seen = []
+
+    def search_fn(client, folder, **kw):
+        folders_seen.append(folder)
+        return []
+
+    refresh_imap_source(conn, source, imap_client=object(), search_fn=search_fn, fetch_fn=lambda c, m: {})
+    assert folders_seen == ["Newsletters"]
+
+
+def test_refresh_all_reports_error_when_imap_not_configured(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
+
+    report = refresh_all(conn, [source], fetcher=lambda *a: None, imap_client=None)
+    assert report["sources"][0]["status"] == "error"
+    assert "IMAP not configured" in report["sources"][0]["error"]

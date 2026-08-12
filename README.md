@@ -81,6 +81,8 @@ Environment variables (all optional, sensible defaults):
 | `READER_DB` | `data/reader.db` |
 | `READER_MEDIA` | `data/media` |
 | `READER_GMAIL_TOKEN` | `data/token.json` |
+| `READER_IMAP_HOST` / `_USER` / `_PASSWORD` | unset — required together for `type: imap` sources |
+| `READER_READONLY_CONFIG` | unset — set to `1` to make `PUT /api/config` return 403 |
 
 ### Gmail (optional)
 

@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import type { Article } from '../api'
+import { API_BASE, type Article } from '../api'
 
 interface Citation {
   title: string
@@ -24,6 +24,18 @@ function fullDate(iso: string | null): string {
     month: 'long',
     day: 'numeric',
   })
+}
+
+// Article bodies are sanitized server-side at ingest time with every
+// <img src> already rewritten to the root-absolute path "/api/img?url=..."
+// (backend/app/ingest/textutil.py's proxy_image_urls) — that happened once,
+// so existing rows in the DB carry the unprefixed path regardless of which
+// base this build is served from. Prefixing it here at render time, rather
+// than in the backend or via a migration, covers both existing and future
+// rows with one change. A no-op when API_BASE is '' (root deploy/dev).
+function withApiBase(html: string): string {
+  if (!API_BASE) return html
+  return html.replaceAll('"/api/img?', `"${API_BASE}/api/img?`)
 }
 
 export function ArticleReader({
@@ -130,7 +142,7 @@ export function ArticleReader({
             <div
               className="reader-body"
               dangerouslySetInnerHTML={{
-                __html: article.content_html || `<p>${article.excerpt}</p>`,
+                __html: withApiBase(article.content_html || `<p>${article.excerpt}</p>`),
               }}
             />
           )}

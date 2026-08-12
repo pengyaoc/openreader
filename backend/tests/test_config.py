@@ -111,3 +111,49 @@ def test_to_yaml_preserves_appended_source():
     assert len(reparsed.sources) == 1
     assert reparsed.sources[0].key == "new-src"
     assert reparsed.sources[0].rules[0].pattern == "(?i)ad"
+
+
+def test_imap_source_type_parses_without_requiring_query():
+    config = parse_config(
+        """
+sources:
+  - key: newsletters
+    type: imap
+    title: Newsletters
+    folder: Newsletters
+    mailbox_folder: INBOX
+"""
+    )
+    assert config.sources[0].type == "imap"
+    assert config.sources[0].mailbox_folder == "INBOX"
+
+
+def test_rejects_a_password_field_on_a_source():
+    # feeds.yaml is served verbatim, unauthenticated, by GET /api/config —
+    # a credential written into it would be published at that URL.
+    with pytest.raises(ConfigError, match="looks like a credential"):
+        parse_config(
+            """
+sources:
+  - key: newsletters
+    type: imap
+    title: Newsletters
+    folder: Newsletters
+    password: hunter2
+"""
+        )
+
+
+def test_rejects_credential_like_fields_case_insensitively_and_variants():
+    for field in ("Password", "API_KEY", "apiKey", "secret", "auth_token", "credential"):
+        with pytest.raises(ConfigError, match="looks like a credential"):
+            parse_config(
+                f"""
+sources:
+  - key: newsletters
+    type: imap
+    title: Newsletters
+    folder: Newsletters
+    {field}: x
+"""
+            )

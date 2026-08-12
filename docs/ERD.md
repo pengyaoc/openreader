@@ -48,9 +48,11 @@ else — article list, sources, config, job status — is a local SQLite read.
 backend/app/
 ├── main.py            # Starlette app factory, route table
 ├── asgi.py             # production entrypoint (uvicorn app.asgi:app)
-├── settings.py         # env-driven paths (DB, config, media, gmail token)
+├── settings.py         # env-driven paths (DB, config, media, gmail token,
+│                        # IMAP host/user/password, readonly-config flag)
 ├── config.py            # msgspec Config/Source/Rule/Topic structs,
-│                        # YAML parse+validate+serialize (to_yaml)
+│                        # YAML parse+validate+serialize (to_yaml),
+│                        # credential-key guard (see §5)
 ├── db.py                # schema (see §3), WAL connection factory
 ├── store.py             # read/write helpers used by the API layer
 ├── connectors/
@@ -58,7 +60,10 @@ backend/app/
 │   ├── rss.py             # Atom/RSS2.0/RDF parser (defusedxml)
 │   ├── dates.py           # RFC822 + ISO8601 -> canonical UTC ISO string
 │   ├── http_fetch.py       # conditional-GET wrapper (ETag/Last-Modified)
-│   └── gmail.py             # Gmail REST client + MIME parser
+│   ├── gmail.py             # Gmail REST client + MIME parser (OAuth)
+│   └── imap.py               # plain IMAP client + MIME parser (app
+│                              # password) — type=imap, the no-OAuth-expiry
+│                              # alternative to gmail.py (see §5)
 ├── ingest/
 │   ├── rules.py             # regex include/exclude engine (pure)
 │   ├── dedup.py              # URL canonicalization + content hash (pure)
@@ -81,7 +86,7 @@ Design rule followed throughout: **pure logic is separated from I/O** and
 every I/O boundary (HTTP fetch, subprocess call, Gmail API) is injectable
 in tests via a `Fetcher`/`Runner`/`GenerateFn`-style callable parameter, so
 the entire pipeline is unit-tested without a real network call or
-subprocess spawn. 136 backend tests, zero of which touch the network.
+subprocess spawn. 179 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
@@ -269,6 +274,66 @@ tables would otherwise compound into large blank gaps), and fully empty
 table chains are pruned the same way empty `<p>` spacers are
 (`ingest/textutil.tighten_newsletter_whitespace`).
 
+**Image proxy re-validates every redirect hop, not just the original
+URL.** Found while evaluating internet-facing deployment: `/api/img` took
+any URL from an unauthenticated request and fetched it server-side with
+`follow_redirects=True` — a direct forwarder into the host's own
+localhost or a cloud provider's internal metadata network if pointed at
+one. `_assert_safe_url` resolves the hostname and rejects loopback,
+private, link-local, multicast, and reserved addresses; `follow_redirects`
+is replaced with a manual loop (capped at 3 hops) that re-runs the same
+check on every `Location` header, since a redirect from an otherwise-public
+host is exactly how the direct check gets bypassed. Known accepted gap:
+this isn't atomic with the actual connection, so a DNS record that changes
+between the check and httpx's own connect (rebinding) isn't covered —
+closing that needs a custom transport pinning the resolved IP, out of
+scope for what's actually been seen against open image proxies in the
+wild.
+
+**`feeds.yaml` fields are checked against a credential-shaped-key
+denylist at parse time.** `GET /api/config` serves the file's raw
+contents unauthenticated by design (the structured "Add source" UI and
+the raw-YAML editor both round-trip through it). msgspec's `Config`
+struct silently *drops* unknown fields on convert rather than rejecting
+them — verified directly, not assumed — so a `password:`/`token:`/etc.
+key smuggled into a source would previously have been accepted, silently
+stripped from the parsed `Config`, but still sitting in the file on disk
+and re-served by the next `GET`. `_check_no_credentials` runs against the
+raw parsed YAML dict, before struct conversion would hide the problem,
+and `parse_config` raises `ConfigError` rather than allowing the write.
+
+**`READER_READONLY_CONFIG` is a deployment-time flag, not a permission
+system.** v1 has no auth anywhere — `PUT /api/config` is reachable by
+anyone who can reach the port. That's an acceptable LAN-only default, but
+not once the app is reachable from the internet: the same endpoint can
+rewrite the entire source list *and*, since it also assigns
+`app.state.config`, flip `llm.enabled` back on at runtime regardless of
+what's on disk. Rather than build real auth for a single-user app, the
+flag makes the endpoint hard-403 on deployments where it doesn't belong;
+config there gets edited by editing the file directly (SSH), which is
+already how the file's owner interacts with the box.
+
+**`type: imap` exists specifically because Google expires OAuth refresh
+tokens after 7 days for unverified apps.** Discovered when planning an
+unattended deployment: any app in "Testing" publishing status — which
+personal/hobby OAuth clients stay in indefinitely — has every refresh
+token revoked after a week, and escaping that for a *restricted* scope
+like `gmail.readonly` requires full Google verification plus a paid CASA
+security assessment. Re-running `scripts/gmail_auth.py` by hand every
+week is viable on a laptop, not on a box meant to run unattended.
+`connectors/imap.py` is the same `NormalizedEntry`-producing shape as
+`gmail.py` (parse_message mirrors `_find_body`'s multipart-walk contract
+exactly) but authenticates with a Google app password over plain
+`IMAP4_SSL` — no token, no expiry, no Cloud project. Its `parse_query`
+understands the same `from:`/`subject:`/`newer_than:Nd` tokens a
+`type: gmail` source's query already used, so migrating a source is
+changing one field, not rewriting config. Deliberately paired with a
+dedicated, throwaway mailbox rather than the user's real inbox: an app
+password isn't scoped per-protocol the way OAuth is — it authorizes SMTP
+too, not just IMAP read access — so the blast radius of the credential
+living on a deployed box is bounded by what's *in* that mailbox, not by
+the credential's own scope.
+
 **Dependency minimalism.** Deliberately avoided FastAPI/pydantic
 (Starlette + msgspec instead), feedparser (stdlib `defusedxml.ElementTree`
 + a ~150-line normalizer instead), and the Google API client library
@@ -308,4 +373,54 @@ auth script, never by the server.
   after placing a Google Cloud OAuth client secret at
   `config/gmail_client_secret.json` (gitignored). Writes
   `data/token.json` (gitignored); the server reads it at refresh time and
-  never touches it otherwise.
+  never touches it otherwise. Requires re-running weekly on an unattended
+  deployment (see §5's `type: imap` entry) — not used for the VM below.
+
+### 7.1 Co-hosted VM deployment (`pengyaochen.com/reader/`)
+
+Runs alongside an existing WordPress site on a single e2-micro (1 GB RAM).
+Full history of the tradeoffs and what was found along the way is in
+`docs/WORKLOG.md`, 2026-08-12; this is the resulting shape.
+
+- **Path-prefixed, not subdomain.** Reuses the existing vhost/cert instead
+  of provisioning a new one. `vite.config.ts`'s `base` is
+  `VITE_BASE=/reader/` at build time; `frontend/src/api.ts` reads it back
+  via `import.meta.env.BASE_URL` into an `API_BASE` constant prefixed onto
+  every `fetch` call. Apache's `ProxyPass`/`ProxyPassReverse` strips the
+  prefix before the request reaches uvicorn, so **the backend has zero
+  `/reader/` awareness** — `content_html`'s baked-in `/api/img?url=...`
+  (written once at ingest by `textutil.proxy_image_urls`) is rewritten to
+  the prefixed path client-side, at render time, in
+  `ArticleReader.tsx`'s `withApiBase` — the one `dangerouslySetInnerHTML`
+  site — rather than server-side or via a DB migration.
+- **Build artifacts pushed, not pulled.** `scripts/deploy.sh` runs
+  entirely on the developer's machine: typecheck, `pytest`, `VITE_BASE=/reader/
+  npm run build`, then the backend source + `frontend/dist` go up via
+  `gcloud compute scp` and land via `cp` (not `rsync` — the VM's apt broke
+  when Debian 10/buster was archived at EOL, so nothing gets installed to
+  fix that). Node/Vite never run on the VM. `git pull` isn't used either —
+  deliberately: it wouldn't help with the build problem, and a laptop-side
+  gate (tests fail → nothing ships) beats a VM that can end up mid-broken-
+  state from a bad pull.
+  `uv sync` on the VM resolves prebuilt `manylinux` wheels for
+  `nh3`/`selectolax`/`msgspec`/`uvloop` — no Rust toolchain needed, which
+  matters on a box this constrained.
+- **`openreader` runs as a systemd `--user` unit**, not a system service —
+  no root involvement in routine deploys/restarts. Needs
+  `loginctl enable-linger openreader` once so the unit survives an SSH
+  logout, and the sandboxing directives (`ProtectSystem=strict`,
+  `MemoryMax=300M`, etc.) that would normally need root to install are
+  applied the same way a system unit would, at the cost of the
+  credential file being owned by that user rather than root (a user
+  manager can only read files it owns) — see §5's IMAP entry for why the
+  credential in that file is scoped to a throwaway mailbox specifically
+  because of this.
+- **`READER_READONLY_CONFIG=1`** and **`llm.enabled: false`** are both set
+  on this deployment — the former per §5, the latter because the `claude`
+  CLI subprocess (Node, 300–600 MB, up to 10 minutes) is the one thing
+  that would reliably OOM a 1 GB box also running Apache/MySQL/PHP-FPM.
+- Verified live end-to-end post-deploy: real RSS refresh (conditional-GET
+  304s and dedup both confirmed against real feed servers, not just
+  fixtures), the SSRF guard rejecting a loopback/metadata `/api/img` URL,
+  `PUT /api/config` 403ing, and all four `type: imap` sources
+  authenticating against a dedicated mailbox over real TLS.

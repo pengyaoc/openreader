@@ -1,6 +1,12 @@
 // Typed fetch client for the reader backend. No abstraction beyond what's
 // needed — TanStack Query owns caching, this owns the wire format.
 
+// '/' locally and on LAN; '/reader/' when built for the VM's Apache
+// ProxyPass mount (see vite.config.ts's `base`). import.meta.env.BASE_URL
+// always has a trailing slash, so strip it once here rather than at every
+// call site.
+export const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, '')
+
 export type ArticleOrigin = 'feed' | 'gmail' | 'llm'
 
 export interface Article {
@@ -110,7 +116,7 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  sources: () => fetch('/api/sources').then((r) => json<Source[]>(r)),
+  sources: () => fetch(`${API_BASE}/api/sources`).then((r) => json<Source[]>(r)),
 
   articles: (params: { view?: string; source_id?: number; folder?: string; offset?: number }) => {
     const qs = new URLSearchParams()
@@ -118,49 +124,53 @@ export const api = {
     if (params.source_id) qs.set('source_id', String(params.source_id))
     if (params.folder) qs.set('folder', params.folder)
     if (params.offset) qs.set('offset', String(params.offset))
-    return fetch(`/api/articles?${qs}`).then((r) => json<Article[]>(r))
+    return fetch(`${API_BASE}/api/articles?${qs}`).then((r) => json<Article[]>(r))
   },
 
-  article: (id: number) => fetch(`/api/articles/${id}`).then((r) => json<Article>(r)),
+  article: (id: number) => fetch(`${API_BASE}/api/articles/${id}`).then((r) => json<Article>(r)),
 
   markRead: (id: number) =>
-    fetch(`/api/articles/${id}/read`, { method: 'POST' }).then((r) => json<{ ok: boolean }>(r)),
+    fetch(`${API_BASE}/api/articles/${id}/read`, { method: 'POST' }).then((r) =>
+      json<{ ok: boolean }>(r),
+    ),
 
   toggleStar: (id: number) =>
-    fetch(`/api/articles/${id}/star`, { method: 'POST' }).then((r) =>
+    fetch(`${API_BASE}/api/articles/${id}/star`, { method: 'POST' }).then((r) =>
       json<{ is_starred: boolean }>(r),
     ),
 
   toggleRead: (id: number) =>
-    fetch(`/api/articles/${id}/toggle-read`, { method: 'POST' }).then((r) =>
+    fetch(`${API_BASE}/api/articles/${id}/toggle-read`, { method: 'POST' }).then((r) =>
       json<{ is_read: boolean }>(r),
     ),
 
   refresh: (sourceKey?: string) =>
-    fetch(`/api/refresh${sourceKey ? `?source=${encodeURIComponent(sourceKey)}` : ''}`, {
-      method: 'POST',
-    }).then((r) => json<RefreshReport>(r)),
+    fetch(
+      `${API_BASE}/api/refresh${sourceKey ? `?source=${encodeURIComponent(sourceKey)}` : ''}`,
+      { method: 'POST' },
+    ).then((r) => json<RefreshReport>(r)),
 
   addSource: (source: NewSource) =>
-    fetch('/api/sources', {
+    fetch(`${API_BASE}/api/sources`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(source),
     }).then((r) => json<{ ok: boolean; key: string }>(r)),
 
-  topics: () => fetch('/api/topics').then((r) => json<{ enabled: boolean; topics: Topic[] }>(r)),
+  topics: () =>
+    fetch(`${API_BASE}/api/topics`).then((r) => json<{ enabled: boolean; topics: Topic[] }>(r)),
 
   generateTopic: (key: string) =>
-    fetch(`/api/topics/${encodeURIComponent(key)}/generate`, { method: 'POST' }).then((r) =>
-      json<{ job_id: number }>(r),
+    fetch(`${API_BASE}/api/topics/${encodeURIComponent(key)}/generate`, { method: 'POST' }).then(
+      (r) => json<{ job_id: number }>(r),
     ),
 
-  getJob: (id: number) => fetch(`/api/jobs/${id}`).then((r) => json<Job>(r)),
+  getJob: (id: number) => fetch(`${API_BASE}/api/jobs/${id}`).then((r) => json<Job>(r)),
 
-  getConfig: () => fetch('/api/config').then((r) => json<{ yaml: string }>(r)),
+  getConfig: () => fetch(`${API_BASE}/api/config`).then((r) => json<{ yaml: string }>(r)),
 
   putConfig: (yaml: string) =>
-    fetch('/api/config', {
+    fetch(`${API_BASE}/api/config`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ yaml }),

@@ -381,3 +381,178 @@ article/browser the user reported, not a generic pass — the stale-build
 bug in particular would have been invisible without re-testing the exact
 one that was reported broken instead of trusting the previous general
 fix.
+
+## 2026-08-12 — Co-hosting on the WordPress VM: hardening, IMAP connector, live deploy
+
+Request: *"Evaluate how my app can co-live on my e2-micro vm with my
+wordpress site."* Not a feature request — a deployment feasibility
+question that turned into real app changes once the answer was "yes, but
+not safely as either side currently stands."
+
+**VM audit first.** `wordpress-1-vm` (e2-micro, 1 GB RAM) had 985 MB
+total, 246 MB available, and swap 70% consumed — before OpenReader added
+anything. Root cause wasn't WordPress: `google_osconfig_agent` was
+holding 316 MB `RssAnon`, accumulated over 1389 days of uptime with no
+reboot. Apache's `MaxRequestWorkers 150` (~7.5 MB each) was also sized for
+a box with far more headroom than this one has.
+
+**Exposure review, before writing any deploy config.** Asked *"How can I
+keep the site safe though? It can pull my gmail. We need some auth
+gating."* Two real problems surfaced from reading the actual code, not
+assumption:
+- `PUT /api/config` (`config_api.py`) is an unauthenticated arbitrary
+  write to `feeds.yaml`. Chained with a Gmail source's OAuth token
+  (`gmail.readonly`, whole-mailbox), three unauthenticated requests
+  (write a source with an empty query → refresh → read articles) would
+  expose the entire inbox to anyone who found the URL.
+- `/api/img` validated only the URL *scheme*, with
+  `follow_redirects=True` — an open SSRF forwarder into the box's own
+  localhost or a cloud metadata endpoint.
+
+Explored WordPress-login reuse for the `/reader/` path first (`mod_authn_dbd`
+can't verify WordPress's phpass hashes, PHP-FPM's `mod_authnz_fcgi` only
+implements the FastCGI *Responder* role, not *Authorizer* — genuinely not
+available on stock Apache 2.4 without adding an OIDC plugin to an
+otherwise-stock WP install). Then the actual pivot, from the user: *"we
+can use a new clean email address to sign up for newsletters without any
+private information... the site doesn't have to be deeply secured."*
+Fixes the problem structurally (no whole-mailbox credential on an
+internet-facing box) rather than by layering auth in front of one.
+
+**That surfaced a second, unrelated blocker:** Google expires OAuth
+refresh tokens after 7 days for any app in "Testing" publishing status —
+true for personal OAuth clients indefinitely, since escaping it for a
+restricted scope (`gmail.readonly`) needs full verification + a paid CASA
+audit. Not viable, and re-running `scripts/gmail_auth.py` by hand weekly
+defeats the point of an unattended deployment. Landed on IMAP + a Google
+app password against the dedicated mailbox instead — no expiry, no Cloud
+project, no `token.json`.
+
+**Built, test-first:**
+- `connectors/imap.py` — `IMAP4_SSL`, `parse_message`/`parse_query` pure
+  functions mirroring `gmail.py`'s contract exactly (same
+  `NormalizedEntry` shape, same multipart-walk logic, same
+  `from:`/`subject:`/`newer_than:Nd` query tokens) so an existing
+  `type: gmail` source becomes `type: imap` by changing one field.
+  `refresh_imap_source` in `refresh.py`, dispatched from `refresh_all`.
+  IMAP debug stays at 0 always — `imaplib`'s debug output echoes `LOGIN`,
+  password included.
+- `_check_no_credentials` in `config.py` — found while implementing the
+  "credentials never in feeds.yaml" rule: msgspec's `Config.convert`
+  silently *drops* unknown fields rather than rejecting them (verified,
+  not assumed), so a `password:` key smuggled into a source would
+  previously have parsed clean and been re-served by the next unauthenticated
+  `GET /api/config`. Now `parse_config` rejects any credential-shaped key
+  before struct conversion could hide it.
+- SSRF guard on `/api/img` (`images.py`) — resolves the hostname, rejects
+  loopback/private/link-local/multicast/reserved addresses, and — since a
+  redirect from an otherwise-public host is exactly how a same-request
+  check gets bypassed — replaces `follow_redirects=True` with a manual,
+  re-validated hop loop (max 3).
+- `READER_READONLY_CONFIG` — `PUT /api/config` 403s when set. Not just the
+  write itself: the endpoint also assigns `app.state.config`, so it could
+  otherwise flip `llm.enabled` back on at runtime regardless of what's on
+  disk.
+- Path-prefix support for serving under `/reader/` instead of a
+  subdomain: `vite.config.ts`'s `base`, an `API_BASE` constant in
+  `api.ts` read from `import.meta.env.BASE_URL`, and a `withApiBase`
+  rewrite in `ArticleReader.tsx` for the `/api/img?...` URLs already
+  baked into stored `content_html` at ingest time. The backend stays
+  completely unaware of the prefix — Apache strips it before uvicorn ever
+  sees the request.
+
+179 backend tests passing throughout (147 pre-existing + 32 new: IMAP
+parsing/refresh, the credential guard, the SSRF guard, the readonly-config
+lock). Verified locally both as root (`scripts/serve.sh`-style) and built
+with `VITE_BASE=/reader/`, including grepping the minified bundle to
+confirm `API_BASE` actually resolved to `/reader/` rather than trusting
+the build not to silently fall back to `/`.
+
+**Deploy mechanics, decided explicitly rather than defaulted into.**
+First instinct was "VM pulls from GitHub and runs a cmd" — reasonable
+until walking through it: `frontend/dist/` is gitignored on purpose (Vite/
+tsc spike memory, and there's no Node on the VM), so a bare `git pull`
+would never update the frontend, and installing Node to build there
+reopens the exact memory risk the plan was written to avoid. Landed on
+push instead: `scripts/deploy.sh` runs entirely on the laptop (typecheck,
+`pytest`, build), then ships finished artifacts up via `gcloud compute
+scp` — no git, no Node, no build tooling on the VM at all, and a broken
+build never reaches it. Real cost, noted rather than ignored: no
+`git log`-style audit trail of what's live on the box, since rsync/cp just
+overwrite files. Mitigated the cheap way (a `VERSION` stamp), not by
+adopting pull.
+
+Hit the environment mid-implementation: the VM's `rsync` isn't installed,
+and `apt` has been broken since Debian 10/buster was archived at EOL
+(confirmed: `E: The repository ... no longer has a Release file`). Fixing
+apt was explicitly out of scope from the earlier VM-hygiene decision
+("fix memory + Apache only"), so `deploy.sh`'s remote install step uses
+`cp`/`rm` instead — already on the box, no package install needed either
+way.
+
+**Live provisioning**, snapshotted first (`wordpress-1-vm-pre-openreader-
+20260812-1011`) since this VM hadn't rebooted in 1389 days:
+- Disabled `google-osconfig-agent` (reclaimed the 316 MB), capped Apache
+  to `MaxRequestWorkers 16`, grew swap 512 MB → 2 GB, rebooted — first
+  reboot on this box in four years, came back clean, WordPress verified
+  200 the whole way through each step.
+- `openreader` system user, `uv` installed for that user, a systemd
+  `--user` unit (`loginctl enable-linger openreader` so it survives
+  logout), Apache `proxy_http` + a `ProxyPass /reader/ →
+  127.0.0.1:8787/` block added to the existing `wordpress-https.conf`.
+- First `scripts/deploy.sh` run: `uv sync` resolved 25 packages entirely
+  from prebuilt wheels (no `nh3`/`selectolax` source compile needed — the
+  preflight concern from planning didn't materialize). Initial 503 was
+  Apache reaching the backend before `uv sync` had finished on a cold
+  start, not a real failure — resolved on retry.
+- End-to-end verification against the *live* deployment, not just tests:
+  triggered a real refresh (60 articles landed from 9 working RSS sources;
+  `uber-eng` 406s — Uber's own blog blocking bare requests, pre-existing
+  and unrelated), confirmed conditional-GET/dedup idempotency by
+  accidentally triggering the same refresh twice (a parsing bug in my own
+  verification script masked that the first POST had already succeeded —
+  the second call correctly reported `not_modified`/`new: 0` for
+  everything the first had just fetched, which is exactly the intended
+  behavior, live, against real feed servers, not just fixtures), and
+  confirmed the SSRF guard, the readonly-config 403, and the localhost
+  bind (port 8787 unreachable from the VM's external IP) all held on the
+  real deployment.
+
+**IMAP mailbox, live.** User created `openreaderinbox@gmail.com`, enabled
+2SV, generated an app password, and — after confirming they understood
+the tradeoff of pasting it into chat rather than typing it directly on
+the VM — handed it over to write directly. Written to
+`/opt/openreader/openreader.env` (`chmod 600`, owned by the `openreader`
+user — see ERD §7.1 for why a user-manager unit means user-owned, not
+root-owned). Four `type: imap` sources added to the VM's `feeds.yaml`
+mirroring the real config's Gmail queries. All four authenticate
+successfully (`status: ok`) against real Gmail IMAP over TLS; `fetched: 0`
+across the board since the newsletters aren't subscribed to the new
+address yet — not an error, just no mail there yet.
+
+**Newsletter resubscription — partially done, stopped deliberately.**
+Attempted via `claude-in-chrome` browser automation. Robinhood Snacks has
+been folded into "Sherwood News" (still Robinhood-owned) — a bundled
+three-newsletter signup page with Snacks/Entrypoint/Scoreboard all
+pre-checked by default; unchecked the two not wanted, but flagged before
+finishing that the sender may now be a `sherwood.news` address rather
+than the `hello@snacks.robinhood.com` the existing filter matches on,
+which would need a query update regardless of how signup goes. Hit a
+real, repeated tool failure next (`Cannot access a chrome-extension://
+URL of different extension` — on screenshots, then on a basic JS
+`document.querySelector` read, on two unrelated tabs — consistent with
+another Chrome extension's popup stealing focus after a field
+interaction, not anything page-specific). Stopped rather than push
+through blind per the browser-automation guidance (retry once, then stop
+and report) — WSJ What's News and Sherwood/Snacks were left with email
+filled in but not submitted; The Batch and BiggerPockets weren't started.
+Left both tabs in a known, reported state for the user to finish by hand
+rather than guessing at unverifiable form state.
+
+No backend logic changed by the browser-automation portion — this
+paragraph is process, not code. Everything through "IMAP mailbox, live"
+above is real, verified-live app and infrastructure change; the docs/
+`.gitignore` update in this same pass added `.env`/`*.env` preemptively
+(no such file exists in the repo — the real credential only ever touched
+the VM directly — but the new `READER_IMAP_*` env vars make it likely
+someone creates a local one for testing later).

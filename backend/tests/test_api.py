@@ -252,3 +252,28 @@ def test_generate_returns_404_for_unknown_topic_even_when_enabled(monkeypatch, t
 def test_get_job_status_404_for_missing_job(client):
     resp = client.get("/api/jobs/9999")
     assert resp.status_code == 404
+
+
+def test_put_config_updates_the_config_file(client, tmp_path):
+    new_yaml = "sources:\n  - key: s1\n    type: rss\n    title: Renamed\n    folder: Test\n    url: https://x/feed\n"
+    resp = client.put("/api/config", json={"yaml": new_yaml})
+    assert resp.status_code == 200
+
+    resp = client.get("/api/config")
+    assert "Renamed" in resp.json()["yaml"]
+
+
+def test_put_config_is_blocked_when_readonly(client, monkeypatch):
+    # READER_READONLY_CONFIG is set on the VM deployment specifically
+    # because this endpoint is otherwise unauthenticated — an internet-
+    # reachable arbitrary write to feeds.yaml (and, via app.state.config,
+    # a live flip of llm.enabled back on, defeating its kill switch).
+    from app import settings
+
+    monkeypatch.setattr(settings, "READONLY_CONFIG", True)
+
+    original = client.get("/api/config").json()["yaml"]
+    resp = client.put("/api/config", json={"yaml": "sources: []\n"})
+
+    assert resp.status_code == 403
+    assert client.get("/api/config").json()["yaml"] == original  # untouched

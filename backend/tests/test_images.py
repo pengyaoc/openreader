@@ -6,7 +6,7 @@ some sites (dapenti.com) block a *foreign* Referer, others (sspai.com's
 CDN) require *a* same-site Referer to be present at all. Deriving it from
 the image URL's own host satisfies both.
 """
-from app.api.images import referer_for, sniff_image_type
+from app.api.images import SsrfBlocked, _assert_safe_url, referer_for, sniff_image_type
 
 
 def test_referer_is_the_images_own_origin():
@@ -49,3 +49,35 @@ def test_sniff_image_type_returns_none_for_non_image_bytes():
 def test_sniff_image_type_returns_none_for_empty_or_short_input():
     assert sniff_image_type(b"") is None
     assert sniff_image_type(b"\x89PN") is None
+
+
+def test_assert_safe_url_allows_a_public_host():
+    _assert_safe_url("https://example.com/a.jpg")  # must not raise
+
+
+def test_assert_safe_url_rejects_loopback():
+    try:
+        _assert_safe_url("http://127.0.0.1/x")
+        assert False, "expected SsrfBlocked"
+    except SsrfBlocked:
+        pass
+
+
+def test_assert_safe_url_rejects_gcp_metadata_address():
+    # 169.254.169.254 is link-local, not just "GCP-specific" — the guard
+    # doesn't need to special-case metadata endpoints, link-local coverage
+    # already includes them.
+    try:
+        _assert_safe_url("http://169.254.169.254/latest/meta-data/")
+        assert False, "expected SsrfBlocked"
+    except SsrfBlocked:
+        pass
+
+
+def test_assert_safe_url_rejects_private_network_ranges():
+    for url in ("http://10.0.0.5/x", "http://192.168.1.1/x", "http://172.16.0.1/x"):
+        try:
+            _assert_safe_url(url)
+            assert False, f"expected SsrfBlocked for {url}"
+        except SsrfBlocked:
+            pass

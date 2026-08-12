@@ -6,12 +6,13 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 import httpx
 
 from app.config import Source, compile_rule
+from app.connectors import imap as imap_connector
 from app.connectors.base import NormalizedEntry
 from app.connectors.gmail import get_message, list_message_ids, parse_message
 from app.connectors.http_fetch import FetchResult, conditional_get
@@ -23,6 +24,8 @@ from app.ingest.textutil import plain_text_excerpt, proxy_image_urls, tighten_ne
 Fetcher = Callable[[Source, str | None, str | None], FetchResult]
 GmailListFn = Callable[[str, str], list[str]]
 GmailGetFn = Callable[[str, str], dict]
+ImapSearchFn = Callable[..., list[str]]
+ImapFetchFn = Callable[[object, str], bytes]
 
 # List-view subtitle length. Long enough to actually convey whether an
 # article is worth opening, not just echo the first clause of a sentence.
@@ -257,12 +260,109 @@ def refresh_gmail_source(
     }
 
 
+_IMAP_OVERLAP_DAYS = 1  # IMAP SEARCH SINCE is date-only (no time-of-day), so
+# the overlap has to be a whole day, not the few minutes _GMAIL_OVERLAP_SECONDS
+# uses — otherwise a message that arrives after this run's SINCE boundary but
+# before the exact same calendar day next runs could be missed at the edge.
+# Cheap: _persist_entry already dedupes on (source_id, guid), so re-seeing a
+# day's worth of messages is a no-op, not a duplicate.
+_IMAP_DEFAULT_WINDOW_DAYS = 30  # first-refresh bound when the source's query
+# has no newer_than:Nd token — mirrors type=gmail's README guidance to avoid
+# backfilling years of inbox history on the very first run.
+
+
+def _scoped_imap_since(last_fetched_at: str | None, default_window_days: int) -> datetime:
+    if last_fetched_at:
+        return datetime.fromisoformat(last_fetched_at) - timedelta(days=_IMAP_OVERLAP_DAYS)
+    return datetime.now(UTC) - timedelta(days=default_window_days)
+
+
+def refresh_imap_source(
+    conn: sqlite3.Connection,
+    source: Source,
+    imap_client,
+    search_fn: ImapSearchFn = imap_connector.search_message_ids,
+    fetch_fn: ImapFetchFn = imap_connector.fetch_message,
+) -> dict:
+    """Mirrors refresh_gmail_source's shape but for a plain IMAP mailbox —
+    SEARCH for message ids scoped to messages since the last successful
+    refresh, then FETCH+persist only the ones not already ingested.
+    Read-only: opens the mailbox with readonly=True and only ever calls
+    SEARCH/FETCH, never STORE/EXPUNGE.
+    """
+    source_id, _, _ = get_or_create_source(conn, source)
+    last_fetched_at = conn.execute(
+        "SELECT last_fetched_at FROM sources WHERE id = ?", (source_id,)
+    ).fetchone()[0]
+    now = datetime.now(UTC).isoformat()
+
+    from_filter, subject_filter, newer_than_days = imap_connector.parse_query(source.query)
+    since = _scoped_imap_since(last_fetched_at, newer_than_days or _IMAP_DEFAULT_WINDOW_DAYS)
+
+    try:
+        message_ids = search_fn(
+            imap_client,
+            source.mailbox_folder or imap_connector.DEFAULT_FOLDER,
+            since=since,
+            from_filter=from_filter,
+            subject_filter=subject_filter,
+        )
+    except Exception as exc:  # noqa: BLE001 — isolates this source, matches refresh_source
+        conn.execute(
+            "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
+            (str(exc), now, source_id),
+        )
+        conn.commit()
+        return {"key": source.key, "status": "error", "error": str(exc)}
+
+    rules = [compile_rule(r) for r in source.rules]
+    new_count = 0
+    filtered_count = 0
+    for message_id in message_ids:
+        # IMAP sequence/UID numbers aren't a stable guid across sessions,
+        # unlike Gmail's message id — the dedup check below is on the
+        # parsed entry's Message-Id, after fetch, not on message_id itself.
+        try:
+            raw = fetch_fn(imap_client, message_id)
+        except Exception:  # noqa: BLE001 — one bad message must not sink the refresh
+            continue
+
+        entry = imap_connector.parse_message(raw)
+        already = conn.execute(
+            "SELECT id FROM articles WHERE source_id = ? AND guid = ?", (source_id, entry.guid)
+        ).fetchone()
+        if already:
+            continue
+
+        passed, matched = evaluate_rules(_entry_to_raw_article(entry), rules)
+        if not passed:
+            filtered_count += 1
+            continue
+        if _persist_entry(conn, source_id, entry, matched, origin="gmail"):
+            new_count += 1
+
+    conn.execute(
+        "UPDATE sources SET last_fetched_at = ?, last_error = NULL WHERE id = ?",
+        (now, source_id),
+    )
+    conn.commit()
+
+    return {
+        "key": source.key,
+        "status": "ok",
+        "fetched": len(message_ids),
+        "new": new_count,
+        "filtered": filtered_count,
+    }
+
+
 def refresh_all(
     conn: sqlite3.Connection,
     sources: list[Source],
     fetcher: Fetcher | None = None,
     only_key: str | None = None,
     gmail_access_token: str | None = None,
+    imap_client=None,
 ) -> dict:
     if fetcher is None:
         with httpx.Client() as client:
@@ -272,6 +372,7 @@ def refresh_all(
                 fetcher=_default_fetcher(client),
                 only_key=only_key,
                 gmail_access_token=gmail_access_token,
+                imap_client=imap_client,
             )
 
     started = time.monotonic()
@@ -292,6 +393,17 @@ def refresh_all(
                 )
             else:
                 reports.append(refresh_gmail_source(conn, s, gmail_access_token))
+        elif s.type == "imap":
+            if imap_client is None:
+                reports.append(
+                    {
+                        "key": s.key,
+                        "status": "error",
+                        "error": "IMAP not configured — set READER_IMAP_HOST/_USER/_PASSWORD",
+                    }
+                )
+            else:
+                reports.append(refresh_imap_source(conn, s, imap_client))
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {"elapsed_ms": elapsed_ms, "sources": reports}

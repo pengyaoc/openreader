@@ -15,7 +15,9 @@ can't satisfy both. Deriving the Referer from the image URL's own origin
 """
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+import ipaddress
+import socket
+from urllib.parse import SplitResult, urljoin, urlsplit
 
 import httpx
 from starlette.requests import Request
@@ -26,11 +28,62 @@ from app.connectors.http_fetch import USER_AGENT
 _ALLOWED_SCHEMES = {"http", "https"}
 _MAX_BYTES = 15 * 1024 * 1024  # 15 MB — generous for a single image, not unbounded
 _TIMEOUT = 8.0
+_MAX_REDIRECTS = 3
 
 
 def referer_for(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}/"
+
+
+class SsrfBlocked(Exception):
+    """Raised when a URL — or a redirect target — resolves to a non-public
+    address. Without this, /api/img is an open forwarder: it takes any URL
+    from an unauthenticated request and fetches it server-side, which is
+    exactly the shape of a request needed to reach the VM's own localhost
+    services or GCP's internal network."""
+
+
+def _is_public_address(ip: str) -> bool:
+    addr = ipaddress.ip_address(ip)
+    return not (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
+
+
+def _assert_public_host(host: str) -> None:
+    """Resolves `host` and rejects it if *any* resolved address is not
+    publicly routable — checking every address, not just the first, since a
+    host can round-robin between a public and an internal one.
+
+    This check and the connection httpx eventually makes are not atomic: a
+    DNS record could change between this resolve and httpx's own connect
+    ("DNS rebinding"). Closing that gap needs a custom transport that pins
+    the resolved IP into the TCP connection, which is out of scope here.
+    What this closes is the straightforward case actually seen against open
+    image proxies — a URL that directly names a private, loopback, or
+    metadata address (e.g. 127.0.0.1, 169.254.169.254, 10.0.0.0/8).
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise SsrfBlocked(f"could not resolve host: {host}") from exc
+    for _family, _type, _proto, _canon, sockaddr in infos:
+        if not _is_public_address(sockaddr[0]):
+            raise SsrfBlocked(f"host {host!r} resolves to a non-public address")
+
+
+def _assert_safe_url(url: str) -> SplitResult:
+    parts = urlsplit(url)
+    if parts.scheme not in _ALLOWED_SCHEMES or not parts.hostname:
+        raise SsrfBlocked(f"unsupported or invalid URL: {url}")
+    _assert_public_host(parts.hostname)
+    return parts
 
 
 _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
@@ -60,14 +113,34 @@ async def proxy_image(request: Request) -> Response:
     if not url:
         return Response(status_code=400)
 
-    parts = urlsplit(url)
-    if parts.scheme not in _ALLOWED_SCHEMES or not parts.netloc:
+    try:
+        _assert_safe_url(url)
+    except SsrfBlocked:
         return Response(status_code=400)
 
+    # follow_redirects=False and a manual hop loop, rather than httpx's
+    # built-in follow_redirects=True: each redirect target has to pass the
+    # same public-address check as the original URL, or a private/loopback
+    # SSRF becomes reachable via a 302 from an otherwise-public host.
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=_TIMEOUT) as client:
-            headers = {"User-Agent": USER_AGENT, "Referer": referer_for(url)}
-            resp = await client.get(url, headers=headers)
+        async with httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT) as client:
+            current_url = url
+            headers = {"User-Agent": USER_AGENT, "Referer": referer_for(current_url)}
+            for _ in range(_MAX_REDIRECTS):
+                resp = await client.get(current_url, headers=headers)
+                if resp.status_code not in (301, 302, 303, 307, 308):
+                    break
+                location = resp.headers.get("Location")
+                if not location:
+                    return Response(status_code=502)
+                current_url = urljoin(current_url, location)
+                try:
+                    _assert_safe_url(current_url)
+                except SsrfBlocked:
+                    return Response(status_code=400)
+                headers["Referer"] = referer_for(current_url)
+            else:
+                return Response(status_code=502)  # too many redirects
     except httpx.HTTPError:
         return Response(status_code=502)
 

@@ -151,8 +151,14 @@ other devices (phone, tablet) on the same LAN.
 - The compact readability extractor (not a full Mozilla-Readability port)
   occasionally pulls page chrome (e.g. a GitHub repo's file-listing table)
   instead of the real article on unusual page layouts.
-- Gmail connector is implemented but requires the user to supply their own
-  Google Cloud OAuth client credentials — not yet exercised against a real
-  inbox.
+- Gmail's OAuth connector works, but Google expires refresh tokens after 7
+  days for any app in "Testing" publishing status, and escaping that for a
+  restricted scope like `gmail.readonly` needs full app verification + a
+  CASA security audit — not viable for a personal project. For any
+  deployment meant to run unattended (e.g. a VM, vs. re-authenticating by
+  hand from a laptop), `type: imap` (`connectors/imap.py`) against a
+  dedicated newsletter-only mailbox with a Google app password is the
+  supported path instead: no token expiry, no Cloud project, no consent
+  screen. See docs/WORKLOG.md, 2026-08-12.
 - No automated frontend test suite yet — frontend correctness has been
   verified through manual/live browser testing per change, not CI.

@@ -8,6 +8,13 @@
 # Gmail OAuth client secret downloaded from Google Cloud Console
 /config/gmail_client_secret.json
 
+# IMAP credentials (READER_IMAP_HOST/_USER/_PASSWORD) if ever kept in a
+# local env file for testing — the real one lives only on the VM at
+# /opt/openreader/openreader.env, never in this repo. See docs/WORKLOG.md,
+# 2026-08-12.
+.env
+*.env
+
 # Python
 __pycache__/
 *.pyc
