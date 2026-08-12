@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Description-only feed</title>
+    <item>
+      <title>Photo roundup</title>
+      <link>https://example.com/posts/1</link>
+      <pubDate>Sat, 08 Aug 2026 16:03:00 +0800</pubDate>
+      <description><![CDATA[<p>Some intro text.</p><p><img src="https://example.com/a.jpg"/></p><p>More text after the image.</p>]]></description>
+    </item>
+  </channel>
+</rss>

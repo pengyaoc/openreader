@@ -1,0 +1,69 @@
+# Copy this file to feeds.yaml and edit it — feeds.yaml itself is
+# gitignored (it's your personal reading list) and read at startup from
+# $READER_CONFIG (defaults to config/feeds.yaml next to this file).
+#
+#   cp config/feeds.example.yaml config/feeds.yaml
+#
+# You can also edit sources/rules from inside the app (the "Add source"
+# form or the raw config editor) — both write back to feeds.yaml directly.
+
+interest_profile: |
+  Only used by the LLM generation tier (see `topics` below) as context for
+  what you care about. Free text. Leave blank if you're not using
+  generation.
+
+llm:
+  enabled: false        # kill switch — false means the LLM tier is fully
+                         # inert: no UI, no endpoints, `claude` is never
+                         # invoked. Flip to true only once you understand
+                         # what a topic brief does (see docs/PRD.md).
+  model: sonnet
+  timeout_minutes: 10
+
+defaults:
+  poll_interval_minutes: 30   # informational only in v1 — refresh is manual
+  fetch_full_text: false
+
+sources:
+  # A plain RSS/Atom feed, no filtering — everything that isn't excluded
+  # gets in.
+  - key: simonwillison
+    type: rss
+    title: Simon Willison
+    url: https://simonwillison.net/atom/everything/
+    folder: AI
+
+  # Regex filtering: field is one of title | summary | content | author |
+  # url | any. exclude always wins if it matches; include (when present)
+  # requires at least one match to let an item through.
+  - key: hn-frontpage
+    type: rss
+    title: Hacker News
+    url: https://hnrss.org/frontpage
+    folder: AI
+    fetch_full_text: true   # fetch+extract the full page on first open,
+                             # since this feed's own body is just a link
+    rules:
+      - { action: include, field: any, pattern: "(?i)llm|agent|inference|eval" }
+      - { action: exclude, field: title, pattern: "(?i)\\bsponsored\\b" }
+
+  # A Gmail source: read-only, one-time OAuth via scripts/gmail_auth.py.
+  # `query` is a normal Gmail search query.
+  # - key: newsletters
+  #   type: gmail
+  #   title: Newsletters
+  #   folder: Newsletters
+  #   query: "label:newsletters newer_than:14d"
+
+topics: []
+  # LLM-generated articles for things with no good feed. Only used when
+  # llm.enabled is true, and only ever runs when you press Generate.
+  # - key: claude-code-updates
+  #   title: Claude Code updates
+  #   folder: Generated
+  #   brief: >
+  #     Recent notable changes or releases for Anthropic's Claude Code CLI.
+  #     Favor primary sources (Anthropic's own changelog/blog) over
+  #     secondhand commentary.
+  #   lookback_days: 14
+  #   max_articles: 2

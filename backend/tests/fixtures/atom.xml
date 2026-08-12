@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom Feed</title>
+  <entry>
+    <id>tag:example.com,2026:post-1</id>
+    <title>First Atom Post</title>
+    <link href="https://example.com/atom/1" rel="alternate"/>
+    <author><name>Jane Doe</name></author>
+    <published>2026-08-01T12:00:00Z</published>
+    <updated>2026-08-01T12:30:00Z</updated>
+    <summary>A short summary of the first post.</summary>
+    <content type="html">&lt;p&gt;Full &lt;b&gt;content&lt;/b&gt; of the first post.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>tag:example.com,2026:post-2</id>
+    <title>Second Atom Post</title>
+    <link href="https://example.com/atom/2" rel="alternate"/>
+    <updated>2026-08-02T09:15:00Z</updated>
+    <summary>Only a summary, no published date.</summary>
+  </entry>
+</feed>

@@ -1,0 +1,27 @@
+[project]
+name = "openreader-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "defusedxml>=0.7.1",
+    "httpx>=0.28.1",
+    "msgspec>=0.21.1",
+    "nh3>=0.3.6",
+    "pyyaml>=6.0.3",
+    "selectolax>=0.4.11",
+    "starlette>=1.6.0",
+    "uvicorn[standard]>=0.52.1",
+]
+
+[project.optional-dependencies]
+gmail-auth = [
+    "google-auth-oauthlib>=1.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

@@ -1,0 +1,23 @@
+# Data: DB, media cache, Gmail OAuth token — never committed
+/data/
+
+# Your personal feed list, filter rules, and interest profile — never
+# committed. See config/feeds.example.yaml for the template this repo ships.
+/config/feeds.yaml
+
+# Gmail OAuth client secret downloaded from Google Cloud Console
+/config/gmail_client_secret.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+/backend/.venv/
+
+# Frontend
+/frontend/node_modules/
+/frontend/dist/
+
+# Editor/OS
+.DS_Store
