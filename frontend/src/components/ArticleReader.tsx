@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { API_BASE, type Article } from '../api'
 
 interface Citation {
@@ -58,6 +58,15 @@ export function ArticleReader({
     return () => window.removeEventListener('keydown', handler)
   }, [onClose, onPrev, onNext, hasPrev, hasNext])
 
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // ArticleReader stays mounted across prev/next — only `article` changes —
+  // so the scroll container otherwise keeps whatever scrollTop the previous
+  // article was left at. Reset on every article change, not just once on
+  // mount.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 })
+  }, [article.id])
+
   const citations: Citation[] = article.citations_json ? JSON.parse(article.citations_json) : []
 
   return (
@@ -110,7 +119,7 @@ export function ArticleReader({
         </button>
       )}
 
-      <div className="reader-scroll">
+      <div className="reader-scroll" ref={scrollRef}>
         <article className="reader-article">
           {article.origin === 'llm' && (
             <div className="reader-article__badges">
