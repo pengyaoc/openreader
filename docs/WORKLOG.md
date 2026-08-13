@@ -752,3 +752,43 @@ scenarios — source removed, rules tightened, already-read articles
 untouched, idempotent — the global mark-all-read endpoint including a
 route-collision regression test, and the end-to-end config-removal
 flow through the real API).
+
+## 2026-08-13 (cont.) — Favicon didn't match the app's own visual identity
+
+Feedback: *"what icon did we use for OpenReader? It's not consistent
+between icon in chrome tab vs icon on the web page."* Investigated rather
+than assumed: the tab favicon (`frontend/public/favicon.svg`) was a
+complex, colorful abstract illustration (purple/blue blob shapes) with no
+relationship to the app's actual palette — looked like a leftover
+scaffolding placeholder, never designed to match anything. The in-page
+mark next to "OpenReader" in the sidebar was a separate, unrelated 9px
+CSS-drawn amber diamond (`.sidebar__brand-mark`, a rotated `background:
+var(--amber)` square) — that one, at least, used the app's real color.
+
+Asked what direction to take it; user asked for *"a minimalistic version
+of the google reader icon."* The classic broadcast-wave "feed icon" glyph
+(dot + concentric quarter-arcs) is an open, industry-standard symbol —
+released by the RSS Advisory Board specifically for free reuse in 2005,
+not Google-proprietary artwork; Feedly/Inoreader/NetNewsWire all use their
+own variants of the same silhouette. Built a fresh minimal version from
+scratch (own arc geometry, not traced from any existing asset) in the
+app's actual amber (`#e08a3e`) and cream (`#faf6ee`, the light theme's
+`--bg`) rather than Google's original orange, so it's consistent with
+*this* app's palette specifically.
+
+First pass only replaced `favicon.svg` — verified in a real browser tab,
+looked right there. But the report was about a *mismatch*, and swapping
+one side of a mismatch without touching the other doesn't fix it: *"on
+the page, it still looks like this"* (screenshot of the old diamond,
+unchanged). Replaced `.sidebar__brand-mark` too — an inline SVG using the
+same glyph, but with `fill="var(--amber)"` / `stroke="var(--bg)"` instead
+of the favicon file's fixed hex colors, so unlike the static favicon (SVG
+files referenced via `<link rel="icon">` can't reactively read the host
+page's CSS custom properties) the in-page mark actually re-colors itself
+correctly across the dark/light theme toggle. Verified live in both
+themes rather than assuming the CSS variables would resolve as expected.
+
+No backend changes, no new tests (a decorative asset, not logic) — both
+changes deployed via `scripts/deploy.sh` and confirmed live by grepping
+the deployed JS bundle for the new class name, not just trusting the
+deploy script's own success output.

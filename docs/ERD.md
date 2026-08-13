@@ -71,7 +71,8 @@ backend/app/
 │   │                          # rewrite, newsletter-HTML whitespace tightening
 │   ├── extract.py             # readability heuristic + relative->absolute URLs
 │   ├── hydrate.py              # lazy per-article full-text fetch (once, ever)
-│   └── refresh.py               # orchestrates one sync refresh pass
+│   └── refresh.py               # orchestrates one sync refresh pass;
+│                                 # also reconcile_read_state() (§5)
 ├── generate/
 │   ├── prompt.py                 # system prompt + JSON schema for the model
 │   ├── client.py                  # `claude` CLI subprocess wrapper
@@ -86,7 +87,7 @@ Design rule followed throughout: **pure logic is separated from I/O** and
 every I/O boundary (HTTP fetch, subprocess call, Gmail API) is injectable
 in tests via a `Fetcher`/`Runner`/`GenerateFn`-style callable parameter, so
 the entire pipeline is unit-tested without a real network call or
-subprocess spawn. 179 backend tests, zero of which touch the network.
+subprocess spawn. 192 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
@@ -171,16 +172,18 @@ Notes on choices that aren't obvious from the columns alone:
 
 | Method & path | Purpose | Blocking I/O? |
 |---|---|---|
-| `GET /api/sources` | List sources with unread counts | No |
+| `GET /api/sources` | List sources with unread counts, filtered to keys present in the live config — a source removed from `feeds.yaml` stops appearing here immediately, even though its DB row and articles aren't deleted (§5) | No |
 | `POST /api/sources` | Structured add-source (validates, writes YAML, creates DB row) | No |
+| `POST /api/sources/:id/mark-all-read` | Bulk-mark every unread article on one source | No |
 | `GET /api/articles` | List articles (`view=all\|unread\|starred`, `source_id`, `folder`, `limit`=50 default, `offset`) | No |
-| `GET /api/articles/:id` | Article detail; triggers lazy full-text hydration if applicable | **Yes** (one-time per article) |
+| `GET /api/articles/:id` | Article detail; triggers lazy full-text hydration if applicable | One-time per article, but off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests |
+| `POST /api/articles/mark-all-read` | Bulk-mark every unread article across every source (registered ahead of `:id` in the route table, or it'd be swallowed by that pattern) | No |
 | `POST /api/articles/:id/read` | Mark read (idempotent, one-directional) | No |
 | `POST /api/articles/:id/toggle-read` | Manual read/unread toggle | No |
 | `POST /api/articles/:id/star` | Toggle starred | No |
 | `POST /api/refresh` | Synchronous refresh (`?source=key` for one) | **Yes** |
-| `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write) | No |
-| `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | **Yes** |
+| `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |
+| `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | SSRF-check DNS lookup runs off the event loop (`asyncio.to_thread`, §5); the actual fetch is async `httpx` |
 | `GET /api/topics` | List configured topics + `llm.enabled` flag | No |
 | `POST /api/topics/:key/generate` | Create a job, spawn worker subprocess, return immediately | No (spawn is fire-and-forget) |
 | `GET /api/jobs/:id` | Poll job status | No |
@@ -336,6 +339,39 @@ password isn't scoped per-protocol the way OAuth is — it authorizes SMTP
 too, not just IMAP read access — so the blast radius of the credential
 living on a deployed box is bounded by what's *in* that mailbox, not by
 the credential's own scope.
+
+**A source removed from `feeds.yaml` is filtered out, never deleted.**
+`sources` DB rows are create-only — written once by `get_or_create_source`
+the first time a source is ever refreshed — so nothing was removing a
+row just because the source later disappeared from config, and the
+sidebar kept showing it forever (found live, 2026-08-13: *"Uber
+engineering still show in the left side bar"*). `list_sources()` now
+takes an optional `valid_keys` set and filters to it; the API handler
+passes the live config's keys. Its already-fetched articles are neither
+deleted nor hidden from `All items`/`Starred` — only newly out-of-scope
+*unread* ones get swept into `is_read=1` by `reconcile_read_state()`
+(next entry), same as any other read article, fully reversible by
+toggling read state back by hand.
+
+**`reconcile_read_state()` runs on every `PUT /api/config`, marking
+`is_read=1` — not hiding, not deleting.** When a source is removed or its
+rules change, its previously-ingested articles don't retroactively
+disappear on their own; without this they'd sit in `Unread` forever, no
+longer relevant but never resolved. Considered and rejected: a new
+`hidden` column (first implementation — real code, reverted) that would
+have made these invisible in every view including `All items`/`Starred`,
+requiring the app's first schema migration (`ALTER TABLE ... ADD COLUMN`,
+non-trivial against DBs with real data on both the local machine and the
+live VM). Live user feedback settled it: *"Why do you need migration? You
+can just mark them as READ, right? That's existing feature."* — correct,
+and simpler. The real tradeoff accepted by using plain `is_read` instead
+of a dedicated flag: an article hidden this way is indistinguishable from
+one the user genuinely read themselves, so there's no way to tell "was
+filtered out, might be worth resurfacing if the rule loosens again" apart
+from "actually read." Judged not worth a schema change to solve. Only
+`is_read=0` rows are touched — already-read articles (by either path)
+are left alone, so a genuinely-user-read article's `read_at` is never
+overwritten.
 
 **Dependency minimalism.** Deliberately avoided FastAPI/pydantic
 (Starlette + msgspec instead), feedparser (stdlib `defusedxml.ElementTree`
