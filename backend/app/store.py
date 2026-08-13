@@ -88,13 +88,22 @@ def list_articles(
 
 
 def get_article(conn: sqlite3.Connection, article_id: int) -> dict | None:
-    cols = ", ".join(_ARTICLE_COLUMNS)
+    # Joined with sources for source_title, matching list_articles — without
+    # it, the reader has no source name to fall back on when an article has
+    # no author (common: feed-level bylines, Twitter-sourced RSS, etc. often
+    # omit one), and the byline area in the UI just goes blank.
+    cols = ", ".join(f"a.{c}" for c in _ARTICLE_COLUMNS)
     row = conn.execute(
-        f"SELECT {cols} FROM articles WHERE id = ?", (article_id,)
+        f"""SELECT {cols}, s.title AS source_title
+            FROM articles a JOIN sources s ON s.id = a.source_id
+            WHERE a.id = ?""",
+        (article_id,),
     ).fetchone()
     if row is None:
         return None
-    return _row_to_article(row)
+    article = _row_to_article(row[: len(_ARTICLE_COLUMNS)])
+    article["source_title"] = row[-1]
+    return article
 
 
 def mark_read(conn: sqlite3.Connection, article_id: int) -> bool:

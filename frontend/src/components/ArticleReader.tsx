@@ -128,7 +128,14 @@ export function ArticleReader({
           )}
           <h1 className="reader-article__title">{article.title}</h1>
           <div className="reader-article__meta">
-            {article.author && <>{article.author} · </>}
+            {/* Not every source has a per-article author (feed-level bylines,
+                Twitter-sourced RSS, etc. often omit it) — falling back to the
+                source's own name keeps this line from just going blank,
+                which read as a rendering bug rather than "this item has no
+                byline". */}
+            {(article.author || article.source_title) && (
+              <>{article.author || article.source_title} · </>
+            )}
             {fullDate(article.published_at)}
             {article.url && (
               <>

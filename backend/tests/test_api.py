@@ -104,6 +104,15 @@ def test_get_article_detail(client):
     assert resp.json()["content_html"] == "<p>Body</p>"
 
 
+def test_get_article_detail_includes_source_title(client):
+    # Regression test: get_article() used to skip the sources JOIN that
+    # list_articles() already had, so the reader had no source name to fall
+    # back on for author-less articles and the byline area just went blank.
+    article_id = client.get("/api/articles").json()[0]["id"]
+    resp = client.get(f"/api/articles/{article_id}")
+    assert resp.json()["source_title"] == "Source One"
+
+
 def test_get_article_404_for_missing_id(client):
     resp = client.get("/api/articles/9999")
     assert resp.status_code == 404
