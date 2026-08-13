@@ -858,3 +858,58 @@ sources with an artificial per-fetch delay finish in roughly one delay's
 worth rather than five — the actual concurrency claim, not just "the
 code still returns the right data" — and a source-order-preservation test
 across interleaved rss/imap/gmail types).
+
+## 2026-08-13 (cont.) — Extended concurrency to IMAP after live data showed it mattered more than expected
+
+Deploying the RSS-concurrency fix revealed the real cost split on the VM
+wasn't what local measurements alone had suggested: total refresh stayed
+at 9.76s post-fix, because the VM's 4 real IMAP sources (not configured
+locally, so absent from every earlier measurement) turned out to cost
+more than the smaller share initially estimated — RSS dropped correctly
+to ~4.4s (bounded by `xilei`, slower from the VM's network path than from
+a laptop — 4.36s vs. 2.6s measured locally for the same source), but ~5.3s
+of sequential IMAP was left untouched by design. Asked whether to extend
+concurrency there too; answered *"extend concurrency"*.
+
+Unlike RSS's independent HTTP requests, IMAP is a stateful protocol — one
+connection can't run concurrent commands from multiple threads, so the
+previous design (`refresh_api.py` opens one shared client, hands it to
+every IMAP source in turn) couldn't parallelize without restructuring
+connection ownership itself. Each source now gets its own connection:
+
+- `refresh.py`: `_imap_fetch_only()` (network-bound: opens its own
+  connection via an injected `connect_fn`, SEARCH+FETCH+parse every
+  message, always logs out — no DB access, safe on a worker thread) and
+  `_persist_imap_result()` (DB writes, always on the calling thread — same
+  `check_same_thread=True` constraint as the RSS split). `_refresh_imap_batch()`
+  orchestrates: `get_or_create_source`/scoping computed upfront sequentially
+  (cheap, and each source's `since` window has to be known before its
+  fetch can be sent), fetches run through a bounded pool (`_IMAP_FETCH_CONCURRENCY
+  = 6` — Gmail allows up to 15 concurrent connections per account, so this
+  is headroom, not a real ceiling for the handful of sources that
+  realistically exist), persistence sequential after.
+- `refresh_all()`'s `imap_client` parameter (a single pre-connected
+  object) became `imap_connect` (a zero-arg factory) — RSS and IMAP are
+  now each batched, results reassembled by source key into the caller's
+  original order, same mechanism as the RSS-only version from earlier
+  today.
+- `refresh_imap_source` (the single-source, pre-connected-client
+  function) is untouched — still the direct entry point its existing
+  tests use; only `refresh_all`'s dispatch changed to route IMAP sources
+  through the new batch instead of calling it in a loop.
+- `refresh_api.py`: no longer eagerly opens one IMAP connection and holds
+  it for the request's duration; builds an `imap_connect` closure instead
+  and lets each source's own connection attempt report its own real
+  error on failure — an accuracy improvement over the old behavior, which
+  collapsed any connect failure into a blanket "not configured" message
+  regardless of the actual cause.
+
+196 backend tests passing (194 → 196: a timing proof for the IMAP batch —
+same shape as the RSS one, 5 sources with an artificial per-connect delay
+finishing in roughly one delay's worth — and an end-to-end correctness
+test through `_refresh_imap_batch` directly, confirming distinct
+connections, per-source search results, and message counts all land
+correctly). One bug caught in my own test before it shipped: a fake
+`connect_fn` shared across the thread pool read-then-appended to a list
+to identify which source was connecting — not atomic, a real race between
+threads (not a hypothetical one) that a lock fixed.

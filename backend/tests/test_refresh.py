@@ -8,6 +8,7 @@ from app.config import Config, Rule, Source
 from app.connectors.http_fetch import FetchResult
 from app.db import connect, init_schema
 from app.ingest.refresh import (
+    _refresh_imap_batch,
     reconcile_read_state,
     refresh_all,
     refresh_gmail_source,
@@ -459,7 +460,7 @@ def test_refresh_all_reports_error_when_imap_not_configured(tmp_path):
     init_schema(conn)
     source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
 
-    report = refresh_all(conn, [source], fetcher=lambda *a: None, imap_client=None)
+    report = refresh_all(conn, [source], fetcher=lambda *a: None, imap_connect=None)
     assert report["sources"][0]["status"] == "error"
     assert "IMAP not configured" in report["sources"][0]["error"]
 
@@ -641,8 +642,108 @@ def test_refresh_all_preserves_source_order_across_mixed_types(tmp_path):
 
     report = refresh_all(
         conn, sources, fetcher=fetcher,
-        imap_client=None,  # reports "IMAP not configured" without a real connection
+        imap_connect=None,  # reports "IMAP not configured" without a real connection
     )
 
     keys_in_order = [s["key"] for s in report["sources"]]
     assert keys_in_order == ["rss-a", "newsletters", "rss-b"]
+
+
+def test_imap_batch_fetches_concurrently_not_sequentially(tmp_path):
+    # Same proof as the RSS timing test: N imap sources whose connect_fn
+    # each takes T seconds must finish in roughly T total, not N*T. Unlike
+    # RSS, each source opens its own connection — that's the actual point
+    # being tested, since it's what makes concurrent IMAP possible at all
+    # (a single shared, stateful IMAP connection can't be used from
+    # multiple threads at once the way independent HTTP requests can).
+    import time as time_module
+
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    n = 5
+    delay = 0.3
+    sources = [
+        Source(key=f"imap{i}", type="imap", title=f"I{i}", folder="Test", query="")
+        for i in range(n)
+    ]
+
+    class FakeClient:
+        def logout(self):
+            pass
+
+    def slow_connect():
+        time_module.sleep(delay)
+        return FakeClient()
+
+    started = time_module.monotonic()
+    reports = _refresh_imap_batch(
+        conn, sources, slow_connect,
+        search_fn=lambda client, folder, **kw: [],
+        fetch_fn=lambda client, mid: b"",
+    )
+    elapsed = time_module.monotonic() - started
+
+    assert len(reports) == n
+    assert all(r["status"] == "ok" for r in reports.values())
+    assert elapsed < n * delay * 0.6
+
+
+def test_imap_batch_persists_correctly_across_multiple_sources(tmp_path):
+    # End-to-end correctness of the batch path (not just timing): distinct
+    # per-source connections, search results, and messages all land in the
+    # right source's articles with the right counts.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    sources = [
+        Source(key="imapA", type="imap", title="A", folder="Test", query=""),
+        Source(key="imapB", type="imap", title="B", folder="Test", query=""),
+    ]
+    raw_messages = {
+        "a1": make_imap_message("a1", "From A"),
+        "b1": make_imap_message("b1", "From B"),
+        "b2": make_imap_message("b2", "Also From B"),
+    }
+    ids_by_source = {"imapA": ["a1"], "imapB": ["b1", "b2"]}
+
+    class FakeClient:
+        def __init__(self, source_key):
+            self.source_key = source_key
+
+        def logout(self):
+            pass
+
+    import threading
+
+    connect_calls: list[str] = []
+    connect_lock = threading.Lock()
+
+    # _refresh_imap_batch takes one connect_fn shared across all sources in
+    # the batch (matching how refresh_api.py provisions it — one factory,
+    # called once per source, concurrently) — search_fn below dispatches on
+    # the client's own identity to return that source's message ids, since
+    # connect_fn can't know in advance which source it's being called for.
+    # The lock makes the read-then-append below atomic — without it, two
+    # threads could both read the same len(connect_calls) before either
+    # appends, assigning the same source key to both.
+    def connect_fn():
+        with connect_lock:
+            key = sources[len(connect_calls)].key
+            connect_calls.append(key)
+        return FakeClient(key)
+
+    def search_fn(client, folder, **kw):
+        return ids_by_source[client.source_key]
+
+    def fetch_fn(client, message_id):
+        return raw_messages[message_id]
+
+    reports = _refresh_imap_batch(conn, sources, connect_fn, search_fn=search_fn, fetch_fn=fetch_fn)
+
+    assert connect_calls == ["imapA", "imapB"]  # one connection per source
+    assert reports["imapA"]["new"] == 1
+    assert reports["imapB"]["new"] == 2
+
+    rows = conn.execute(
+        "SELECT s.key, a.title FROM articles a JOIN sources s ON s.id = a.source_id ORDER BY a.title"
+    ).fetchall()
+    assert rows == [("imapB", "Also From B"), ("imapA", "From A"), ("imapB", "From B")]

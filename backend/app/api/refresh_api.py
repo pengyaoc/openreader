@@ -16,20 +16,20 @@ def _refresh_off_thread(
     sources,
     only_key: str | None,
     gmail_access_token: str | None,
-    imap_client,
+    imap_connect,
 ) -> dict:
     """Runs the whole refresh on a worker thread via asyncio.to_thread, with
     its own SQLite connection — sqlite3 connections default to
     check_same_thread=True, and the request's connection belongs to the
     event loop thread (same pattern as articles.py's _hydrate_off_thread).
 
-    Without this, refresh — even with the RSS batch now fetching
-    concurrently (refresh.py) — still blocks uvicorn's single event loop
-    for its entire duration: measured live, 2026-08-13, a request sent
-    0.3s into a refresh wasn't served until the refresh finished ~8.4s
-    later. Nothing else in the app (article reads, image loads, the
-    sidebar) can be served while a refresh via the old code path was
-    running.
+    Without this, refresh — even with sources now fetching concurrently
+    within their own type (refresh.py) — still blocks uvicorn's single
+    event loop for its entire duration: measured live, 2026-08-13, a
+    request sent 0.3s into a refresh wasn't served until the refresh
+    finished ~8.4s later. Nothing else in the app (article reads, image
+    loads, the sidebar) can be served while a refresh via the old code
+    path was running.
     """
     conn = connect(db_path)
     try:
@@ -38,7 +38,7 @@ def _refresh_off_thread(
             sources,
             only_key=only_key,
             gmail_access_token=gmail_access_token,
-            imap_client=imap_client,
+            imap_connect=imap_connect,
         )
     finally:
         conn.close()
@@ -55,35 +55,27 @@ async def refresh(request: Request) -> JSONResponse:
         except Exception:  # noqa: BLE001 — a broken/expired token shouldn't crash refresh
             gmail_access_token = None
 
-    imap_client = None
+    # A factory, not a pre-opened connection: IMAP sources now refresh
+    # concurrently (refresh.py's _refresh_imap_batch), each on its own
+    # connection — IMAP is a stateful protocol, so unlike RSS's independent
+    # HTTP requests, sources can't share one connection across threads.
+    # Each source's own connect attempt reports its own real error on
+    # failure (bad password, network blip, etc.) rather than the old single
+    # eager connect swallowing everything into a blanket "not configured".
+    imap_connect = None
     imap_configured = settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD
     if any(s.type == "imap" for s in config.sources) and imap_configured:
-        try:
-            imap_client = imap_connector.connect(
-                settings.IMAP_HOST, settings.IMAP_USER, settings.IMAP_PASSWORD
-            )
-        except imap_connector.ImapError:
-            # refresh_all reports "IMAP not configured" for imap_client=None,
-            # which is a slightly inaccurate message for "configured but the
-            # login failed" — acceptable for v1; the per-source error isn't
-            # otherwise surfaced anywhere a broken login couldn't also break
-            # a broken config.
-            imap_client = None
-
-    try:
-        report = await asyncio.to_thread(
-            _refresh_off_thread,
-            request.app.state.db_path,
-            config.sources,
-            only_key,
-            gmail_access_token,
-            imap_client,
+        imap_connect = lambda: imap_connector.connect(  # noqa: E731
+            settings.IMAP_HOST, settings.IMAP_USER, settings.IMAP_PASSWORD
         )
-    finally:
-        if imap_client is not None:
-            try:
-                imap_client.logout()
-            except Exception:  # noqa: BLE001 — best-effort cleanup only
-                pass
+
+    report = await asyncio.to_thread(
+        _refresh_off_thread,
+        request.app.state.db_path,
+        config.sources,
+        only_key,
+        gmail_access_token,
+        imap_connect,
+    )
 
     return JSONResponse(report)
