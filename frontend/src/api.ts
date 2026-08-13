@@ -34,15 +34,28 @@ export interface Article {
   source_title?: string
 }
 
+export type SourceType = 'rss' | 'gmail' | 'imap'
+
 export interface Source {
   id: number
   key: string
-  type: 'rss' | 'gmail' | 'llm'
+  type: SourceType
   title: string
   folder: string
   last_fetched_at: string | null
   last_error: string | null
   unread_count: number
+}
+
+// Full detail for one source — GET /api/sources/:id. Adds the
+// config-derived fields (url/query/etc.) the lean sidebar listing above
+// doesn't carry; used to pre-fill the edit form.
+export interface SourceDetail extends Source {
+  url: string | null
+  query: string | null
+  mailbox_folder: string | null
+  fetch_full_text: boolean
+  rules: Rule[]
 }
 
 export interface Topic {
@@ -91,8 +104,11 @@ export interface Rule {
   pattern: string
 }
 
-export interface NewSource {
-  key: string
+// Two source shapes the add/edit form can submit — url only makes sense
+// for rss, query/mailbox_folder only for imap. `key` is only present when
+// creating (POST); the backend locks key/type on edit (PUT) regardless of
+// what's sent, so update payloads omit it rather than imply it's editable.
+interface SourceFieldsRss {
   type: 'rss'
   title: string
   folder: string
@@ -100,6 +116,18 @@ export interface NewSource {
   fetch_full_text?: boolean
   rules?: Rule[]
 }
+
+interface SourceFieldsImap {
+  type: 'imap'
+  title: string
+  folder: string
+  query?: string
+  mailbox_folder?: string
+  rules?: Rule[]
+}
+
+export type SourceFields = SourceFieldsRss | SourceFieldsImap
+export type NewSource = SourceFields & { key: string }
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -156,6 +184,21 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(source),
     }).then((r) => json<{ ok: boolean; key: string }>(r)),
+
+  getSource: (id: number) =>
+    fetch(`${API_BASE}/api/sources/${id}`).then((r) => json<SourceDetail>(r)),
+
+  updateSource: (id: number, fields: SourceFields) =>
+    fetch(`${API_BASE}/api/sources/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+    }).then((r) => json<{ ok: boolean; key: string; reconciled: number }>(r)),
+
+  removeSource: (id: number) =>
+    fetch(`${API_BASE}/api/sources/${id}`, { method: 'DELETE' }).then((r) =>
+      json<{ ok: boolean; reconciled: number }>(r),
+    ),
 
   markAllRead: (sourceId: number) =>
     fetch(`${API_BASE}/api/sources/${sourceId}/mark-all-read`, { method: 'POST' }).then((r) =>

@@ -313,11 +313,11 @@ a {
   min-width: 0;
 }
 
-.source-row__mark-read {
+.source-row__mark-read,
+.source-row__edit {
   flex-shrink: 0;
   width: 24px;
   height: 24px;
-  margin-right: 8px;
   border: none;
   background: none;
   color: var(--ink-faint);
@@ -330,7 +330,16 @@ a {
   transition: all 0.12s ease;
 }
 
-.source-row__mark-read:hover {
+/* Edit is always rendered (unlike mark-read, conditional on unread_count),
+   so it — not mark-read — carries the trailing margin before the row's
+   right edge, keeping spacing consistent whether or not mark-read shows. */
+.source-row__edit {
+  margin-right: 8px;
+  font-size: 11px;
+}
+
+.source-row__mark-read:hover,
+.source-row__edit:hover {
   color: var(--amber);
   background: var(--bg-hover);
 }
@@ -1233,7 +1242,13 @@ kbd {
   padding: 14px 20px;
   border-top: 1px solid var(--line);
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.config-drawer__footer-right {
+  display: flex;
   gap: 10px;
 }
 
@@ -1263,6 +1278,54 @@ kbd {
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+.btn--danger {
+  background: transparent;
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.btn--danger:hover {
+  background: var(--red);
+  color: var(--bg);
+}
+
+.btn--danger-confirm {
+  background: var(--red);
+  color: var(--bg);
+}
+
+.type-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.type-toggle__option {
+  flex: 1;
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-hover);
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.type-toggle__option:hover {
+  border-color: var(--ink-faint);
+  color: var(--ink);
+}
+
+.type-toggle__option.active {
+  background: var(--amber-wash);
+  border-color: var(--amber);
+  color: var(--ink);
+  font-weight: 600;
 }
 
 /* -------------------------- mobile / iOS -------------------------- */

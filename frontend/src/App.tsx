@@ -12,7 +12,7 @@ import { Sidebar } from './components/Sidebar'
 import { ArticleList } from './components/ArticleList'
 import { ArticleReader } from './components/ArticleReader'
 import { ConfigEditor } from './components/ConfigEditor'
-import { AddSourceModal } from './components/AddSourceModal'
+import { SourceModal } from './components/SourceModal'
 import { RefreshToast } from './components/RefreshToast'
 
 const VIEW_TITLES: Record<string, string> = {
@@ -116,7 +116,8 @@ export default function App() {
   })
   const [cursorId, setCursorId] = useState<number | null>(null)
   const [configOpen, setConfigOpen] = useState(false)
-  const [addSourceOpen, setAddSourceOpen] = useState(false)
+  // 'closed' | 'add' | <source id being edited>
+  const [sourceModal, setSourceModal] = useState<'closed' | 'add' | number>('closed')
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [refreshReport, setRefreshReport] = useState<RefreshReport | null>(null)
   const [jobsByTopic, setJobsByTopic] = useState<Record<string, Job>>({})
@@ -396,7 +397,8 @@ export default function App() {
         onOpenConfig={() => setConfigOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-        onAddSource={() => setAddSourceOpen(true)}
+        onAddSource={() => setSourceModal('add')}
+        onEditSource={(id) => setSourceModal(id)}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
         llmEnabled={topicsQuery.data?.enabled ?? false}
@@ -459,10 +461,11 @@ export default function App() {
         />
       )}
 
-      {addSourceOpen && (
-        <AddSourceModal
-          onClose={() => setAddSourceOpen(false)}
-          onAdded={() => {
+      {sourceModal !== 'closed' && (
+        <SourceModal
+          onClose={() => setSourceModal('closed')}
+          editingSourceId={typeof sourceModal === 'number' ? sourceModal : undefined}
+          onSaved={() => {
             qc.invalidateQueries({ queryKey: ['sources'] })
             qc.invalidateQueries({ queryKey: ['articles'] })
           }}

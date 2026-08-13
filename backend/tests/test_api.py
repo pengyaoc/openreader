@@ -500,3 +500,156 @@ def test_removing_a_source_from_config_hides_it_from_sidebar_but_keeps_its_artic
     detail = client.get(f"/api/articles/{article_id}")
     assert detail.status_code == 200  # still in the DB, still directly reachable
     assert detail.json()["is_read"] is True
+
+
+def test_update_source_edits_title_folder_and_url(client):
+    source_id = client.get("/api/sources").json()[0]["id"]
+
+    resp = client.put(
+        f"/api/sources/{source_id}",
+        json={
+            "title": "Renamed Source",
+            "folder": "New Folder",
+            "url": "https://x/new-feed",
+            "fetch_full_text": True,
+            "rules": [],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+    sources = client.get("/api/sources").json()
+    assert sources[0]["title"] == "Renamed Source"
+    assert sources[0]["folder"] == "New Folder"
+
+    config_yaml = client.get("/api/config").json()["yaml"]
+    assert "https://x/new-feed" in config_yaml
+    assert "fetch_full_text: true" in config_yaml
+
+
+def test_update_source_ignores_key_and_type_in_request_body(client):
+    # key/type are identity, locked to the existing entry regardless of
+    # what the request sends — changing either would orphan dedup/history.
+    source_id = client.get("/api/sources").json()[0]["id"]
+
+    resp = client.put(
+        f"/api/sources/{source_id}",
+        json={
+            "key": "attempted-rename",
+            "type": "imap",
+            "title": "Still RSS",
+            "folder": "Test",
+            "url": "https://x/feed",
+        },
+    )
+    assert resp.status_code == 200
+
+    sources = client.get("/api/sources").json()
+    assert sources[0]["key"] == "s1"  # unchanged
+    assert sources[0]["type"] == "rss"  # unchanged
+
+
+def test_update_source_404_for_missing_id(client):
+    resp = client.put("/api/sources/9999", json={"title": "X", "folder": "F", "url": "https://x"})
+    assert resp.status_code == 404
+
+
+def test_update_source_rejects_invalid_regex(client):
+    source_id = client.get("/api/sources").json()[0]["id"]
+    resp = client.put(
+        f"/api/sources/{source_id}",
+        json={
+            "title": "S",
+            "folder": "F",
+            "url": "https://x/feed",
+            "rules": [{"action": "include", "field": "title", "pattern": "(unclosed"}],
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_update_source_reconciles_read_state_when_rules_tighten(client):
+    source_id = client.get("/api/sources").json()[0]["id"]
+    # Seeded article's title is "Hello World" — a rule requiring "xyz" in
+    # the title makes it fail immediately.
+    resp = client.put(
+        f"/api/sources/{source_id}",
+        json={
+            "title": "Source One",
+            "folder": "Test",
+            "url": "https://x/feed",
+            "rules": [{"action": "include", "field": "title", "pattern": "xyz"}],
+        },
+    )
+    assert resp.json()["reconciled"] == 1
+
+    article = client.get("/api/articles").json()[0]
+    assert article["is_read"] is True
+
+
+def test_remove_source_hides_it_but_keeps_its_articles(client):
+    source_id = client.get("/api/sources").json()[0]["id"]
+    article_id = client.get("/api/articles").json()[0]["id"]
+
+    resp = client.delete(f"/api/sources/{source_id}")
+    assert resp.status_code == 200
+    assert resp.json()["reconciled"] == 1
+
+    assert client.get("/api/sources").json() == []  # gone from sidebar
+
+    detail = client.get(f"/api/articles/{article_id}")
+    assert detail.status_code == 200  # still reachable directly
+    assert detail.json()["is_read"] is True
+
+    config_yaml = client.get("/api/config").json()["yaml"]
+    assert "s1" not in config_yaml
+
+
+def test_remove_source_404_for_missing_id(client):
+    resp = client.delete("/api/sources/9999")
+    assert resp.status_code == 404
+
+
+def test_add_source_accepts_imap_type(client):
+    resp = client.post(
+        "/api/sources",
+        json={
+            "key": "a-newsletter",
+            "type": "imap",
+            "title": "A Newsletter",
+            "folder": "Newsletters",
+            "query": "from:sender@example.com newer_than:30d",
+        },
+    )
+    assert resp.status_code == 201
+
+    sources = client.get("/api/sources").json()
+    keys = {s["key"]: s["type"] for s in sources}
+    assert keys["a-newsletter"] == "imap"
+
+
+def test_write_endpoints_respect_readonly_config(client, monkeypatch):
+    from app import settings
+
+    monkeypatch.setattr(settings, "READONLY_CONFIG", True)
+    source_id = client.get("/api/sources").json()[0]["id"]
+
+    assert client.post("/api/sources", json={"key": "x", "type": "rss", "title": "X", "folder": "F", "url": "https://x"}).status_code == 403
+    assert client.put(f"/api/sources/{source_id}", json={"title": "X", "folder": "F", "url": "https://x"}).status_code == 403
+    assert client.delete(f"/api/sources/{source_id}").status_code == 403
+
+
+def test_get_source_returns_full_config_detail(client):
+    source_id = client.get("/api/sources").json()[0]["id"]
+    resp = client.get(f"/api/sources/{source_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"] == "s1"
+    assert body["url"] == "https://x/feed"
+    assert body["rules"] == []
+    assert "unread_count" in body
+
+
+def test_get_source_404_for_missing_id(client):
+    resp = client.get("/api/sources/9999")
+    assert resp.status_code == 404

@@ -913,3 +913,99 @@ correctly). One bug caught in my own test before it shipped: a fake
 `connect_fn` shared across the thread pool read-then-appended to a list
 to identify which source was connecting — not atomic, a real race between
 threads (not a hypothetical one) that a lock fixed.
+
+## 2026-08-13 (cont.) — Comprehensive source management: add/edit/delete for RSS and newsletters
+
+Feedback: *"'Add source' feature doesn't seem to work properly on remote.
+Fix that. Also I want to create a comprehensive tooling to add/remove/edit
+source for both RSS and newsletters without going through the raw config
+yaml file."*
+
+**Diagnosed the "doesn't work" report first**, empirically rather than
+guessing: `POST /api/sources` against the live VM via raw `curl` returned
+`201` immediately — the backend endpoint was never broken. The actual gap
+was in the frontend: `NewSource`'s TypeScript type hardcoded
+`type: 'rss'` literally, and the Add Source modal had no type selector at
+all — there was no way to create a newsletter/IMAP source through the UI,
+full stop. Trying to use "Add source" for a newsletter either did nothing
+(URL field required, submit stayed disabled) or created a nonsensical RSS
+source pointed at a non-feed address. This is exactly what the requested
+comprehensive tooling needed to fix anyway, so no separate patch — the
+rebuild resolves both asks at once.
+
+**Backend, three new endpoints in `sources.py`:**
+- `PUT /api/sources/:id` — edits an existing source's fields in place.
+  `key`/`type` are locked to the existing entry's values regardless of
+  what the request body sends, even if it tries to change them — changing
+  either is really "delete this, add a different one," since dedup
+  ((source_id, guid)) and the sidebar/history both key off a stable
+  `key`. Re-runs `reconcile_read_state` afterward, same as a raw-YAML
+  config save — tightening a rule via the edit form sweeps articles that
+  no longer pass, exactly like editing feeds.yaml by hand always did.
+- `DELETE /api/sources/:id` — removes a source from config only. Shares
+  the exact same "hide from sidebar, keep the DB rows, mark unread
+  articles read" behavior a raw YAML removal already had (from the
+  earlier `list_sources`/`reconcile_read_state` work this session) —
+  deleting via the new UI isn't a different, more destructive path than
+  hand-editing the file was.
+- `GET /api/sources/:id` — full detail (url/query/mailbox_folder/
+  fetch_full_text/rules) merged from the live config by key. Needed
+  because `GET /api/sources` is deliberately lean (sidebar-only fields) —
+  the edit form needs the real feed URL or IMAP query to pre-fill from,
+  which the list endpoint never carried.
+
+**Found and fixed a real, pre-existing bug while building the edit
+path:** `get_or_create_source()` only ever inserts a source's DB row once
+— it has no update branch, so an existing row's `title`/`folder`/`url`
+columns silently never change again, even when config does. This wasn't
+new (refresh has always worked this way), but it meant an edit made
+through the new modal would validate, write to `feeds.yaml`, and then
+*not show up in the sidebar at all* until — never, since nothing else
+updates that row either. `update_source` now writes those three columns
+directly instead of waiting on a refresh path that was never going to do
+it.
+
+**Also closed a gap between the two config-write endpoints:**
+`config_api.put_config` (raw YAML) has checked `READER_READONLY_CONFIG`
+since it was introduced; `sources.add_source` never did, an inconsistency
+nobody had reason to notice until there were three more write endpoints
+sitting right next to it. All five source-mutating handlers now share one
+`_readonly_response()` check.
+
+**Frontend:** `AddSourceModal.tsx` → `SourceModal.tsx`, generalized to
+add *and* edit, with a type toggle (RSS feed / Newsletter) shown only
+when adding — editing shows the existing type as a locked label instead,
+since it can't change. Newsletter sources get a structured query builder
+(From address / Subject contains / first-refresh window in days) that
+composes into the same `from:x subject:"y" newer_than:Nd` string
+`type: gmail` sources have always used, rather than asking for raw query
+syntax — `decomposeQuery()`/`composeQuery()` mirror
+`connectors/imap.py`'s `parse_query()` regexes so an existing source's
+query round-trips through the friendly fields correctly on edit, not just
+on create. Delete is a two-step "click again to confirm" button in the
+drawer footer rather than a native `confirm()` dialog, for visual
+consistency with the rest of the app. Sidebar gets a small ✎ edit icon
+next to every source row, alongside the existing mark-all-read checkmark.
+
+Also fixed in passing: `Source.type` in `api.ts` was typed
+`'rss' | 'gmail' | 'llm'` — `'llm'` isn't a source type at all (that's an
+*article* origin), and `'imap'` was missing entirely. Would have made the
+new type-aware edit-form logic silently wrong for every IMAP source.
+
+**Verification was messier than usual.** Backend: 207 tests (12 new,
+195 → 207), including exact-value round-trips through `get_source`/
+`update_source` (not just status codes) and readonly-mode enforcement
+across all five write endpoints. Frontend: clean typecheck and build.
+Live browser verification hit the same transient extension conflict from
+earlier in this session (screenshots/clicks/JS-eval all failing
+intermittently, not page-specific, survived one fresh tab then recurred
+on a second) — stopped rather than keep fighting it, per how this was
+handled last time it came up, and asked how to proceed. Landed on
+"good enough, ship it, verify manually" — followed immediately by a real
+false alarm: *"can't see any config or feed items for localhost:5173"*,
+which turned out to be that I'd stopped the dev servers as part of
+cleanup a few messages earlier and only the frontend had been
+restarted — the backend was simply not running. Confirmed and fixed via
+`curl` directly (backend port, frontend port, and the frontend's `/api`
+proxy target all individually), not by re-touching the flaky browser
+tool.

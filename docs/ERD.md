@@ -87,7 +87,7 @@ Design rule followed throughout: **pure logic is separated from I/O** and
 every I/O boundary (HTTP fetch, subprocess call, Gmail API) is injectable
 in tests via a `Fetcher`/`Runner`/`GenerateFn`-style callable parameter, so
 the entire pipeline is unit-tested without a real network call or
-subprocess spawn. 196 backend tests, zero of which touch the network.
+subprocess spawn. 207 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
@@ -173,7 +173,10 @@ Notes on choices that aren't obvious from the columns alone:
 | Method & path | Purpose | Blocking I/O? |
 |---|---|---|
 | `GET /api/sources` | List sources with unread counts, filtered to keys present in the live config — a source removed from `feeds.yaml` stops appearing here immediately, even though its DB row and articles aren't deleted (§5) | No |
-| `POST /api/sources` | Structured add-source (validates, writes YAML, creates DB row) | No |
+| `POST /api/sources` | Structured add-source, any type (rss/gmail/imap) (validates, writes YAML, creates DB row) | No |
+| `GET /api/sources/:id` | Full detail for one source (url/query/mailbox_folder/fetch_full_text/rules) — `list_sources` deliberately omits these; backs the edit form's pre-fill | No |
+| `PUT /api/sources/:id` | Edit a source's fields in place; `key`/`type` locked to the existing entry regardless of what's sent (§5) | No |
+| `DELETE /api/sources/:id` | Remove from config only — DB rows/articles untouched, same behavior as a raw-YAML removal (§5) | No |
 | `POST /api/sources/:id/mark-all-read` | Bulk-mark every unread article on one source | No |
 | `GET /api/articles` | List articles (`view=all\|unread\|starred`, `source_id`, `folder`, `limit`=50 default, `offset`) | No |
 | `GET /api/articles/:id` | Article detail; triggers lazy full-text hydration if applicable | One-time per article, but off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests |
@@ -402,6 +405,40 @@ from "actually read." Judged not worth a schema change to solve. Only
 `is_read=0` rows are touched — already-read articles (by either path)
 are left alone, so a genuinely-user-read article's `read_at` is never
 overwritten.
+
+**Editing a source locks `key`/`type`; deleting only ever touches
+config, never the DB.** `PUT /api/sources/:id` accepts a request body
+that could technically include `key`/`type`, and silently overwrites
+whatever it sends for those two fields with the existing entry's actual
+values — not a validation error, a deliberate no-op, because both are
+identity: `_persist_entry`'s dedup is `(source_id, guid)` keyed off a
+stable `key`, and changing it (or `type`, which determines which refresh
+path a source even goes through) is really "delete this one, create a
+different one," not an edit. `DELETE /api/sources/:id` reuses exactly the
+behavior a raw-YAML removal already had before any UI existed for it —
+`list_sources`' `valid_keys` filter hides it, `reconcile_read_state`
+sweeps its still-unread articles to read — so the new button isn't a
+second, more destructive way to remove a source than hand-editing the
+file always was.
+
+**`get_or_create_source()` only ever inserts — building the edit endpoint
+surfaced a real, pre-existing gap.** Every refresh path calls it, but it
+has no update branch: an existing row's `title`/`folder`/`url` columns
+never change again once written, even when `feeds.yaml` does. Not new
+behavior — refresh has always worked this way — but it meant a source
+edited through the UI would validate, write to disk, and then not visibly
+change in the sidebar, since nothing was ever going to refresh those
+columns from config on its own. `update_source` (`sources.py`) writes
+`title`/`folder`/`url` directly instead of assuming a future refresh will
+reconcile them — it won't.
+
+**Newsletter sources get a query *builder*, not a raw text field.** The
+whole point of this tool is not asking the user to hand-write
+`from:x subject:"y" newer_than:Nd` any more than they'd hand-edit YAML —
+`SourceModal.tsx`'s `decomposeQuery()`/`composeQuery()` mirror
+`connectors/imap.py`'s `parse_query()` regexes closely enough that an
+existing source's query round-trips through the friendly from/subject/
+window fields on edit, not just compose cleanly on create.
 
 **Dependency minimalism.** Deliberately avoided FastAPI/pydantic
 (Starlette + msgspec instead), feedparser (stdlib `defusedxml.ElementTree`

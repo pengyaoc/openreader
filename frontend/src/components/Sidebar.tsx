@@ -14,6 +14,7 @@ interface Props {
   theme: 'dark' | 'light'
   onToggleTheme: () => void
   onAddSource: () => void
+  onEditSource: (sourceId: number) => void
   mobileOpen: boolean
   onCloseMobile: () => void
   llmEnabled: boolean
@@ -44,6 +45,7 @@ export function Sidebar({
   theme,
   onToggleTheme,
   onAddSource,
+  onEditSource,
   mobileOpen,
   onCloseMobile,
   llmEnabled,
@@ -190,6 +192,13 @@ export function Sidebar({
                         ✓
                       </button>
                     )}
+                    <button
+                      className="source-row__edit"
+                      onClick={() => onEditSource(s.id)}
+                      title="Edit source"
+                    >
+                      ✎
+                    </button>
                   </div>
                 ))}
               </div>
