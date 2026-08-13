@@ -21,6 +21,7 @@ interface Props {
   jobsByTopic: Record<string, Job | undefined>
   onGenerate: (topicKey: string) => void
   onMarkAllRead: (sourceId: number) => void
+  onMarkAllUnreadRead: () => void
 }
 
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
@@ -50,6 +51,7 @@ export function Sidebar({
   jobsByTopic,
   onGenerate,
   onMarkAllRead,
+  onMarkAllUnreadRead,
 }: Props) {
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
@@ -91,13 +93,24 @@ export function Sidebar({
               active={isSame(selection, { kind: 'saved', view: 'all' })}
               onClick={() => select({ kind: 'saved', view: 'all' })}
             />
-            <NavRow
-              label="Unread"
-              icon="●"
-              count={totalUnread}
-              active={isSame(selection, { kind: 'saved', view: 'unread' })}
-              onClick={() => select({ kind: 'saved', view: 'unread' })}
-            />
+            <div className="source-row">
+              <NavRow
+                label="Unread"
+                icon="●"
+                count={totalUnread}
+                active={isSame(selection, { kind: 'saved', view: 'unread' })}
+                onClick={() => select({ kind: 'saved', view: 'unread' })}
+              />
+              {totalUnread > 0 && (
+                <button
+                  className="source-row__mark-read"
+                  onClick={onMarkAllUnreadRead}
+                  title={`Mark all ${totalUnread} as read`}
+                >
+                  ✓
+                </button>
+              )}
+            </div>
             <NavRow
               label="Starred"
               icon="★"

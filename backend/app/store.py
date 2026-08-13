@@ -7,18 +7,29 @@ import sqlite3
 from datetime import UTC, datetime
 
 
-def list_sources(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute(
-        """
+def list_sources(conn: sqlite3.Connection, valid_keys: set[str] | None = None) -> list[dict]:
+    """valid_keys, when given, restricts results to sources still present in
+    the currently-loaded config — a source's DB row is create-only (written
+    once by get_or_create_source the first time it's refreshed) and is
+    never deleted just because it's later removed from feeds.yaml, so
+    without this filter a removed source keeps showing in the sidebar
+    forever. The API layer passes the live config's source keys; callers
+    that omit it (tests, internal tooling) get the unfiltered DB list."""
+    query = """
         SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
                s.last_error,
                COUNT(a.id) FILTER (WHERE a.is_read = 0) AS unread_count
         FROM sources s
         LEFT JOIN articles a ON a.source_id = s.id
-        GROUP BY s.id
-        ORDER BY s.folder, s.title
-        """
-    ).fetchall()
+    """
+    params: list = []
+    if valid_keys is not None:
+        placeholders = ", ".join("?" for _ in valid_keys)
+        query += f" WHERE s.key IN ({placeholders})" if valid_keys else " WHERE 0"
+        params.extend(valid_keys)
+    query += " GROUP BY s.id ORDER BY s.folder, s.title"
+
+    rows = conn.execute(query, params).fetchall()
     return [
         {
             "id": r[0],
@@ -129,6 +140,18 @@ def mark_all_read(conn: sqlite3.Connection, source_id: int) -> int | None:
     cur = conn.execute(
         "UPDATE articles SET is_read = 1, read_at = ? WHERE source_id = ? AND is_read = 0",
         (datetime.now(UTC).isoformat(), source_id),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def mark_all_read_global(conn: sqlite3.Connection) -> int:
+    """Bulk counterpart to mark_all_read(), scoped to every unread article
+    across every source at once — backs the "mark all read" action on the
+    Unread saved view itself. Returns the number of rows flipped."""
+    cur = conn.execute(
+        "UPDATE articles SET is_read = 1, read_at = ? WHERE is_read = 0",
+        (datetime.now(UTC).isoformat(),),
     )
     conn.commit()
     return cur.rowcount

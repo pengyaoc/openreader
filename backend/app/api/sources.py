@@ -9,7 +9,8 @@ from app.ingest.refresh import get_or_create_source
 
 async def list_sources(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
-    return JSONResponse(store.list_sources(conn))
+    valid_keys = {s.key for s in request.app.state.config.sources}
+    return JSONResponse(store.list_sources(conn, valid_keys=valid_keys))
 
 
 async def add_source(request: Request) -> JSONResponse:

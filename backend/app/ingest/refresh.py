@@ -11,7 +11,7 @@ from typing import Callable
 
 import httpx
 
-from app.config import Source, compile_rule
+from app.config import Config, Source, compile_rule
 from app.connectors import imap as imap_connector
 from app.connectors.base import NormalizedEntry
 from app.connectors.gmail import get_message, list_message_ids, parse_message
@@ -425,3 +425,58 @@ def refresh_all(
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {"elapsed_ms": elapsed_ms, "sources": reports}
+
+
+def reconcile_read_state(conn: sqlite3.Connection, config: Config) -> int:
+    """Runs when config is saved (PUT /api/config): any already-fetched,
+    still-unread article whose source no longer exists in the new config,
+    or whose source's current rules it no longer passes, gets marked
+    read — same effect as the user reading it, via the same mark_read-
+    style guarded UPDATE. Nothing is deleted or hidden; these articles
+    stay fully visible in All items/Starred, same as any other read
+    article (feedback 2026-08-13: "any feed items that don't meet the
+    criteria should be marked as read... they can still stay in the DB").
+
+    Only inspects is_read=0 rows — already-read articles need no action
+    whether a person read them or this same function did on a previous
+    config save, and read_at for a genuinely-user-read article is never
+    touched. Returns the number of articles marked.
+    """
+    valid_keys = {s.key for s in config.sources}
+    rules_by_key = {s.key: [compile_rule(r) for r in s.rules] for s in config.sources}
+    now = datetime.now(UTC).isoformat()
+    marked = 0
+
+    for source_id, key in conn.execute("SELECT id, key FROM sources").fetchall():
+        if key not in valid_keys:
+            cur = conn.execute(
+                "UPDATE articles SET is_read = 1, read_at = ? WHERE source_id = ? AND is_read = 0",
+                (now, source_id),
+            )
+            marked += cur.rowcount
+            continue
+
+        rules = rules_by_key[key]
+        if not rules:
+            continue  # no rules on this source -> nothing can fail to pass
+
+        rows = conn.execute(
+            """SELECT id, title, excerpt, content_html, author, url
+               FROM articles WHERE source_id = ? AND is_read = 0""",
+            (source_id,),
+        ).fetchall()
+        for article_id, title, excerpt, content_html, author, url in rows:
+            raw = RawArticle(
+                title=title or "", summary=excerpt or "", content=content_html or "",
+                author=author or "", url=url or "",
+            )
+            passed, _ = evaluate_rules(raw, rules)
+            if not passed:
+                conn.execute(
+                    "UPDATE articles SET is_read = 1, read_at = ? WHERE id = ?",
+                    (now, article_id),
+                )
+                marked += 1
+
+    conn.commit()
+    return marked

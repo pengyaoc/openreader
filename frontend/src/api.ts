@@ -162,6 +162,11 @@ export const api = {
       json<{ ok: boolean; marked: number }>(r),
     ),
 
+  markAllUnreadRead: () =>
+    fetch(`${API_BASE}/api/articles/mark-all-read`, { method: 'POST' }).then((r) =>
+      json<{ ok: boolean; marked: number }>(r),
+    ),
+
   topics: () =>
     fetch(`${API_BASE}/api/topics`).then((r) => json<{ enabled: boolean; topics: Topic[] }>(r)),
 

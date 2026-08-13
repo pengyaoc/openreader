@@ -82,6 +82,16 @@ async def get_article(request: Request) -> JSONResponse:
     return JSONResponse(article)
 
 
+async def mark_all_read(request: Request) -> JSONResponse:
+    """Backs the "mark all read" action on the Unread saved view — every
+    unread article across every source, not scoped to one like
+    sources.mark_all_read. Registered ahead of /api/articles/{article_id}
+    in main.py's route table so this literal path wins the match."""
+    conn = request.app.state.get_conn()
+    marked = store.mark_all_read_global(conn)
+    return JSONResponse({"ok": True, "marked": marked})
+
+
 async def mark_read(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])

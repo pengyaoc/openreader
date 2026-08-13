@@ -635,65 +635,12 @@ a {
   flex-shrink: 0;
 }
 
-.article-row__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  margin-top: 11px;
-}
-
 .article-row__star {
+  position: absolute;
+  right: 28px;
+  top: 15px;
   color: var(--amber);
   font-size: 13px;
-}
-
-.article-row__mark-read {
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--ink-dim);
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.12s ease;
-}
-
-.article-row__mark-read:hover {
-  color: var(--ink);
-  border-color: var(--ink-faint);
-}
-
-.article-row__mark-read.active {
-  color: var(--amber);
-  border-color: var(--amber);
-  background: var(--amber-wash);
-}
-
-/* Reveal-on-hover only where hover is a real pointer capability (mouse,
-   trackpad) — on touch devices (@media (hover: none)) there's no hover to
-   reveal it with, so it stays visible there instead. Avoids the discovery
-   problem a pure opacity:0 default would create on mobile. */
-@media (hover: hover) {
-  .article-row__mark-read {
-    opacity: 0;
-  }
-
-  .article-row:hover .article-row__mark-read,
-  .article-row__mark-read:focus-visible,
-  .article-row__mark-read.active {
-    opacity: 1;
-  }
-}
-
-@media (hover: none) {
-  .article-row__mark-read {
-    opacity: 1;
-  }
 }
 
 .empty-state {
@@ -1385,16 +1332,6 @@ kbd {
   .article-row__thumb {
     width: 64px;
     height: 64px;
-  }
-
-  /* Always-visible here (no hover to reveal it with — see the (hover: none)
-     rule above), so it's tapped directly rather than discovered on hover;
-     sized up from the 26px desktop scale toward the ~44px HIG guidance
-     this block already targets elsewhere. */
-  .article-row__mark-read {
-    width: 34px;
-    height: 34px;
-    font-size: 14px;
   }
 
   .reader-bar {

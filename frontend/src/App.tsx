@@ -281,6 +281,26 @@ export default function App() {
     },
   })
 
+  const markAllUnreadReadMutation = useMutation({
+    mutationFn: () => api.markAllUnreadRead(),
+    onSuccess: () => {
+      // Global version of markAllReadMutation above — every article, not
+      // scoped to one source_id, so every source's unread_count zeroes too.
+      qc.setQueriesData<ArticlesPages>({ queryKey: ['articles'] }, (old) =>
+        old && {
+          ...old,
+          pages: old.pages.map((page) => page.map((a) => ({ ...a, is_read: true }))),
+        },
+      )
+      qc.setQueriesData<Article>({ queryKey: ['article'] }, (old) =>
+        old ? { ...old, is_read: true } : old,
+      )
+      qc.setQueryData<Source[]>(['sources'], (old) =>
+        old?.map((s) => ({ ...s, unread_count: 0 })),
+      )
+    },
+  })
+
   const openArticle = useCallback(
     (article: Article) => {
       setOpenArticleId(article.id)
@@ -384,6 +404,7 @@ export default function App() {
         jobsByTopic={jobsByTopic}
         onGenerate={(key) => generateMutation.mutate(key)}
         onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
+        onMarkAllUnreadRead={() => markAllUnreadReadMutation.mutate()}
       />
 
       <div className="main">
@@ -409,7 +430,6 @@ export default function App() {
           articles={articles}
           selectedId={cursorId}
           onOpen={openArticle}
-          onToggleRead={(a) => toggleReadMutation.mutate(a)}
           hasMore={articlesQuery.hasNextPage}
           loadingMore={articlesQuery.isFetchingNextPage}
           onLoadMore={() => articlesQuery.fetchNextPage()}

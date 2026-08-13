@@ -414,3 +414,89 @@ def test_get_article_hydrates_full_text_via_the_threaded_fetch_path(tmp_path, mo
     assert resp.status_code == 200
     assert "first real paragraph" in resp.json()["content_html"]
     assert resp.json()["hydrated_at"] is not None
+
+
+def test_mark_all_read_articles_marks_unread_across_every_source(tmp_path):
+    # Distinct from test_mark_all_read_marks_every_unread_article_on_the_source
+    # above (sources.mark_all_read, scoped to one source) — this is the
+    # Unread-saved-view-level bulk action, articles.mark_all_read, spanning
+    # every source at once. Two sources needed to actually prove "every",
+    # not just "the one source client_multi happens to seed".
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES ('s1', 'rss', 'Source One', 'Test', 'https://x/feed')"
+    )
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES ('s2', 'rss', 'Source Two', 'Test', 'https://x/feed2')"
+    )
+    s1 = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    s2 = conn.execute("SELECT id FROM sources WHERE key='s2'").fetchone()[0]
+    conn.execute(
+        "INSERT INTO articles (source_id, guid, url, title, excerpt, content_html, published_at, origin) "
+        "VALUES (?, 'g1', 'https://x/1', 'A1', 'e', '<p>b</p>', '2026-08-01T00:00:00Z', 'feed')",
+        (s1,),
+    )
+    conn.execute(
+        "INSERT INTO articles (source_id, guid, url, title, excerpt, content_html, published_at, origin) "
+        "VALUES (?, 'g2', 'https://x/2', 'A2', 'e', '<p>b</p>', '2026-08-01T00:00:00Z', 'feed')",
+        (s2,),
+    )
+    conn.commit()
+    conn.close()
+
+    config = Config(
+        sources=[
+            Source(key="s1", type="rss", title="Source One", folder="Test", url="https://x/feed"),
+            Source(key="s2", type="rss", title="Source Two", folder="Test", url="https://x/feed2"),
+        ]
+    )
+    config_path = tmp_path / "feeds.yaml"
+    from app.config import to_yaml
+
+    config_path.write_text(to_yaml(config))
+    client = TestClient(create_app(db_path=db_path, config=config, config_path=config_path))
+
+    resp = client.post("/api/articles/mark-all-read")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "marked": 2}
+
+    articles = client.get("/api/articles").json()
+    assert all(a["is_read"] for a in articles)
+
+    sources = client.get("/api/sources").json()
+    assert all(s["unread_count"] == 0 for s in sources)
+
+    # Idempotent — nothing left to mark on a second call.
+    resp2 = client.post("/api/articles/mark-all-read")
+    assert resp2.json() == {"ok": True, "marked": 0}
+
+
+def test_mark_all_read_route_does_not_collide_with_article_id_route(client):
+    # /api/articles/mark-all-read must be matched by its own literal route,
+    # not fall through to /api/articles/{article_id} and try int("mark-all-read").
+    resp = client.post("/api/articles/mark-all-read")
+    assert resp.status_code == 200
+
+
+def test_removing_a_source_from_config_hides_it_from_sidebar_but_keeps_its_articles(client):
+    # End-to-end version of the reported bug: removing a source from
+    # feeds.yaml (via PUT /api/config) must make it disappear from
+    # GET /api/sources (the sidebar) immediately, without deleting its
+    # already-fetched articles — they stay reachable by id and get marked
+    # read by reconcile_read_state (covered separately in test_refresh.py).
+    sources_before = client.get("/api/sources").json()
+    assert any(s["key"] == "s1" for s in sources_before)
+    article_id = client.get("/api/articles").json()[0]["id"]
+
+    resp = client.put("/api/config", json={"yaml": "sources: []\n"})
+    assert resp.status_code == 200
+    assert resp.json()["reconciled"] == 1  # the one seeded article, now read
+
+    sources_after = client.get("/api/sources").json()
+    assert sources_after == []  # gone from the sidebar
+
+    detail = client.get(f"/api/articles/{article_id}")
+    assert detail.status_code == 200  # still in the DB, still directly reachable
+    assert detail.json()["is_read"] is True

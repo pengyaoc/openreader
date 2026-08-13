@@ -3,6 +3,7 @@ from starlette.responses import JSONResponse
 
 from app import settings
 from app.config import ConfigError, parse_config
+from app.ingest.refresh import reconcile_read_state
 
 
 async def get_config(request: Request) -> JSONResponse:
@@ -29,4 +30,8 @@ async def put_config(request: Request) -> JSONResponse:
 
     request.app.state.config_path.write_text(raw_yaml)
     request.app.state.config = config
-    return JSONResponse({"ok": True})
+
+    conn = request.app.state.get_conn()
+    reconciled = reconcile_read_state(conn, config)
+
+    return JSONResponse({"ok": True, "reconciled": reconciled})

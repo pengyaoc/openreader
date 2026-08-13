@@ -35,6 +35,7 @@ def create_app(
         Route("/api/sources", sources.add_source, methods=["POST"]),
         Route("/api/sources/{source_id}/mark-all-read", sources.mark_all_read, methods=["POST"]),
         Route("/api/articles", articles.list_articles),
+        Route("/api/articles/mark-all-read", articles.mark_all_read, methods=["POST"]),
         Route("/api/articles/{article_id}", articles.get_article),
         Route("/api/articles/{article_id}/read", articles.mark_read, methods=["POST"]),
         Route("/api/articles/{article_id}/star", articles.toggle_star, methods=["POST"]),

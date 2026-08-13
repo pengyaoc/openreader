@@ -4,10 +4,15 @@ fetcher so these run with zero I/O.
 """
 from pathlib import Path
 
-from app.config import Rule, Source
+from app.config import Config, Rule, Source
 from app.connectors.http_fetch import FetchResult
 from app.db import connect, init_schema
-from app.ingest.refresh import refresh_all, refresh_gmail_source, refresh_imap_source
+from app.ingest.refresh import (
+    reconcile_read_state,
+    refresh_all,
+    refresh_gmail_source,
+    refresh_imap_source,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -496,3 +501,92 @@ def test_refresh_dedupes_via_content_hash_when_a_feeds_guid_format_drifts(tmp_pa
 
     rows = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
     assert rows == 1
+
+
+def _seed_article(conn, source_id, guid, title, is_read=0):
+    conn.execute(
+        """INSERT INTO articles
+           (source_id, guid, url, title, excerpt, content_html, published_at, origin, is_read)
+           VALUES (?, ?, ?, ?, '', '', '2026-08-01T00:00:00Z', 'feed', ?)""",
+        (source_id, guid, f"https://x/{guid}", title, is_read),
+    )
+
+
+def test_reconcile_marks_articles_read_when_source_removed_from_config(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES ('uber-eng', 'rss', 'Uber Eng', 'Eng', 'https://x')"
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='uber-eng'").fetchone()[0]
+    _seed_article(conn, source_id, "g1", "Post A")
+    _seed_article(conn, source_id, "g2", "Post B")
+    conn.commit()
+
+    # New config no longer has uber-eng at all.
+    new_config = Config(sources=[])
+    marked = reconcile_read_state(conn, new_config)
+
+    assert marked == 2
+    rows = conn.execute("SELECT is_read FROM articles").fetchall()
+    assert all(r[0] == 1 for r in rows)
+
+
+def test_reconcile_marks_articles_read_when_they_no_longer_pass_tightened_rules(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES ('xilei', 'rss', 'Xilei', 'Reading', 'https://x')"
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='xilei'").fetchone()[0]
+    _seed_article(conn, source_id, "g1", "喷嚏图卦 today")  # matched old pattern only
+    _seed_article(conn, source_id, "g2", "【喷嚏图卦 today")  # matches new pattern too
+    conn.commit()
+
+    new_config = Config(
+        sources=[
+            Source(
+                key="xilei", type="rss", title="Xilei", folder="Reading", url="https://x",
+                rules=[Rule(action="include", field="title", pattern="【喷嚏图卦")],
+            )
+        ]
+    )
+    marked = reconcile_read_state(conn, new_config)
+
+    assert marked == 1
+    rows = {r[0]: r[1] for r in conn.execute("SELECT guid, is_read FROM articles")}
+    assert rows["g1"] == 1  # no longer matches -> marked read
+    assert rows["g2"] == 0  # still matches -> left alone
+
+
+def test_reconcile_never_touches_already_read_articles(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES ('s1', 'rss', 'S', 'F', 'https://x')"
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    _seed_article(conn, source_id, "g1", "Anything", is_read=1)
+    conn.commit()
+    read_at_before = conn.execute("SELECT read_at FROM articles WHERE guid='g1'").fetchone()[0]
+
+    marked = reconcile_read_state(conn, Config(sources=[]))  # source removed entirely
+
+    assert marked == 0  # already read, nothing to do
+    read_at_after = conn.execute("SELECT read_at FROM articles WHERE guid='g1'").fetchone()[0]
+    assert read_at_after == read_at_before  # untouched, not re-stamped
+
+
+def test_reconcile_is_idempotent(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES ('s1', 'rss', 'S', 'F', 'https://x')"
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    _seed_article(conn, source_id, "g1", "Post")
+    conn.commit()
+
+    new_config = Config(sources=[])
+    assert reconcile_read_state(conn, new_config) == 1
+    assert reconcile_read_state(conn, new_config) == 0  # already handled

@@ -677,3 +677,78 @@ duplicate groups remained afterward.
 185 backend tests passing (182 → 183 → 184 → 185 across this entry's four
 fixes). All four deployed via `scripts/deploy.sh` and verified live
 against the real VM, not just locally.
+
+## 2026-08-13 (cont.) — Removed sources still showing in the sidebar, and the read-state reconciliation that followed
+
+Feedback: *"I just removed Uber engineering from my remote server's yaml
+file... Uber engineering still show in the left side bar. We shouldn't
+display the section if it's gone from yaml."*
+
+Root cause: `store.list_sources()` reads only the `sources` DB table,
+which is create-only — `get_or_create_source` writes a row the first time
+a source is ever refreshed, and nothing ever removes it. Deleting a
+source from `feeds.yaml` was silently a no-op as far as the sidebar was
+concerned. Fixed by having `list_sources()` accept an optional
+`valid_keys` set and filtering to it; the API handler passes the live
+config's source keys.
+
+**What happens to a removed source's already-fetched articles was a real
+design question, not obvious from the bug report alone** — asked, offered
+three shapes (hide sidebar only / hide everywhere but keep the DB rows /
+delete outright). User's answer was actually a fourth, more precise one:
+*"any feed items that don't meet the criteria should be marked as read
+and hidden from UI. They can still stay in the DB."* First pass added a
+new `hidden` column (plus the app's first schema migration — `ALTER
+TABLE ... ADD COLUMN`, since `CREATE TABLE IF NOT EXISTS` is a no-op
+against tables that already have real data on both the local DB and the
+live VM) to distinguish "hidden because it no longer matches" from
+"read because the user actually read it." Pushback: *"Why do you need
+migration? You can just mark them as READ, right? That's existing
+feature."* Correct that `is_read` alone is cheaper and already exists —
+the tradeoff is that it wouldn't hide these articles from All items or
+Starred (only from Unread), and conflates "read because filtered out"
+with "read because you opened it," so a rule loosened back later has no
+way to tell which read articles might be worth surfacing again. User
+confirmed that gap was fine. Reverted the `hidden` column and migration
+entirely, kept the `valid_keys` sidebar filter, and reimplemented
+reconciliation as a plain `is_read=1` UPDATE — no schema change needed
+after all.
+
+`reconcile_read_state()` (`refresh.py`) runs on every `PUT /api/config`:
+for each DB source row, if its key isn't in the new config, mark all its
+unread articles read; if it's still in config, re-run `evaluate_rules`
+against every unread article's stored fields against the *current* rules
+and mark the ones that no longer pass. Only touches `is_read=0` rows, so
+already-read articles (by either path) are never re-touched — `read_at`
+for a genuinely-user-read article is preserved exactly.
+
+Also removed the per-article-row "Mark as Read" checkmark added earlier
+this session — feedback: *"the mark as read at the feed item level
+interrupts UI too much. especially on mobile."* Discussed lower-profile
+alternatives (bare-glyph styling, swipe-to-reveal) before the actual ask
+landed: drop the per-row action entirely, keep the per-source bulk action
+(sidebar, next to each source's unread count), and add the same bulk
+pattern to the "Unread" saved view itself — one click marks every unread
+article across every source read, not just one source's. New
+`POST /api/articles/mark-all-read` (registered ahead of
+`/api/articles/{article_id}` in the route table so the literal path
+wins the match — Starlette matches routes in registration order) backs
+it; `store.mark_all_read_global()` is the un-scoped counterpart to the
+existing per-source `mark_all_read()`. Frontend: `Sidebar`'s "Unread"
+`NavRow` gets the same `.source-row`/`.source-row__mark-read` wrapper
+already built for per-source rows (no new CSS needed), shown only when
+`totalUnread > 0`.
+
+Verified live end-to-end against real local data (not just typecheck):
+confirmed a genuinely orphaned `uber-eng` source row (removed from
+`config/feeds.yaml` earlier when pulling the VM's edited config down to
+align local) disappeared from the sidebar immediately on server restart;
+clicked the new "Unread" checkmark and confirmed every source's count and
+the total zeroed together, with buttons correctly disappearing once
+nothing was left to mark.
+
+192 backend tests passing (185 → 192: reconcile_read_state's four
+scenarios — source removed, rules tightened, already-read articles
+untouched, idempotent — the global mark-all-read endpoint including a
+route-collision regression test, and the end-to-end config-removal
+flow through the real API).
