@@ -556,3 +556,24 @@ above is real, verified-live app and infrastructure change; the docs/
 (no such file exists in the repo — the real credential only ever touched
 the VM directly — but the new `READER_IMAP_*` env vars make it likely
 someone creates a local one for testing later).
+
+## 2026-08-13 — Bug: article scroll position persisted across prev/next
+
+Feedback: *"when go left and right on article view, the article will
+persist previous page's scroll state. It shouldn't. On moving left and
+right, article should start from the beginning."*
+
+`ArticleReader` stays mounted while paging through articles — `App.tsx`
+swaps only the `article` prop, `onPrev`/`onNext` never unmount the
+component — so `.reader-scroll`'s `scrollTop` carried over unchanged from
+whatever the previous article was left at. Fixed with a `ref` on the
+scroll container and a `useEffect` keyed on `article.id` that resets
+`scrollTop` to 0 on every article change, in both directions.
+
+Verified live in a real browser against real local data (not just
+typecheck): opened an article, scrolled deep into it, clicked next — new
+article opened at the top; clicked prev back — also opened at the top.
+Deployed to the VM (`scripts/deploy.sh`); same cold-start 503 as the first
+deploy (Apache reaching the backend before `uv sync` + restart finished),
+settled within a few seconds as before — now a recognized, not alarming,
+shape for this box rather than something to re-diagnose each time.
