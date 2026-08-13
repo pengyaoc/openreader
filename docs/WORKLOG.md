@@ -1226,3 +1226,20 @@ VM cutover (provisioning the new env vars, removing Apache's
 `AuthType Basic` block, decommissioning `.htpasswd-reader`) is a separate
 manual step, not yet done as of this entry — same "secrets never touch
 this repo or `deploy.sh`" pattern the IMAP credentials already use.
+
+**VM cutover, done.** `READER_AUTH_PASSWORD_HASH`/`READER_SESSION_SECRET`
+added to `/opt/openreader/openreader.env`, deployed via `scripts/deploy.sh`.
+Verified the app-layer login directly against `127.0.0.1:8787` first
+(bypassing Apache) before touching its config — hit one testing-method
+false alarm there: the VM's `curl` is an ancient libcurl (7.64.0, Debian
+buster) that correctly refuses to store/send a `Secure`-flagged cookie
+over plain `http://127.0.0.1`, same as a real browser would; not a bug,
+just the wrong protocol to test a `Secure` cookie against. Backed up
+`wordpress-https.conf`, removed the `AuthType Basic`/`AuthUserFile`/
+`Require valid-user` lines (kept `ProxyPass`), `apachectl configtest` +
+reload, then verified the full flow through the real
+`https://pengyaochen.com/reader/` domain: 401 with no cookie, 401 wrong
+password, 200 + correctly-flagged `Secure` cookie on success, 200 on a
+protected route with that cookie, `index.html` still reachable with no
+cookie at all (so the login screen itself can load). Decommissioned
+`.htpasswd-reader` and the config backup once confirmed working.
