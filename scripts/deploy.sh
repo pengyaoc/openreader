@@ -78,5 +78,10 @@ gcloud compute ssh --zone "$ZONE" --project "$PROJECT" "$VM" --command "
 
 echo "==> Verifying..."
 sleep 1
-curl -s -o /dev/null -w "https://pengyaochen.com/reader/ -> %{http_code}\n" \
+# /reader/ is behind HTTP basic auth (2026-08-13) — a bare request without
+# -u correctly gets 401, not 200. That's confirmation the auth gate and the
+# proxy are both up, not a failure; this script doesn't carry the password,
+# so it can't check past the gate. Log in via the browser to confirm the
+# app itself loaded.
+curl -s -o /dev/null -w "https://pengyaochen.com/reader/ -> %{http_code} (401 is expected — see comment above)\n" \
   https://pengyaochen.com/reader/

@@ -577,3 +577,103 @@ Deployed to the VM (`scripts/deploy.sh`); same cold-start 503 as the first
 deploy (Apache reaching the backend before `uv sync` + restart finished),
 settled within a few seconds as before — now a recognized, not alarming,
 shape for this box rather than something to re-diagnose each time.
+
+## 2026-08-13 — Mark as Read, event-loop blocking fix, basic auth, and a live config-corruption incident
+
+Four threads in one session, landed roughly in this order:
+
+**Mark as Read.** Per-article checkmark in `ArticleList` (reveal-on-hover
+via `@media (hover: hover)`/`(hover: none)`, so touch devices — which have
+no hover state to reveal it with — get it always-visible instead) plus a
+new `POST /api/sources/{id}/mark-all-read` bulk action in the sidebar.
+Reused the existing `toggleReadMutation` for the per-row button rather
+than building a new one-directional endpoint — already fully wired,
+tested, and reversible on a second click.
+
+**Event-loop blocking (found from a live report: *"read for long articles
+take a few seconds to load"*).** Two synchronous calls were running
+directly on uvicorn's single event loop:
+- `images.py`'s SSRF guard did a blocking `socket.getaddrinfo()` inline in
+  the async `proxy_image` handler — once per image. Verified against a
+  real 35-image article from the local DB: concurrent fetches dropped
+  from a 28.4s serialized sum to 2.3s wall-clock once moved to
+  `asyncio.to_thread`.
+- `articles.py`'s `hydrate_article()` call did a synchronous `httpx.get`
+  (up to a 5s timeout) inline in the async `get_article` handler on first
+  open of any `fetch_full_text` source's article — blocking every other
+  in-flight request for that duration. Also moved to `asyncio.to_thread`,
+  with its own SQLite connection (the request's connection can't cross
+  threads — `sqlite3` defaults to `check_same_thread=True`).
+
+**Blank byline (found from a screenshot: a "早报" roundup article showing
+just a date, no name, before it).** `get_article()` never joined `sources`
+the way `list_articles()` does, so `source_title` was always `None` on the
+single-article detail endpoint the reader actually uses — the frontend's
+new author-or-source-name fallback had nothing to fall back to. Fixed the
+JOIN in `store.py` alongside the frontend fallback.
+
+**HTTP basic auth on `/reader/`, and dropping `READER_READONLY_CONFIG`.**
+Request: *"config/feeds.yaml is not editable on remote deployment... can
+we make it writable."* The flag existed specifically because
+`PUT /api/config` was unauthenticated and internet-reachable; making it
+writable again without addressing that would have reopened the exact
+thing it closed. Chose Apache basic auth over the alternatives discussed
+back when the VM was first provisioned (WP-login reuse isn't cleanly
+available on stock Apache — see the earlier 2026-08-12 entry) now that
+there's a real reason to want the config UI to work remotely. Bcrypt hash
+generated locally (`htpasswd -nbB`) so the plaintext password never
+touches the VM's disk or shell history — only `/etc/apache2/.htpasswd-
+reader` (root:www-data, 640) does. `auth_basic`/`authn_file` were already
+enabled. Verified: no credentials → 401, wrong password → 401, correct →
+200, WordPress unaffected throughout.
+
+**Incident: a verification script corrupted the live config.** While
+confirming `PUT /api/config` worked post-auth, a round-trip test wrapped
+the *entire GET response* (`{"yaml": "..."}`) as the value of a second
+`{"yaml": ...}` object instead of extracting just the inner field —
+double-JSON-encoded the file's contents and pushed it back. `parse_config`
+didn't reject it: the garbled text was technically valid YAML (a flow
+mapping with one key, `"yaml"`, whose double-quoted value YAML itself
+unescaped back into real newlines), so it parsed to `{"yaml": "<original
+text>"}\` — a dict with no field `Config` recognizes, which msgspec's
+unknown-field-drop behavior (the same behavior `_check_no_credentials`
+exists to guard against, from the 2026-08-12 entry) silently accepted as
+an all-defaults, zero-source `Config`. Caught immediately by validating
+the exact same PUT body through `parse_config` locally before touching
+the live server again — 14 sources, correct `llm.enabled` — then pushing
+that verified-correct body and restarting the service to force a clean
+reload. Confirmed recovery with a scoped `POST /api/refresh?source=xkcd`
+succeeding (proving `app.state.config.sources` was genuinely restored, not
+just the file on disk — `GET /api/sources` alone wouldn't have proven
+that, since it reads the DB's `sources` table, populated by past refreshes
+independent of the current in-memory config). No data was lost — this
+corrupted the source *list*, not `data/reader.db`.
+
+Password rotated once more after this, purely at the user's request (not
+related to the incident, which never exposed the credential itself) — same
+local-hash-generation process, old password confirmed rejected and new
+one confirmed accepted immediately after.
+
+**Duplicate articles (found from a live report, same session, right after
+the incident above): *"I am seeing duplicate feed items for Simon
+Willison feed items, but not others."*** `_persist_entry` deduped only on
+`(source_id, guid)`, despite a `content_hash` column (canonical URL +
+normalized title) already being computed and stored on every insert, with
+its own index — never queried. `simonwillison.net`'s Atom feed started
+appending a `#atom-everything` fragment to entry `<id>` values it
+previously served bare; `canonicalize_url()` already strips fragments, so
+`content_hash` stayed stable across that drift while `guid` didn't,
+minting a "new" guid for every already-ingested post on the next refresh.
+30 articles duplicated in production as a result. Fixed by checking
+`content_hash` alongside `guid` in the dedup query — the column and index
+existed for exactly this, just never wired up. Regression test reproduces
+the exact scenario (same Atom entry fetched twice with a fragment added to
+its `<id>` between fetches; asserts one row, not two). Cleaned up the 28
+existing duplicate groups on the live VM directly (source list only,
+`data/reader.db`) — kept whichever row of each pair was already read or
+starred, preserving reading state, tie-broken by lowest id; verified zero
+duplicate groups remained afterward.
+
+185 backend tests passing (182 → 183 → 184 → 185 across this entry's four
+fixes). All four deployed via `scripts/deploy.sh` and verified live
+against the real VM, not just locally.

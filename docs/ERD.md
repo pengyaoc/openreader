@@ -303,15 +303,18 @@ raw parsed YAML dict, before struct conversion would hide the problem,
 and `parse_config` raises `ConfigError` rather than allowing the write.
 
 **`READER_READONLY_CONFIG` is a deployment-time flag, not a permission
-system.** v1 has no auth anywhere — `PUT /api/config` is reachable by
-anyone who can reach the port. That's an acceptable LAN-only default, but
-not once the app is reachable from the internet: the same endpoint can
-rewrite the entire source list *and*, since it also assigns
+system.** v1 has no auth anywhere in the app itself — `PUT /api/config` is
+reachable by anyone who can reach the port. That's an acceptable LAN-only
+default, but not once the app is reachable from the internet: the same
+endpoint can rewrite the entire source list *and*, since it also assigns
 `app.state.config`, flip `llm.enabled` back on at runtime regardless of
-what's on disk. Rather than build real auth for a single-user app, the
-flag makes the endpoint hard-403 on deployments where it doesn't belong;
-config there gets edited by editing the file directly (SSH), which is
-already how the file's owner interacts with the box.
+what's on disk. Two ways to close that gap, both legitimate depending on
+what's in front of the app: set the flag (hard-403, edit config via SSH
+instead — what a deployment with no auth layer at all should do), or put
+real auth in front of the whole app (e.g. HTTP basic auth at the reverse
+proxy — see §7.1) and leave the flag unset, since the endpoint is no
+longer anonymously reachable. The VM deployment moved from the former to
+the latter on 2026-08-13 once basic auth was added.
 
 **`type: imap` exists specifically because Google expires OAuth refresh
 tokens after 7 days for unverified apps.** Discovered when planning an
@@ -415,12 +418,17 @@ Full history of the tradeoffs and what was found along the way is in
   manager can only read files it owns) — see §5's IMAP entry for why the
   credential in that file is scoped to a throwaway mailbox specifically
   because of this.
-- **`READER_READONLY_CONFIG=1`** and **`llm.enabled: false`** are both set
-  on this deployment — the former per §5, the latter because the `claude`
-  CLI subprocess (Node, 300–600 MB, up to 10 minutes) is the one thing
-  that would reliably OOM a 1 GB box also running Apache/MySQL/PHP-FPM.
+- **`llm.enabled: false`** on this deployment — the `claude` CLI subprocess
+  (Node, 300–600 MB, up to 10 minutes) is the one thing that would
+  reliably OOM a 1 GB box also running Apache/MySQL/PHP-FPM.
+- **HTTP basic auth on `/reader/`** (added 2026-08-13, Apache
+  `auth_basic`/`authn_file`, bcrypt hash generated locally so the
+  plaintext never touches the VM) stands in front of the whole app —
+  `READER_READONLY_CONFIG` is intentionally *not* set here as a result
+  (see §5's entry on that flag): the config-write endpoint no longer needs
+  its own lock once nothing unauthenticated can reach it at all.
 - Verified live end-to-end post-deploy: real RSS refresh (conditional-GET
   304s and dedup both confirmed against real feed servers, not just
   fixtures), the SSRF guard rejecting a loopback/metadata `/api/img` URL,
-  `PUT /api/config` 403ing, and all four `type: imap` sources
-  authenticating against a dedicated mailbox over real TLS.
+  and all four `type: imap` sources authenticating against a dedicated
+  mailbox over real TLS.
