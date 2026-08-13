@@ -6,7 +6,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from '@tanstack/react-query'
-import { api, type Article, type Job, type RefreshReport, type Source } from './api'
+import { api, UnauthorizedError, type Article, type Job, type RefreshReport, type Source } from './api'
 import type { ViewSelection } from './types'
 import { Sidebar } from './components/Sidebar'
 import { ArticleList } from './components/ArticleList'
@@ -14,6 +14,7 @@ import { ArticleReader } from './components/ArticleReader'
 import { ConfigEditor } from './components/ConfigEditor'
 import { SourceModal } from './components/SourceModal'
 import { RefreshToast } from './components/RefreshToast'
+import { LoginPage } from './components/LoginPage'
 
 const VIEW_TITLES: Record<string, string> = {
   all: 'All items',
@@ -132,6 +133,8 @@ export default function App() {
 
   const sourcesQuery = useQuery({ queryKey: ['sources'], queryFn: api.sources })
   const topicsQuery = useQuery({ queryKey: ['topics'], queryFn: api.topics })
+
+  const needsLogin = sourcesQuery.error instanceof UnauthorizedError
 
   // A source selection restored from the URL only has the id (see
   // parseSelectionFromQuery) — fill in its title once sources have loaded.
@@ -384,6 +387,10 @@ export default function App() {
         ? selection.title
         : selection.folder
 
+  if (needsLogin) {
+    return <LoginPage onLoggedIn={() => qc.invalidateQueries()} />
+  }
+
   return (
     <div className="shell">
       <Sidebar
@@ -407,6 +414,7 @@ export default function App() {
         onGenerate={(key) => generateMutation.mutate(key)}
         onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
         onMarkAllUnreadRead={() => markAllUnreadReadMutation.mutate()}
+        onLogout={() => api.logout().finally(() => qc.invalidateQueries())}
       />
 
       <div className="main">

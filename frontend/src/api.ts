@@ -129,8 +129,22 @@ interface SourceFieldsImap {
 export type SourceFields = SourceFieldsRss | SourceFieldsImap
 export type NewSource = SourceFields & { key: string }
 
+// Thrown instead of a generic Error on a 401, so callers (App.tsx's
+// top-level auth check) can tell "not logged in" apart from a normal
+// request failure and show the login screen instead of an error state.
+export class UnauthorizedError extends Error {}
+
+// Every call goes through here so `credentials: 'include'` (the session
+// cookie set by POST /api/login) is never forgotten at a call site — the
+// app-layer login replacing Apache Basic Auth (docs/WORKLOG.md,
+// 2026-08-13 cont.) only works if the cookie actually round-trips.
+function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${API_BASE}${path}`, { ...init, credentials: 'include' })
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
+    if (res.status === 401) throw new UnauthorizedError('not authenticated')
     let detail = res.statusText
     try {
       const body = await res.json()
@@ -144,7 +158,16 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  sources: () => fetch(`${API_BASE}/api/sources`).then((r) => json<Source[]>(r)),
+  login: (password: string) =>
+    apiFetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    }).then((r) => json<{ ok: boolean }>(r)),
+
+  logout: () => apiFetch('/api/logout', { method: 'POST' }).then((r) => json<{ ok: boolean }>(r)),
+
+  sources: () => apiFetch('/api/sources').then((r) => json<Source[]>(r)),
 
   articles: (params: { view?: string; source_id?: number; folder?: string; offset?: number }) => {
     const qs = new URLSearchParams()
@@ -152,78 +175,75 @@ export const api = {
     if (params.source_id) qs.set('source_id', String(params.source_id))
     if (params.folder) qs.set('folder', params.folder)
     if (params.offset) qs.set('offset', String(params.offset))
-    return fetch(`${API_BASE}/api/articles?${qs}`).then((r) => json<Article[]>(r))
+    return apiFetch(`/api/articles?${qs}`).then((r) => json<Article[]>(r))
   },
 
-  article: (id: number) => fetch(`${API_BASE}/api/articles/${id}`).then((r) => json<Article>(r)),
+  article: (id: number) => apiFetch(`/api/articles/${id}`).then((r) => json<Article>(r)),
 
   markRead: (id: number) =>
-    fetch(`${API_BASE}/api/articles/${id}/read`, { method: 'POST' }).then((r) =>
-      json<{ ok: boolean }>(r),
-    ),
+    apiFetch(`/api/articles/${id}/read`, { method: 'POST' }).then((r) => json<{ ok: boolean }>(r)),
 
   toggleStar: (id: number) =>
-    fetch(`${API_BASE}/api/articles/${id}/star`, { method: 'POST' }).then((r) =>
+    apiFetch(`/api/articles/${id}/star`, { method: 'POST' }).then((r) =>
       json<{ is_starred: boolean }>(r),
     ),
 
   toggleRead: (id: number) =>
-    fetch(`${API_BASE}/api/articles/${id}/toggle-read`, { method: 'POST' }).then((r) =>
+    apiFetch(`/api/articles/${id}/toggle-read`, { method: 'POST' }).then((r) =>
       json<{ is_read: boolean }>(r),
     ),
 
   refresh: (sourceKey?: string) =>
-    fetch(
-      `${API_BASE}/api/refresh${sourceKey ? `?source=${encodeURIComponent(sourceKey)}` : ''}`,
+    apiFetch(
+      `/api/refresh${sourceKey ? `?source=${encodeURIComponent(sourceKey)}` : ''}`,
       { method: 'POST' },
     ).then((r) => json<RefreshReport>(r)),
 
   addSource: (source: NewSource) =>
-    fetch(`${API_BASE}/api/sources`, {
+    apiFetch('/api/sources', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(source),
     }).then((r) => json<{ ok: boolean; key: string }>(r)),
 
-  getSource: (id: number) =>
-    fetch(`${API_BASE}/api/sources/${id}`).then((r) => json<SourceDetail>(r)),
+  getSource: (id: number) => apiFetch(`/api/sources/${id}`).then((r) => json<SourceDetail>(r)),
 
   updateSource: (id: number, fields: SourceFields) =>
-    fetch(`${API_BASE}/api/sources/${id}`, {
+    apiFetch(`/api/sources/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(fields),
     }).then((r) => json<{ ok: boolean; key: string; reconciled: number }>(r)),
 
   removeSource: (id: number) =>
-    fetch(`${API_BASE}/api/sources/${id}`, { method: 'DELETE' }).then((r) =>
+    apiFetch(`/api/sources/${id}`, { method: 'DELETE' }).then((r) =>
       json<{ ok: boolean; reconciled: number }>(r),
     ),
 
   markAllRead: (sourceId: number) =>
-    fetch(`${API_BASE}/api/sources/${sourceId}/mark-all-read`, { method: 'POST' }).then((r) =>
+    apiFetch(`/api/sources/${sourceId}/mark-all-read`, { method: 'POST' }).then((r) =>
       json<{ ok: boolean; marked: number }>(r),
     ),
 
   markAllUnreadRead: () =>
-    fetch(`${API_BASE}/api/articles/mark-all-read`, { method: 'POST' }).then((r) =>
+    apiFetch('/api/articles/mark-all-read', { method: 'POST' }).then((r) =>
       json<{ ok: boolean; marked: number }>(r),
     ),
 
   topics: () =>
-    fetch(`${API_BASE}/api/topics`).then((r) => json<{ enabled: boolean; topics: Topic[] }>(r)),
+    apiFetch('/api/topics').then((r) => json<{ enabled: boolean; topics: Topic[] }>(r)),
 
   generateTopic: (key: string) =>
-    fetch(`${API_BASE}/api/topics/${encodeURIComponent(key)}/generate`, { method: 'POST' }).then(
-      (r) => json<{ job_id: number }>(r),
+    apiFetch(`/api/topics/${encodeURIComponent(key)}/generate`, { method: 'POST' }).then((r) =>
+      json<{ job_id: number }>(r),
     ),
 
-  getJob: (id: number) => fetch(`${API_BASE}/api/jobs/${id}`).then((r) => json<Job>(r)),
+  getJob: (id: number) => apiFetch(`/api/jobs/${id}`).then((r) => json<Job>(r)),
 
-  getConfig: () => fetch(`${API_BASE}/api/config`).then((r) => json<{ yaml: string }>(r)),
+  getConfig: () => apiFetch('/api/config').then((r) => json<{ yaml: string }>(r)),
 
   putConfig: (yaml: string) =>
-    fetch(`${API_BASE}/api/config`, {
+    apiFetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ yaml }),

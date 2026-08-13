@@ -1136,3 +1136,93 @@ rule; the file itself wasn't touched.
 192 backend tests passing (207 → 192: the 15 Gmail-specific tests
 removed with `test_gmail.py` and the gmail refresh-source tests in
 `test_refresh.py`). Frontend typecheck and build clean.
+
+## 2026-08-13 (cont.) — Replaced Apache Basic Auth with an app-layer login, same day it was added
+
+Feedback: *"The sign in for remote site seems to show very frequently.
+Why? Also doesn't seem to trigger my mobile chrome password manager to
+remember the password either."* Both symptoms turned out to be structural
+to HTTP Basic Auth, not a misconfiguration — confirmed directly against
+the live VM's Apache config (`AuthType Basic` / `AuthUserFile` /
+`Require valid-user` inside `<Location /reader/>`, hand-edited on the box
+earlier the same day, never tracked in this repo): Chrome's
+password-manager save UI (desktop and mobile alike) hooks real `<form>`
+POST submissions or the Credential Management API, never the browser's
+native `WWW-Authenticate: Basic` popup — so it was never going to offer
+to save this credential, on any platform. And Basic Auth's credential
+cache is an in-memory, browser-session/tab-lifetime thing with no
+server-side knob to extend it; mobile Chrome discards it aggressively
+whenever it reclaims a backgrounded tab's renderer process, which is
+routine on a phone. Investigated and confirmed reusing WordPress's own
+login was still a dead end (per the earlier same-day entry:
+`mod_authn_dbd` can't verify phpass hashes, `mod_authnz_fcgi` only
+implements the FastCGI Responder role) — this plan doesn't touch
+WordPress.
+
+Decided with the user: app-layer login instead — a real login screen (so
+Chrome recognizes and offers to save it) and a 90-day session cookie.
+Single shared password, no accounts, matching this app's existing
+no-multi-user-auth stance.
+
+**`app/auth.py` (new).** `verify_password` — bcrypt check against
+`READER_AUTH_PASSWORD_HASH` (a hash generated locally the same way
+`.htpasswd-reader` was, `htpasswd -nbB`; the plaintext never touches the
+server, arriving only transiently in a login request body). Session
+token is stateless — `{expires_at}.{hmac_sha256(secret, expires_at)}`,
+signed with `READER_SESSION_SECRET` — no session table, nothing to
+garbage-collect; verifying is one `hmac.compare_digest` and an expiry
+check. `AuthMiddleware` (pure ASGI middleware) gates every `/api/*` route
+except `/api/login`/`/api/logout`, returning a plain 401 with no
+`WWW-Authenticate` header — that header is specifically what makes a
+browser pop its native dialog, and omitting it is what lets the SPA's own
+fetch code handle a 401 instead. `app/api/auth_api.py`: `POST /api/login`
+(bcrypt check via `asyncio.to_thread` — deliberately ~100-300ms of CPU,
+must not run inline on the event loop, same pattern as this app's other
+blocking work) and `POST /api/logout` (clears the cookie, always 200).
+
+**Caught during implementation, not in the original plan: fail-closed-by-
+default would have broken local/LAN use.** First pass made
+`AuthMiddleware` reject every request whenever either env var was unset —
+reasoning was "this is what stands in for Basic Auth, it must not have a
+forgot-to-configure bypass." Live-tested against a local run with no env
+vars set and found every route 401ing, which silently makes the app
+unusable for exactly the local/LAN scenario the README's Quickstart has
+always promised zero-auth for (Basic Auth was only ever added at the
+Apache layer, only on the internet-facing VM — local dev never had it).
+Fixed: both env vars unset is now permissive (matches every other
+optional credential in this app — `IMAP_HOST`, `READER_READONLY_CONFIG`);
+*exactly one* set fails closed, since that looks like a deploy mistake
+rather than an intentional "no auth" choice.
+
+**Frontend.** `api.ts` gained an `apiFetch()` wrapper so every call
+(previously 15 independent `fetch()` sites, none setting `credentials`)
+gets `credentials: 'include'` in one place, plus `login()`/`logout()` and
+an `UnauthorizedError` the shared `json<T>` helper throws on 401 instead
+of a generic `Error`, so callers can tell "not logged in" apart from a
+normal failure. `main.tsx`'s `QueryClient` gets a `retry` override that
+doesn't retry `UnauthorizedError` — otherwise every query would retry 3
+times against a 401 before settling, delaying the login screen for no
+reason. `LoginPage.tsx` (new): a real `<form onSubmit>` with a single
+password field (`autoComplete="current-password"`, no username — this
+app has exactly one credential) — that realness is what makes Chrome's
+save-password heuristic fire at all. `App.tsx` renders it instead of the
+3-pane shell whenever `sourcesQuery.error instanceof UnauthorizedError`;
+`Sidebar.tsx` gets a "Log out" button in its footer, next to Configure.
+
+**Verification.** `bcrypt` added as a real dependency (`pyproject.toml`)
+— the one class of thing not worth hand-rolling, and small next to what
+the Gmail OAuth removal just took out. 202 backend tests passing (192 →
+202: new `test_auth.py` — login success/failure, protected-route
+gating, expired/tampered tokens, logout, and both the permissive-when-
+unconfigured and fail-closed-when-partial cases found above). Frontend
+typecheck and build clean. Full login/logout flow smoke-tested live
+against a local server via curl before touching the VM: 401 unauthenticated,
+401 wrong password, 200 + `Secure`/`HttpOnly`/`SameSite=Lax` cookie
+(`Max-Age=7776000`) on success, 200 on the protected route with the
+cookie, 200 logout, 401 after — confirmed no `WWW-Authenticate` header
+anywhere the way Basic Auth always sent one.
+
+VM cutover (provisioning the new env vars, removing Apache's
+`AuthType Basic` block, decommissioning `.htpasswd-reader`) is a separate
+manual step, not yet done as of this entry — same "secrets never touch
+this repo or `deploy.sh`" pattern the IMAP credentials already use.

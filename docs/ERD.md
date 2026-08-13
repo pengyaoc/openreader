@@ -49,10 +49,14 @@ backend/app/
 ├── main.py            # Starlette app factory, route table
 ├── asgi.py             # production entrypoint (uvicorn app.asgi:app)
 ├── settings.py         # env-driven paths (DB, config, media, IMAP
-│                        # host/user/password, readonly-config flag)
+│                        # host/user/password, readonly-config flag,
+│                        # auth password hash/session secret)
 ├── config.py            # msgspec Config/Source/Rule/Topic structs,
 │                        # YAML parse+validate+serialize (to_yaml),
 │                        # credential-key guard (see §5)
+├── auth.py               # app-layer login: bcrypt password check,
+│                         # HMAC-signed session cookie, AuthMiddleware
+│                         # (see §5)
 ├── db.py                # schema (see §3), WAL connection factory
 ├── store.py             # read/write helpers used by the API layer
 ├── connectors/
@@ -79,7 +83,8 @@ backend/app/
 │   └── worker.py                    # out-of-process job runner (__main__)
 └── api/
     ├── sources.py, articles.py, refresh_api.py, config_api.py,
-    │ images.py, generate_api.py   # thin Starlette handlers over the above
+    │ images.py, generate_api.py, auth_api.py   # thin Starlette handlers
+    │                                            # over the above
 ```
 
 Design rule followed throughout: **pure logic is separated from I/O** and
@@ -169,8 +174,14 @@ Notes on choices that aren't obvious from the columns alone:
 
 ## 4. API surface
 
+Every route below except `/api/login`/`/api/logout` is gated by
+`AuthMiddleware` (§5) whenever login is configured — permissive (no
+cookie required) otherwise, matching this app's local/LAN default.
+
 | Method & path | Purpose | Blocking I/O? |
 |---|---|---|
+| `POST /api/login` | Verify password against `READER_AUTH_PASSWORD_HASH`, set the session cookie (§5) — unauthenticated (has to be, nothing to authenticate with yet) | bcrypt check off the event loop (`asyncio.to_thread`) — deliberately ~100-300ms |
+| `POST /api/logout` | Clear the session cookie — always 200, a no-op if there was nothing to clear; unauthenticated | No |
 | `GET /api/sources` | List sources with unread counts, filtered to keys present in the live config — a source removed from `feeds.yaml` stops appearing here immediately, even though its DB row and articles aren't deleted (§5) | No |
 | `POST /api/sources` | Structured add-source, any type (rss/imap) (validates, writes YAML, creates DB row) | No |
 | `GET /api/sources/:id` | Full detail for one source (url/query/mailbox_folder/fetch_full_text/rules) — `list_sources` deliberately omits these; backs the edit form's pre-fill | No |
@@ -340,7 +351,7 @@ raw parsed YAML dict, before struct conversion would hide the problem,
 and `parse_config` raises `ConfigError` rather than allowing the write.
 
 **`READER_READONLY_CONFIG` is a deployment-time flag, not a permission
-system.** v1 has no auth anywhere in the app itself — `PUT /api/config` is
+system.** By default v1 has no auth requirement — `PUT /api/config` is
 reachable by anyone who can reach the port. That's an acceptable LAN-only
 default, but not once the app is reachable from the internet: the same
 endpoint can rewrite the entire source list *and*, since it also assigns
@@ -348,10 +359,34 @@ endpoint can rewrite the entire source list *and*, since it also assigns
 what's on disk. Two ways to close that gap, both legitimate depending on
 what's in front of the app: set the flag (hard-403, edit config via SSH
 instead — what a deployment with no auth layer at all should do), or put
-real auth in front of the whole app (e.g. HTTP basic auth at the reverse
-proxy — see §7.1) and leave the flag unset, since the endpoint is no
-longer anonymously reachable. The VM deployment moved from the former to
-the latter on 2026-08-13 once basic auth was added.
+real auth in front of the whole app and leave the flag unset, since the
+endpoint is no longer anonymously reachable. The VM deployment moved from
+the former to the latter on 2026-08-13 (initially Apache Basic Auth, then
+the app-layer login described below, same day).
+
+**App-layer login (`app/auth.py`) replaced Apache Basic Auth the same
+day it was added.** Basic Auth's `WWW-Authenticate` popup turned out to
+be invisible to Chrome's password-manager save UI on any platform (that
+only hooks real `<form>` submissions), and its credential cache is an
+in-memory, browser-session/tab-lifetime thing mobile Chrome discards
+aggressively on backgrounding — no server-side knob extends it, so the
+login prompt reappeared very frequently on mobile. `AuthMiddleware` gates
+every `/api/*` route except `/api/login`/`/api/logout` with a
+`SameSite=Lax`/`HttpOnly`/`Secure` session cookie, stateless and
+HMAC-signed (`READER_SESSION_SECRET`) — no session table, no
+garbage-collection, verifying is just recomputing one HMAC and checking
+an expiry timestamp. The password itself is a bcrypt hash
+(`READER_AUTH_PASSWORD_HASH`), generated locally the same way the old
+`.htpasswd-reader` was (`htpasswd -nbB`) — the plaintext never touches
+the server, only ever arriving transiently in a login request body before
+`bcrypt.checkpw` (run via `asyncio.to_thread`, since it's deliberately
+~100-300ms of blocking CPU — same off-event-loop pattern as this app's
+other blocking work) discards it. Both env vars unset (the default) means
+no login is required at all, matching every other optional credential in
+this app — only exactly one set fails closed, since that looks like a
+deploy mistake rather than an intentional choice. Apache's role shrank
+back to a pure reverse proxy (`ProxyPass` only, no `AuthType Basic`
+block) once this was live.
 
 **`type: imap` is the only newsletter connector — a `type: gmail` OAuth
 connector existed early on and was fully removed 2026-08-13.** Discovered
@@ -520,12 +555,16 @@ Full history of the tradeoffs and what was found along the way is in
 - **`llm.enabled: false`** on this deployment — the `claude` CLI subprocess
   (Node, 300–600 MB, up to 10 minutes) is the one thing that would
   reliably OOM a 1 GB box also running Apache/MySQL/PHP-FPM.
-- **HTTP basic auth on `/reader/`** (added 2026-08-13, Apache
-  `auth_basic`/`authn_file`, bcrypt hash generated locally so the
-  plaintext never touches the VM) stands in front of the whole app —
-  `READER_READONLY_CONFIG` is intentionally *not* set here as a result
-  (see §5's entry on that flag): the config-write endpoint no longer needs
-  its own lock once nothing unauthenticated can reach it at all.
+- **App-layer login** (`READER_AUTH_PASSWORD_HASH`/`READER_SESSION_SECRET`
+  set in `/opt/openreader/openreader.env`, see §5) stands in front of the
+  whole app — `READER_READONLY_CONFIG` is intentionally *not* set here as
+  a result (see §5's entry on that flag): the config-write endpoint no
+  longer needs its own lock once nothing unauthenticated can reach it at
+  all. Briefly Apache Basic Auth instead (2026-08-13, same day) — dropped
+  once its `WWW-Authenticate` popup turned out to be invisible to Chrome's
+  password-manager save UI and its credential cache got evicted by mobile
+  Chrome constantly enough to reprompt very frequently; Apache is back to
+  a pure reverse proxy now.
 - Verified live end-to-end post-deploy: real RSS refresh (conditional-GET
   304s and dedup both confirmed against real feed servers, not just
   fixtures), the SSRF guard rejecting a loopback/metadata `/api/img` URL,

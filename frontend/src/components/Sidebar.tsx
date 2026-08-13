@@ -23,6 +23,7 @@ interface Props {
   onGenerate: (topicKey: string) => void
   onMarkAllRead: (sourceId: number) => void
   onMarkAllUnreadRead: () => void
+  onLogout: () => void
 }
 
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
@@ -54,6 +55,7 @@ export function Sidebar({
   onGenerate,
   onMarkAllRead,
   onMarkAllUnreadRead,
+  onLogout,
 }: Props) {
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
@@ -218,6 +220,10 @@ export function Sidebar({
           <div style={{ height: 8 }} />
           <button className="refresh-btn" onClick={onOpenConfig}>
             ⚙ Configure
+          </button>
+          <div style={{ height: 8 }} />
+          <button className="refresh-btn" onClick={onLogout}>
+            ⏻ Log out
           </button>
         </div>
       </aside>

@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "bcrypt>=4.2.0",
     "defusedxml>=0.7.1",
     "httpx>=0.28.1",
     "msgspec>=0.21.1",

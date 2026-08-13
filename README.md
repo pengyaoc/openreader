@@ -82,6 +82,7 @@ Environment variables (all optional, sensible defaults):
 | `READER_MEDIA` | `data/media` |
 | `READER_IMAP_HOST` / `_USER` / `_PASSWORD` | unset — required together for `type: imap` sources |
 | `READER_READONLY_CONFIG` | unset — set to `1` to make `PUT /api/config` return 403 |
+| `READER_AUTH_PASSWORD_HASH` / `READER_SESSION_SECRET` | unset — no login required (see Login below); both must be set together |
 
 ### IMAP newsletters (optional)
 
@@ -122,6 +123,36 @@ token to refresh, nothing that expires and needs re-auth.
    and reused sequentially rather than one connection per source — mail
    providers can silently throttle a datacenter IP that opens many fresh
    logins in quick succession.
+
+### Login (optional)
+
+Off by default — same as everything else on this page, local/LAN use has
+never required a password. Set this up if the app is reachable from the
+internet (see the co-hosted VM deployment in `docs/ERD.md` §7.1), which is
+the only scenario it exists for.
+
+The app has its own login screen and a 90-day session cookie — no
+Apache/reverse-proxy config needed, and unlike Basic Auth (this app's
+approach until 2026-08-13), Chrome recognizes the real `<form>` login and
+offers to save the password, and the session doesn't get dropped every
+time a mobile browser reclaims a backgrounded tab.
+
+1. **Generate a bcrypt password hash, locally:**
+   ```bash
+   htpasswd -nbB reader 'your-password-here'
+   ```
+   Take just the hash portion after `reader:` (starts with `$2y$` or
+   `$2b$`). The plaintext password is never stored anywhere — see the
+   hashing step above and `app/auth.py`'s module docstring.
+2. **Generate a session secret, locally:**
+   ```bash
+   python3 -c "import secrets; print(secrets.token_hex(32))"
+   ```
+3. **Set both env vars** before starting the backend:
+   `READER_AUTH_PASSWORD_HASH` (the hash from step 1) and
+   `READER_SESSION_SECRET` (from step 2). Both must be set together — one
+   without the other is treated as broken config and locks everything out
+   (401), not a silent fallback to no-auth.
 
 ### LLM generation (optional)
 

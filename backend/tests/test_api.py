@@ -1,5 +1,10 @@
 """API-level tests using Starlette's TestClient against an in-memory-backed
 app instance (temp DB + temp config per test).
+
+Every create_app() call passes require_auth=False — these tests exercise
+route/business logic, not the login flow itself (see test_auth.py for
+that), and would otherwise all need a session cookie fixture just to
+reach any endpoint.
 """
 import pytest
 from starlette.testclient import TestClient
@@ -40,7 +45,7 @@ def client_multi(tmp_path):
     config = Config(sources=[Source(key="s1", type="rss", title="Source One", folder="Test", url="https://x/feed")])
     config_path = tmp_path / "feeds.yaml"
     config_path.write_text(to_yaml(config))
-    app = create_app(db_path=db_path, config=config, config_path=config_path)
+    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
     return TestClient(app)
 
 
@@ -73,7 +78,7 @@ def client(tmp_path):
     from app.config import to_yaml
 
     config_path.write_text(to_yaml(config))
-    app = create_app(db_path=db_path, config=config, config_path=config_path)
+    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
     return TestClient(app)
 
 
@@ -257,7 +262,7 @@ def test_generate_returns_202_and_spawns_worker_when_enabled(monkeypatch, tmp_pa
     )
     config_path = tmp_path / "feeds.yaml"
     config_path.write_text(to_yaml(config))
-    app = create_app(db_path=db_path, config=config, config_path=config_path)
+    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
     test_client = TestClient(app)
 
     resp = test_client.post("/api/topics/ai-evals/generate")
@@ -286,7 +291,7 @@ def test_generate_returns_404_for_unknown_topic_even_when_enabled(monkeypatch, t
     config = Config(llm=LLMSettings(enabled=True), topics=[])
     config_path = tmp_path / "feeds.yaml"
     config_path.write_text(to_yaml(config))
-    app = create_app(db_path=db_path, config=config, config_path=config_path)
+    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
     test_client = TestClient(app)
 
     resp = test_client.post("/api/topics/nonexistent/generate")
@@ -393,7 +398,7 @@ def test_get_article_hydrates_full_text_via_the_threaded_fetch_path(tmp_path, mo
     from app.config import to_yaml
 
     config_path.write_text(to_yaml(config))
-    app = create_app(db_path=db_path, config=config, config_path=config_path)
+    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
     client = TestClient(app)
 
     from pathlib import Path as _Path
@@ -456,7 +461,7 @@ def test_mark_all_read_articles_marks_unread_across_every_source(tmp_path):
     from app.config import to_yaml
 
     config_path.write_text(to_yaml(config))
-    client = TestClient(create_app(db_path=db_path, config=config, config_path=config_path))
+    client = TestClient(create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False))
 
     resp = client.post("/api/articles/mark-all-read")
     assert resp.status_code == 200

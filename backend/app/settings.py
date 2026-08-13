@@ -22,3 +22,15 @@ IMAP_PASSWORD = os.environ.get("READER_IMAP_PASSWORD")
 # feeds.yaml (or flip llm.enabled back on) over the internet. Config edits
 # go through SSH instead.
 READONLY_CONFIG = os.environ.get("READER_READONLY_CONFIG") == "1"
+
+# App-layer login (see app/auth.py), replacing Apache Basic Auth
+# (2026-08-13 -> 2026-08-13 cont., see docs/WORKLOG.md): AUTH_PASSWORD_HASH
+# is a bcrypt hash generated locally (`htpasswd -nbB`), never the plaintext
+# password. SESSION_SECRET signs the session cookie — a random 32+ byte
+# value, generated once, never committed. Both unset (the default) means
+# no login required, same permissive posture as every other credential on
+# this page for local/LAN use; setting exactly one fails closed instead of
+# falling back to permissive, since that looks like a deploy mistake, not
+# a choice.
+AUTH_PASSWORD_HASH = os.environ.get("READER_AUTH_PASSWORD_HASH")
+SESSION_SECRET = os.environ.get("READER_SESSION_SECRET")
