@@ -343,3 +343,65 @@ def test_mark_all_read_leaves_already_read_articles_alone_and_is_idempotent(clie
 def test_mark_all_read_404_for_missing_source(client):
     resp = client.post("/api/sources/9999/mark-all-read")
     assert resp.status_code == 404
+
+
+def test_get_article_hydrates_full_text_via_the_threaded_fetch_path(tmp_path, monkeypatch):
+    # Regression test for the asyncio.to_thread wrapper in articles.py:
+    # hydrate_article's fetch is synchronous (httpx.get, up to a 5s
+    # timeout) and used to run directly on the event loop from this async
+    # handler, blocking every other in-flight request for its duration.
+    # This exercises the real HTTP -> threaded-hydrate -> its-own-SQLite-
+    # connection path end to end (not just hydrate_article() in isolation,
+    # which test_hydrate.py already covers) to catch exactly the kind of
+    # cross-thread SQLite misuse that fix was at risk of introducing.
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES (?, ?, ?, ?, ?)",
+        ("s1", "rss", "Source One", "Test", "https://x/feed"),
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    conn.execute(
+        """INSERT INTO articles
+           (source_id, guid, url, title, excerpt, content_html, published_at, origin)
+           VALUES (?, 'g1', 'https://x/full-article', 'Short One', 'short excerpt', '<p>short</p>',
+                   '2026-08-01T00:00:00Z', 'feed')""",
+        (source_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    config = Config(
+        sources=[
+            Source(
+                key="s1", type="rss", title="Source One", folder="Test",
+                url="https://x/feed", fetch_full_text=True,
+            )
+        ]
+    )
+    config_path = tmp_path / "feeds.yaml"
+    from app.config import to_yaml
+
+    config_path.write_text(to_yaml(config))
+    app = create_app(db_path=db_path, config=config, config_path=config_path)
+    client = TestClient(app)
+
+    from pathlib import Path as _Path
+
+    fixture_html = (_Path(__file__).parent / "fixtures" / "article_page.html").read_text()
+
+    class FakeResponse:
+        text = fixture_html
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr("app.ingest.hydrate.httpx.get", lambda *a, **kw: FakeResponse())
+
+    article_id = client.get("/api/articles").json()[0]["id"]
+    resp = client.get(f"/api/articles/{article_id}")
+
+    assert resp.status_code == 200
+    assert "first real paragraph" in resp.json()["content_html"]
+    assert resp.json()["hydrated_at"] is not None

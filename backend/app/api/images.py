@@ -15,6 +15,7 @@ can't satisfy both. Deriving the Referer from the image URL's own origin
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from urllib.parse import SplitResult, urljoin, urlsplit
@@ -68,6 +69,16 @@ def _assert_public_host(host: str) -> None:
     What this closes is the straightforward case actually seen against open
     image proxies — a URL that directly names a private, loopback, or
     metadata address (e.g. 127.0.0.1, 169.254.169.254, 10.0.0.0/8).
+
+    Deliberately synchronous — socket.getaddrinfo() blocks, and keeping
+    this a plain sync function (rather than an async one wrapping it
+    internally) keeps it a pure, directly-unit-testable helper with no
+    event-loop dependency. Callers in the async proxy_image handler below
+    run it via asyncio.to_thread(); calling it directly there would block
+    uvicorn's single event loop for the DNS lookup's duration on every
+    image request — serializing what the browser intended to fetch in
+    parallel, which is exactly what made image-heavy articles slow to
+    open (found 2026-08-13, from a live report of a slow-loading article).
     """
     try:
         infos = socket.getaddrinfo(host, None)
@@ -114,7 +125,7 @@ async def proxy_image(request: Request) -> Response:
         return Response(status_code=400)
 
     try:
-        _assert_safe_url(url)
+        await asyncio.to_thread(_assert_safe_url, url)
     except SsrfBlocked:
         return Response(status_code=400)
 
@@ -135,7 +146,7 @@ async def proxy_image(request: Request) -> Response:
                     return Response(status_code=502)
                 current_url = urljoin(current_url, location)
                 try:
-                    _assert_safe_url(current_url)
+                    await asyncio.to_thread(_assert_safe_url, current_url)
                 except SsrfBlocked:
                     return Response(status_code=400)
                 headers["Referer"] = referer_for(current_url)
