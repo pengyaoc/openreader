@@ -72,9 +72,27 @@ def _persist_entry(
     matched_rule,
     origin: str = "feed",
 ) -> bool:
-    """Returns True if a new row was inserted, False if it already existed."""
+    """Returns True if a new row was inserted, False if it already existed.
+
+    Dedups on guid first, then content_hash (canonicalize_url(entry.url) +
+    normalized title). guid alone isn't as stable as a feed's own <id>/
+    <guid> is supposed to be — simonwillison.net's Atom feed started
+    appending a #atom-everything fragment to entry ids that previously had
+    none, partway through this app's lifetime, minting a "new" guid for
+    every already-ingested post on the next refresh and duplicating ~30
+    articles (found 2026-08-13 from a live duplicate-articles report).
+    content_hash is built from a URL that's already had its fragment (and
+    tracking params) stripped by canonicalize_url(), so it survives
+    exactly this kind of superficial id drift where guid doesn't. The
+    content_hash column and its index already existed for this — this was
+    the missing other half, wiring the lookup up to actually use it.
+    """
+    chash = content_hash(entry.url, entry.title) if entry.url else None
     existing = conn.execute(
-        "SELECT id FROM articles WHERE source_id = ? AND guid = ?", (source_id, entry.guid)
+        """SELECT id FROM articles
+           WHERE source_id = ?
+             AND (guid = ? OR (content_hash IS NOT NULL AND content_hash = ?))""",
+        (source_id, entry.guid, chash),
     ).fetchone()
     if existing:
         return False
@@ -107,7 +125,7 @@ def _persist_entry(
             datetime.now(UTC).isoformat(),
             excerpt,
             content_html,
-            content_hash(entry.url, entry.title) if entry.url else None,
+            chash,
             matched_rule_str,
             origin,
         ),

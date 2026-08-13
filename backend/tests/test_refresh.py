@@ -457,3 +457,42 @@ def test_refresh_all_reports_error_when_imap_not_configured(tmp_path):
     report = refresh_all(conn, [source], fetcher=lambda *a: None, imap_client=None)
     assert report["sources"][0]["status"] == "error"
     assert "IMAP not configured" in report["sources"][0]["error"]
+
+
+def _atom_feed(entry_id: str) -> bytes:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>{entry_id}</id>
+    <title>Same Article, Drifting Id</title>
+    <link href="https://example.com/post/1" rel="alternate"/>
+    <updated>2026-08-01T12:00:00Z</updated>
+    <summary>Body text.</summary>
+  </entry>
+</feed>""".encode()
+
+
+def test_refresh_dedupes_via_content_hash_when_a_feeds_guid_format_drifts(tmp_path):
+    # Regression test: simonwillison.net's Atom feed started appending a
+    # #atom-everything fragment to entry <id> values it previously served
+    # bare, on a later refresh — a real guid, but a *different* one for the
+    # same article, causing ~30 duplicated articles in production (found
+    # 2026-08-13). guid alone can't catch this; content_hash (built from a
+    # fragment-stripped canonical URL) is meant to.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(key="s1", type="rss", title="Source 1", folder="Test", url="https://x/feed")
+
+    # First refresh: bare id, no ETag change forced — simulate two separate
+    # 200 responses (conditional GET returning fresh content both times,
+    # which is what actually happens when a feed's content changes).
+    fetcher_v1 = make_fetcher({"s1": _atom_feed("https://example.com/post/1")})
+    report1 = refresh_all(conn, [source], fetcher=fetcher_v1)
+    assert report1["sources"][0]["new"] == 1
+
+    fetcher_v2 = make_fetcher({"s1": _atom_feed("https://example.com/post/1#atom-everything")})
+    report2 = refresh_all(conn, [source], fetcher=fetcher_v2)
+    assert report2["sources"][0]["new"] == 0  # same article, not a duplicate
+
+    rows = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    assert rows == 1
