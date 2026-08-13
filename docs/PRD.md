@@ -49,19 +49,25 @@ other devices (phone, tablet) on the same LAN.
   never blocks other sources from refreshing, and its error is visible in
   the sidebar.
 
-### 4.2 Gmail newsletters
+### 4.2 IMAP newsletters
 
-- Read-only Gmail integration (`gmail.readonly` scope only — never sends,
-  labels, drafts, or deletes).
-- A Gmail-type source is a saved search query (e.g. `label:newsletters`);
-  each matching message becomes an article, same filtering rules apply.
-- One-time OAuth consent via a standalone script; the running server never
-  handles your Google password and only ever calls list/get on messages.
-- **Scoped, incremental fetching.** After the first refresh, each Gmail
-  source's query is automatically narrowed to messages since that source's
-  last successful refresh (`after:<timestamp>`, with a small overlap
-  window) — a routine refresh lists only what's new rather than re-walking
-  the source's entire configured window (e.g. `newer_than:30d`) every time.
+- Read-only IMAP integration (SEARCH/FETCH only, mailbox opened with
+  `readonly=True` — never STORE/EXPUNGE/DELETE), authenticated with an app
+  password rather than OAuth — no consent screen, no token to refresh,
+  nothing that expires and needs re-auth (see §7 for why OAuth was dropped).
+- An `imap`-type source is a saved search query using Gmail-search-style
+  syntax (`from:`/`subject:`/`newer_than:`); each matching message becomes
+  an article, same filtering rules apply.
+- **Scoped, incremental fetching.** After the first refresh, each source's
+  SEARCH is automatically narrowed to messages since that source's last
+  successful refresh (with a one-day overlap window, since IMAP SEARCH
+  SINCE is date-only) — a routine refresh lists only what's new rather
+  than re-walking the source's entire configured window (e.g.
+  `newer_than:30d`) every time.
+- All IMAP sources in one refresh share a single connection, opened once
+  and reused sequentially — a fresh login per source, opened concurrently,
+  is indistinguishable from abuse to some mail providers and gets silently
+  throttled (found live, 2026-08-13, see docs/WORKLOG.md).
 - Newsletter HTML is cleaned up for readability: empty spacer paragraphs,
   stacked `<br>` runs, and long `&nbsp;` runs (both artifacts of HTML email
   templates, not article content) are collapsed at ingest time.
@@ -151,14 +157,15 @@ other devices (phone, tablet) on the same LAN.
 - The compact readability extractor (not a full Mozilla-Readability port)
   occasionally pulls page chrome (e.g. a GitHub repo's file-listing table)
   instead of the real article on unusual page layouts.
-- Gmail's OAuth connector works, but Google expires refresh tokens after 7
-  days for any app in "Testing" publishing status, and escaping that for a
-  restricted scope like `gmail.readonly` needs full app verification + a
-  CASA security audit — not viable for a personal project. For any
+- A Gmail OAuth connector (`type: gmail`) existed early on but was removed
+  2026-08-13: Google expires refresh tokens after 7 days for any app in
+  "Testing" publishing status, and escaping that for a restricted scope
+  like `gmail.readonly` needs full app verification + a CASA security
+  audit — not viable for a personal project, and a bad fit for a
   deployment meant to run unattended (e.g. a VM, vs. re-authenticating by
-  hand from a laptop), `type: imap` (`connectors/imap.py`) against a
-  dedicated newsletter-only mailbox with a Google app password is the
-  supported path instead: no token expiry, no Cloud project, no consent
-  screen. See docs/WORKLOG.md, 2026-08-12.
+  hand from a laptop every week). `type: imap` (`connectors/imap.py`)
+  against a dedicated newsletter-only mailbox with an app password is now
+  the only newsletter path: no token expiry, no Cloud project, no consent
+  screen. See docs/WORKLOG.md, 2026-08-12 and 2026-08-13.
 - No automated frontend test suite yet — frontend correctness has been
   verified through manual/live browser testing per change, not CI.

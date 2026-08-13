@@ -1,7 +1,7 @@
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from app import settings
+from app.api._common import readonly_response
 from app.config import ConfigError, parse_config
 from app.ingest.refresh import reconcile_read_state
 
@@ -12,14 +12,10 @@ async def get_config(request: Request) -> JSONResponse:
 
 
 async def put_config(request: Request) -> JSONResponse:
-    # Hard write-lock, set via READER_READONLY_CONFIG on deployments where
-    # this endpoint is reachable by more than just its one trusted user
-    # (unauthenticated by design elsewhere in v1) — edit feeds.yaml via SSH
-    # instead. Checked first so a read-only deployment never touches disk.
-    if settings.READONLY_CONFIG:
-        return JSONResponse(
-            {"error": "config is read-only on this deployment"}, status_code=403
-        )
+    # Checked first so a read-only deployment never touches disk — see
+    # app.api._common.readonly_response.
+    if (resp := readonly_response()) is not None:
+        return resp
 
     body = await request.json()
     raw_yaml = body.get("yaml", "")

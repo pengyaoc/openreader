@@ -47,13 +47,15 @@ sources:
       - { action: include, field: any, pattern: "(?i)llm|agent|inference|eval" }
       - { action: exclude, field: title, pattern: "(?i)\\bsponsored\\b" }
 
-  # A Gmail source: read-only, one-time OAuth via scripts/gmail_auth.py.
-  # `query` is a normal Gmail search query.
+  # An IMAP source: reads a mailbox over READER_IMAP_HOST/_USER/_PASSWORD
+  # (an app password, not OAuth — no re-auth or token expiry to manage).
+  # `query` uses Gmail-search-style syntax (from:/subject:/newer_than:)
+  # even for non-Gmail IMAP hosts — see connectors/imap.py's parse_query().
   # - key: newsletters
-  #   type: gmail
+  #   type: imap
   #   title: Newsletters
   #   folder: Newsletters
-  #   query: "label:newsletters newer_than:14d"
+  #   query: "from:hello@newsletter.example.com newer_than:14d"
 
 topics: []
   # LLM-generated articles for things with no good feed. Only used when

@@ -85,7 +85,7 @@ sources:
 """
     )
     dumped = to_yaml(config)
-    # 'query' is a gmail-only field and unset here; 'defaults' legitimately
+    # 'query' is an imap-only field and unset here; 'defaults' legitimately
     # carries its own poll_interval_minutes, but the per-source override
     # (also named poll_interval_minutes, left unset on this source) should
     # not appear a second time inside the sources list.

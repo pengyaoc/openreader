@@ -8,10 +8,9 @@ from app.config import Config, Rule, Source
 from app.connectors.http_fetch import FetchResult
 from app.db import connect, init_schema
 from app.ingest.refresh import (
-    _refresh_imap_batch,
+    _refresh_imap_sequential,
     reconcile_read_state,
     refresh_all,
-    refresh_gmail_source,
     refresh_imap_source,
 )
 
@@ -141,160 +140,6 @@ def test_source_error_is_recorded_on_the_source_row(tmp_path):
     assert row[0] and "timeout" in row[0]
 
 
-def make_gmail_message(message_id: str, subject: str, html: str = "<p>body</p>"):
-    import base64
-
-    return {
-        "id": message_id,
-        "internalDate": "1754899824000",
-        "payload": {
-            "mimeType": "multipart/alternative",
-            "headers": [
-                {"name": "Subject", "value": subject},
-                {"name": "From", "value": "Sender <sender@example.com>"},
-            ],
-            "parts": [
-                {
-                    "mimeType": "text/html",
-                    "body": {"data": base64.urlsafe_b64encode(html.encode()).decode()},
-                }
-            ],
-        },
-    }
-
-
-def test_refresh_gmail_source_persists_new_messages(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    source = Source(key="newsletters", type="gmail", title="Newsletters", folder="Test", query="label:x")
-
-    messages = {"m1": make_gmail_message("m1", "First newsletter")}
-    report = refresh_gmail_source(
-        conn,
-        source,
-        access_token="fake-token",
-        list_fn=lambda token, query: list(messages.keys()),
-        get_fn=lambda token, mid: messages[mid],
-    )
-
-    assert report["status"] == "ok"
-    assert report["new"] == 1
-    row = conn.execute("SELECT title, origin FROM articles").fetchone()
-    assert row[0] == "First newsletter"
-    assert row[1] == "gmail"
-
-
-def test_refresh_gmail_source_skips_already_fetched_message_ids_without_refetching(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    source = Source(key="newsletters", type="gmail", title="Newsletters", folder="Test", query="label:x")
-    messages = {"m1": make_gmail_message("m1", "First newsletter")}
-    get_calls = []
-
-    def get_fn(token, mid):
-        get_calls.append(mid)
-        return messages[mid]
-
-    refresh_gmail_source(
-        conn, source, access_token="t", list_fn=lambda t, q: ["m1"], get_fn=get_fn
-    )
-    refresh_gmail_source(
-        conn, source, access_token="t", list_fn=lambda t, q: ["m1"], get_fn=get_fn
-    )
-
-    assert get_calls == ["m1"]  # second run never re-fetched the message body
-
-
-def test_refresh_gmail_source_applies_rules(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    source = Source(
-        key="newsletters",
-        type="gmail",
-        title="Newsletters",
-        folder="Test",
-        query="label:x",
-        rules=[Rule(action="exclude", field="title", pattern="(?i)spam")],
-    )
-    messages = {
-        "m1": make_gmail_message("m1", "Real newsletter"),
-        "m2": make_gmail_message("m2", "This is Spam"),
-    }
-    report = refresh_gmail_source(
-        conn,
-        source,
-        access_token="t",
-        list_fn=lambda t, q: list(messages.keys()),
-        get_fn=lambda t, mid: messages[mid],
-    )
-
-    assert report["new"] == 1
-    assert report["filtered"] == 1
-
-
-def test_refresh_gmail_source_isolates_a_single_bad_message(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    source = Source(key="newsletters", type="gmail", title="Newsletters", folder="Test", query="label:x")
-    messages = {"m1": make_gmail_message("m1", "Good one")}
-
-    def get_fn(token, mid):
-        if mid == "bad":
-            raise ConnectionError("boom")
-        return messages[mid]
-
-    report = refresh_gmail_source(
-        conn,
-        source,
-        access_token="t",
-        list_fn=lambda t, q: ["bad", "m1"],
-        get_fn=get_fn,
-    )
-
-    assert report["new"] == 1
-    row = conn.execute("SELECT COUNT(*) FROM articles").fetchone()
-    assert row[0] == 1
-
-
-def test_refresh_gmail_source_scopes_query_to_since_last_fetch(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    source = Source(key="newsletters", type="gmail", title="Newsletters", folder="Test", query="label:x")
-    messages = {"m1": make_gmail_message("m1", "First newsletter")}
-    queries_seen = []
-
-    def list_fn(token, query):
-        queries_seen.append(query)
-        return list(messages.keys())
-
-    refresh_gmail_source(conn, source, access_token="t", list_fn=list_fn, get_fn=lambda t, m: messages[m])
-    # First-ever refresh: no last_fetched_at yet, so the configured query is
-    # used as-is — nothing to scope against.
-    assert queries_seen[0] == "label:x"
-
-    refresh_gmail_source(conn, source, access_token="t", list_fn=list_fn, get_fn=lambda t, m: messages[m])
-    # Second refresh: scoped to messages since the first refresh's recorded
-    # last_fetched_at, not a re-walk of the whole configured query.
-    assert queries_seen[1].startswith("label:x after:")
-
-
-def test_refresh_gmail_source_records_error_when_list_fails(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    source = Source(key="newsletters", type="gmail", title="Newsletters", folder="Test", query="label:x")
-
-    def failing_list(token, query):
-        raise ConnectionError("auth expired")
-
-    report = refresh_gmail_source(
-        conn, source, access_token="t", list_fn=failing_list, get_fn=lambda t, m: {}
-    )
-
-    assert report["status"] == "error"
-    row = conn.execute("SELECT last_error FROM sources WHERE key='newsletters'").fetchone()
-    assert row[0] and "auth expired" in row[0]
-
-
 def make_imap_message(message_id: str, subject: str, html: str = "<p>body</p>") -> bytes:
     from email.message import EmailMessage
 
@@ -325,15 +170,15 @@ def test_refresh_imap_source_persists_new_messages(tmp_path):
     assert report["new"] == 1
     row = conn.execute("SELECT title, origin FROM articles").fetchone()
     assert row[0] == "First newsletter"
-    assert row[1] == "gmail"  # reuses the gmail origin category for mail-sourced articles
+    assert row[1] == "email"
 
 
 def test_refresh_imap_source_dedupes_by_message_guid_even_when_refetched(tmp_path):
-    # Unlike Gmail's stable message id, IMAP sequence/UID numbers aren't a
-    # reliable cross-session guid, so refresh_imap_source can't skip a
-    # FETCH the way refresh_gmail_source skips a messages.get — it dedupes
-    # only after parsing, on the message's own Message-Id. That means a
-    # second refresh will refetch, but must still land zero new rows.
+    # IMAP sequence/UID numbers aren't a reliable cross-session guid, so
+    # refresh_imap_source can't skip a FETCH just because it's seen the
+    # message_id before — it dedupes only after parsing, on the message's
+    # own Message-Id. That means a second refresh will refetch, but must
+    # still land zero new rows.
     conn = connect(tmp_path / "reader.db")
     init_schema(conn)
     source = Source(key="newsletters", type="imap", title="Newsletters", folder="Test", query="")
@@ -629,8 +474,8 @@ def test_refresh_all_preserves_source_order_across_mixed_types(tmp_path):
     # refresh_all reassembles RSS-batch results (keyed by source key, no
     # inherent order from the thread pool) back into the caller's original
     # per-source order — this proves that reassembly is correct even when
-    # rss/imap/gmail sources are interleaved in the config, not just when
-    # they're grouped by type.
+    # rss/imap sources are interleaved in the config, not just when they're
+    # grouped by type.
     conn = connect(tmp_path / "reader.db")
     init_schema(conn)
     sources = [
@@ -649,97 +494,78 @@ def test_refresh_all_preserves_source_order_across_mixed_types(tmp_path):
     assert keys_in_order == ["rss-a", "newsletters", "rss-b"]
 
 
-def test_imap_batch_fetches_concurrently_not_sequentially(tmp_path):
-    # Same proof as the RSS timing test: N imap sources whose connect_fn
-    # each takes T seconds must finish in roughly T total, not N*T. Unlike
-    # RSS, each source opens its own connection — that's the actual point
-    # being tested, since it's what makes concurrent IMAP possible at all
-    # (a single shared, stateful IMAP connection can't be used from
-    # multiple threads at once the way independent HTTP requests can).
-    import time as time_module
-
+def test_imap_refresh_connects_once_and_reuses_it_across_sources(tmp_path):
+    # 2026-08-13: reverted from per-source concurrent connections back to
+    # one shared connection reused sequentially — a fresh Gmail login per
+    # IMAP source, every refresh, from one datacenter IP got silently
+    # throttled by Gmail's abuse heuristics live on the VM. connect_fn
+    # must be called exactly once no matter how many IMAP sources refresh.
     conn = connect(tmp_path / "reader.db")
     init_schema(conn)
     n = 5
-    delay = 0.3
     sources = [
         Source(key=f"imap{i}", type="imap", title=f"I{i}", folder="Test", query="")
         for i in range(n)
     ]
 
+    connect_calls = 0
+
     class FakeClient:
         def logout(self):
             pass
 
-    def slow_connect():
-        time_module.sleep(delay)
+    def connect_fn():
+        nonlocal connect_calls
+        connect_calls += 1
         return FakeClient()
 
-    started = time_module.monotonic()
-    reports = _refresh_imap_batch(
-        conn, sources, slow_connect,
+    reports = _refresh_imap_sequential(
+        conn, sources, connect_fn,
         search_fn=lambda client, folder, **kw: [],
         fetch_fn=lambda client, mid: b"",
     )
-    elapsed = time_module.monotonic() - started
 
+    assert connect_calls == 1
     assert len(reports) == n
     assert all(r["status"] == "ok" for r in reports.values())
-    assert elapsed < n * delay * 0.6
 
 
-def test_imap_batch_persists_correctly_across_multiple_sources(tmp_path):
-    # End-to-end correctness of the batch path (not just timing): distinct
-    # per-source connections, search results, and messages all land in the
-    # right source's articles with the right counts.
+def test_imap_refresh_persists_correctly_across_multiple_sources(tmp_path):
+    # End-to-end correctness of the sequential path (not just the
+    # connect-once behavior): search results and messages from a single
+    # shared client all land in the right source's articles with the
+    # right counts.
     conn = connect(tmp_path / "reader.db")
     init_schema(conn)
     sources = [
-        Source(key="imapA", type="imap", title="A", folder="Test", query=""),
-        Source(key="imapB", type="imap", title="B", folder="Test", query=""),
+        Source(key="imapA", type="imap", title="A", folder="Test", query="", mailbox_folder="InboxA"),
+        Source(key="imapB", type="imap", title="B", folder="Test", query="", mailbox_folder="InboxB"),
     ]
     raw_messages = {
         "a1": make_imap_message("a1", "From A"),
         "b1": make_imap_message("b1", "From B"),
         "b2": make_imap_message("b2", "Also From B"),
     }
-    ids_by_source = {"imapA": ["a1"], "imapB": ["b1", "b2"]}
+    ids_by_mailbox = {"InboxA": ["a1"], "InboxB": ["b1", "b2"]}
 
     class FakeClient:
-        def __init__(self, source_key):
-            self.source_key = source_key
-
         def logout(self):
             pass
 
-    import threading
-
-    connect_calls: list[str] = []
-    connect_lock = threading.Lock()
-
-    # _refresh_imap_batch takes one connect_fn shared across all sources in
-    # the batch (matching how refresh_api.py provisions it — one factory,
-    # called once per source, concurrently) — search_fn below dispatches on
-    # the client's own identity to return that source's message ids, since
-    # connect_fn can't know in advance which source it's being called for.
-    # The lock makes the read-then-append below atomic — without it, two
-    # threads could both read the same len(connect_calls) before either
-    # appends, assigning the same source key to both.
     def connect_fn():
-        with connect_lock:
-            key = sources[len(connect_calls)].key
-            connect_calls.append(key)
-        return FakeClient(key)
+        return FakeClient()
 
+    # Dispatches on the mailbox folder passed through from each source,
+    # not call order — the shared client can't identify which source is
+    # calling, but each source's own mailbox_folder can.
     def search_fn(client, folder, **kw):
-        return ids_by_source[client.source_key]
+        return ids_by_mailbox[folder]
 
     def fetch_fn(client, message_id):
         return raw_messages[message_id]
 
-    reports = _refresh_imap_batch(conn, sources, connect_fn, search_fn=search_fn, fetch_fn=fetch_fn)
+    reports = _refresh_imap_sequential(conn, sources, connect_fn, search_fn=search_fn, fetch_fn=fetch_fn)
 
-    assert connect_calls == ["imapA", "imapB"]  # one connection per source
     assert reports["imapA"]["new"] == 1
     assert reports["imapB"]["new"] == 2
 

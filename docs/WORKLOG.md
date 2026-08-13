@@ -1009,3 +1009,130 @@ restarted — the backend was simply not running. Confirmed and fixed via
 `curl` directly (backend port, frontend port, and the frontend's `/api`
 proxy target all individually), not by re-touching the flaky browser
 tool.
+
+## 2026-08-13 (cont.) — Fixed "refresh feed" hanging forever on the VM
+
+Feedback: *"refreshing is stuck"* / *"spinning for multiple minutes"*.
+Diagnosed live on `wordpress-1-vm` rather than guessing: the openreader
+service was healthy and idle (0% CPU), but an `ESTABLISHED` TCP
+connection to `imap.gmail.com:993` had been sitting open with no
+completing request afterward — a refresh was blocked on a socket read
+that was never going to return.
+
+**Root cause, two layers:**
+- `connectors/imap.py`'s `connect()` called `imaplib.IMAP4_SSL(host, port,
+  ssl_context=context)` with no `timeout`. imaplib defaults to a fully
+  blocking socket, so if the server stalls mid-command instead of closing
+  cleanly, the calling thread waits forever — no exception, no recovery,
+  the request (and the frontend's spinner tied to it) just hangs.
+- Why Gmail was stalling in the first place: the four `type: imap`
+  sources (`wsj-whats-news`, `robinhood-snacks`, `the-batch`,
+  `biggerpockets` — a dedicated app-password mailbox, distinct from the
+  OAuth `type: gmail` sources) had each been opening their own IMAP
+  connection since the earlier same-day concurrency change
+  (`baf53c0`). Every refresh meant up to 4 fresh TLS+LOGIN sessions
+  against `imap.gmail.com`, from one GCP datacenter IP, in quick
+  succession — roughly 60 raw IMAP logins over the session's ~15
+  refreshes. Gmail's abuse heuristics answer that pattern by silently
+  stalling the connection (accept the handshake, never respond to LOGIN)
+  rather than erroring — a defense on their end, not a client bug that
+  could be fixed by retrying harder.
+
+**Fix, both parts:**
+- `connectors/imap.py`: `connect()` now passes `timeout=30` (new
+  `DEFAULT_TIMEOUT_SECONDS`) into `IMAP4_SSL`. Since the timeout applies
+  to the socket for the connection's whole lifetime, it bounds
+  LOGIN/SEARCH/FETCH too, not just the initial connect — a stall now
+  fails in ~30s instead of hanging indefinitely, surfacing as a normal
+  per-source error.
+- `ingest/refresh.py`: replaced `_refresh_imap_batch` (concurrent,
+  one connection per source) with `_refresh_imap_sequential` — calls
+  `imap_connect` once, reuses that single connection across every IMAP
+  source via the existing `refresh_imap_source`, logs out once at the
+  end. This is a partial revert of `baf53c0`'s per-source-connection
+  design: RSS stays concurrent (independent HTTP requests, no shared
+  state, no abuse-detection downside observed), but IMAP goes back to one
+  login per refresh — cheaper and indistinguishable from a normal mail
+  client, which is what avoids triggering Gmail's throttling instead of
+  just failing faster once it happens.
+
+Tests updated to match: the old timing proof
+(`test_imap_batch_fetches_concurrently_not_sequentially`) is replaced by
+`test_imap_refresh_connects_once_and_reuses_it_across_sources`, asserting
+`connect_fn` is called exactly once across N sources; the persistence
+test now drives a single shared `FakeClient` instead of one per source.
+207 backend tests passing. Deployed via `scripts/deploy.sh`; service
+restarted clean, `/reader/` verified.
+
+## 2026-08-13 (cont.) — Removed the Gmail OAuth connector; IMAP is now the only newsletter path
+
+Feedback: *"Remove the code path for gmail fetch that will expire in 7
+days. keep imap solution that doesn't require re-auth."* — `type: gmail`
+never had a realistic path to running unattended (docs/PRD.md §7 already
+flagged this: Google revokes refresh tokens after 7 days for any
+"Testing"-status OAuth app, and escaping that for `gmail.readonly` needs
+full verification + a paid CASA audit), and `type: imap` against a
+dedicated app-password mailbox had already replaced it as the VM's actual
+newsletter source months earlier — this removes the now-dead code path
+rather than leaving two ways to do the same thing.
+
+**Deleted outright:** `connectors/gmail.py` (the Gmail REST client + MIME
+parser), `scripts/gmail_auth.py` (the one-time OAuth consent script),
+`tests/test_gmail.py`, and the `gmail-auth` optional dependency group
+(`google-auth-oauthlib`) from `pyproject.toml`.
+
+**`config.py`:** `SourceType` narrowed from `"rss" | "gmail" | "imap"` to
+`"rss" | "imap"`; dropped the `type=gmail requires query` validation
+branch.
+
+**`ingest/refresh.py`:** removed `refresh_gmail_source`,
+`_scoped_gmail_query`, `_GMAIL_OVERLAP_SECONDS`, `GmailListFn`/`GmailGetFn`,
+and the `elif s.type == "gmail"` branch in `refresh_all` — RSS and IMAP
+are now the only two batches. Also fixed a real mislabel this surfaced:
+`refresh_imap_source`/`_refresh_imap_sequential` were persisting IMAP
+entries with `origin="gmail"` (piggybacking on the Gmail-specific
+whitespace-tightening flag since it was the only "this is an email"
+signal available) — now `origin="email"`, checked by `_persist_entry`
+instead. `db.py`'s schema comment and the `articles.origin` column's
+documented value set updated to match (`feed | email | llm`).
+
+**`api/refresh_api.py`:** dropped `gmail_access_token` — no more reading
+`settings.TOKEN_PATH` (also removed from `settings.py`; `data/token.json`
+is now unread by any code path, though the file itself, if present,
+stays gitignored rather than deleted).
+
+**Frontend:** `SourceType`/`ArticleOrigin` in `api.ts` lost `'gmail'`
+(`ArticleOrigin`'s `'gmail'` value became `'email'`, matching the backend
+rename). `SourceModal.tsx`'s `lockedType` state existed only to
+distinguish an editing source's real type between `'imap'` and `'gmail'`
+(both rendered as the same newsletter-shaped form) — with only `imap`
+left, that distinction is gone, so the state was removed in favor of
+reading `sourceType` directly.
+
+**Docs:** `README.md`'s "Gmail (optional)" section replaced with an IMAP
+setup walkthrough (app password, not a Google Cloud OAuth client);
+`docs/PRD.md` §4.2 rewritten from "Gmail newsletters" to "IMAP
+newsletters", and its §7 known-gap entry about OAuth token expiry updated
+from "here's the workaround" to "this is why the workaround is now the
+only path"; `docs/ERD.md`'s architecture diagram, module map, data model,
+API table, and the §5 concurrency/scoping paragraphs (still describing a
+per-source-concurrent IMAP shape and a Gmail-token-based scoping model,
+both already superseded by the two prior sessions today) all brought
+current.
+
+**Config:** local `config/feeds.yaml` (gitignored, not this repo's
+concern normally, but already had 4 `type: gmail` entries left over from
+before the VM's own config was migrated) converted to `type: imap` to
+match what's actually running. `config/feeds.example.yaml`'s commented
+Gmail example replaced with an IMAP one.
+
+**One safety fix caught along the way:** deleting `gmail_client_secret.json`'s
+dedicated `.gitignore` line (reasoning: "the code path is gone, so is the
+need to ignore it") would have un-ignored a real credential file that's
+still sitting in `config/` — confirmed via `git status` showing it turn
+untracked (`??`) the moment the rule was removed. Restored the ignore
+rule; the file itself wasn't touched.
+
+192 backend tests passing (207 → 192: the 15 Gmail-specific tests
+removed with `test_gmail.py` and the gmail refresh-source tests in
+`test_refresh.py`). Frontend typecheck and build clean.

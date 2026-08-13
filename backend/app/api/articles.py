@@ -1,34 +1,9 @@
-import asyncio
-from pathlib import Path
-
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app import store
-from app.db import connect
+from app.db import run_off_thread
 from app.ingest.hydrate import hydrate_article
-
-
-def _hydrate_off_thread(db_path: str | Path, article_id: int, fetch_full_text: bool) -> dict:
-    """Runs hydrate_article() on a worker thread via asyncio.to_thread, with
-    its own SQLite connection rather than the request's — sqlite3
-    connections default to check_same_thread=True, so the request's
-    connection (opened on the event loop thread) can't cross into a worker
-    thread. A fresh connection here is cheap and matches the app's existing
-    "fresh connection per use" pattern (see app.state.get_conn).
-
-    The reason this needs a thread at all: hydrate_article's fetcher does a
-    synchronous httpx.get with up to a 5s timeout. Called directly from an
-    async handler, that blocks uvicorn's single event loop for the fetch's
-    full duration — not just for the one request, but for every other
-    request the process is handling (other articles, refresh, image
-    proxying) until it returns. First-open of any fetch_full_text source's
-    article was the concrete symptom reported (2026-08-13)."""
-    conn = connect(db_path)
-    try:
-        return hydrate_article(conn, article_id, fetch_full_text=fetch_full_text)
-    finally:
-        conn.close()
 
 
 async def list_articles(request: Request) -> JSONResponse:
@@ -63,12 +38,12 @@ async def get_article(request: Request) -> JSONResponse:
         ).fetchone()
         source_key = row[0] if row else None
         config = request.app.state.config
-        source_cfg = next((s for s in config.sources if s.key == source_key), None)
+        source_cfg = config.source(source_key)
         fetch_full_text = (
             source_cfg.fetch_full_text if source_cfg else config.defaults.fetch_full_text
         )
-        result = await asyncio.to_thread(
-            _hydrate_off_thread, request.app.state.db_path, article_id, fetch_full_text
+        result = await run_off_thread(
+            request.app.state.db_path, hydrate_article, article_id, fetch_full_text
         )
         if result["content_html"]:
             article["content_html"] = result["content_html"]

@@ -15,11 +15,6 @@ dependencies = [
     "uvicorn[standard]>=0.52.1",
 ]
 
-[project.optional-dependencies]
-gmail-auth = [
-    "google-auth-oauthlib>=1.4.0",
-]
-
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

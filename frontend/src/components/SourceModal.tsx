@@ -18,12 +18,12 @@ function slugify(title: string): string {
     .slice(0, 40)
 }
 
-// Newsletter (imap/gmail) sources share one `query` field using the same
-// from:/subject:/newer_than: syntax as type=gmail always used — mirrors
-// connectors/imap.py's parse_query() regexes so an edited source's
-// existing query round-trips through these friendly fields correctly
-// instead of forcing raw query-string editing (the whole point of this
-// tool over hand-editing feeds.yaml).
+// Newsletter (imap) sources use a `query` field with Gmail-search-style
+// from:/subject:/newer_than: syntax — mirrors connectors/imap.py's
+// parse_query() regexes so an edited source's existing query round-trips
+// through these friendly fields correctly instead of forcing raw
+// query-string editing (the whole point of this tool over hand-editing
+// feeds.yaml).
 function decomposeQuery(query: string): { from: string; subject: string; newerThanDays: string } {
   const fromMatch = query.match(/from:(\S+)/)
   const subjectMatch = query.match(/subject:"([^"]+)"|subject:(\S+)/)
@@ -48,11 +48,7 @@ const FIELD_OPTIONS: RuleField[] = ['title', 'summary', 'content', 'author', 'ur
 export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
   const isEditing = editingSourceId !== undefined
 
-  // 'imap' covers both type=imap and type=gmail on edit — they share the
-  // same query-builder shape; gmail just isn't offered as a choice when
-  // adding new (OAuth setup, not something this form can provision).
   const [sourceType, setSourceType] = useState<'rss' | 'imap'>('rss')
-  const [lockedType, setLockedType] = useState<string | null>(null) // real type when editing gmail
   const [title, setTitle] = useState('')
   const [folder, setFolder] = useState('')
   const [url, setUrl] = useState('')
@@ -83,7 +79,6 @@ export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
           setFetchFullText(detail.fetch_full_text)
         } else {
           setSourceType('imap')
-          setLockedType(detail.type) // 'imap' or 'gmail'
           setMailboxFolder(detail.mailbox_folder ?? '')
           const { from, subject, newerThanDays } = decomposeQuery(detail.query ?? '')
           setQueryFrom(from)
@@ -202,9 +197,9 @@ export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
                 </button>
               </div>
             )}
-            {isEditing && lockedType && (
+            {isEditing && sourceType === 'imap' && (
               <p className="field__hint">
-                Type: <code>{lockedType}</code> (not editable — remove and re-add to change)
+                Type: <code>imap</code> (not editable — remove and re-add to change)
               </p>
             )}
 

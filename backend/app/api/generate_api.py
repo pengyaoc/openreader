@@ -42,7 +42,7 @@ async def generate(request: Request) -> JSONResponse:
         return JSONResponse({"error": "LLM generation is disabled"}, status_code=404)
 
     topic_key = request.path_params["topic_key"]
-    topic = next((t for t in config.topics if t.key == topic_key), None)
+    topic = config.topic(topic_key)
     if topic is None:
         return JSONResponse({"error": f"unknown topic: {topic_key}"}, status_code=404)
 

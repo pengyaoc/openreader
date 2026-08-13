@@ -9,7 +9,7 @@ handing published_at to the persistence layer.
 """
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
 
@@ -35,8 +35,6 @@ def parse_date(raw: str | None) -> str | None:
 
 
 def _parse_iso8601(raw: str):
-    from datetime import datetime
-
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     return datetime.fromisoformat(raw)

@@ -1,12 +1,11 @@
-"""IMAP newsletter connector — the type=imap counterpart to gmail.py, for a
-dedicated newsletter-only mailbox authenticated with an app password rather
-than OAuth. Read-only throughout: SEARCH and FETCH only, in `readonly=True`
-mode, never STORE/EXPUNGE/DELETE.
+"""IMAP newsletter connector — reads a dedicated newsletter-only mailbox,
+authenticated with an app password rather than OAuth (no re-auth needed,
+unlike a short-lived OAuth grant). Read-only throughout: SEARCH and FETCH
+only, in `readonly=True` mode, never STORE/EXPUNGE/DELETE.
 
-Query syntax mirrors type=gmail's `query` field (`from:x subject:y
-newer_than:Nd`) so migrating a source from gmail to imap is just changing
-`type:` — see parse_query(). IMAP SEARCH doesn't support Gmail's full
-operator set, so only those three tokens are understood.
+Query field (`from:x subject:y newer_than:Nd`) mirrors Gmail's own search
+syntax for familiarity — see parse_query(). IMAP SEARCH doesn't support
+Gmail's full operator set, so only those three tokens are understood.
 
 Credential handling is deliberately narrow:
   - connect() always uses implicit TLS (IMAP4_SSL) with a verified default
@@ -24,13 +23,14 @@ import hashlib
 import imaplib
 import re
 import ssl
-from datetime import UTC, datetime
+from datetime import datetime
 from email import message_from_bytes
 from email.header import decode_header
 from email.message import Message
-from email.utils import parseaddr, parsedate_to_datetime
+from email.utils import parseaddr
 
-from app.connectors.base import NormalizedEntry
+from app.connectors.base import NormalizedEntry, plain_text_to_html
+from app.connectors.dates import parse_date
 
 DEFAULT_PORT = 993
 DEFAULT_FOLDER = "INBOX"
@@ -41,12 +41,20 @@ class ImapError(Exception):
     underlying exception text in str() — see module docstring."""
 
 
-def connect(host: str, user: str, password: str, *, port: int = DEFAULT_PORT) -> imaplib.IMAP4_SSL:
+def connect(
+    host: str, user: str, password: str, *, port: int = DEFAULT_PORT, timeout: float = 30.0
+) -> imaplib.IMAP4_SSL:
     """Opens an implicit-TLS connection and logs in. Caller owns the
-    returned client's lifetime (close/logout)."""
+    returned client's lifetime (close/logout).
+
+    imaplib's socket has no timeout by default, so a server that accepts
+    the connection and then stops responding mid-command leaves the caller
+    blocked forever (see docs/WORKLOG.md 2026-08-13). `timeout` applies to
+    the socket for the connection's whole lifetime, bounding SEARCH/FETCH
+    too, not just connect/login."""
     context = ssl.create_default_context()
     try:
-        client = imaplib.IMAP4_SSL(host, port, ssl_context=context)
+        client = imaplib.IMAP4_SSL(host, port, ssl_context=context, timeout=timeout)
         client.login(user, password)
     except (OSError, imaplib.IMAP4.error) as exc:
         raise ImapError("IMAP connect/login failed — check host/user/app password") from exc
@@ -102,7 +110,7 @@ _QUERY_NEWER_THAN_RE = re.compile(r"newer_than:(\d+)d")
 
 def parse_query(query: str | None) -> tuple[str | None, str | None, int | None]:
     """Extracts (from_filter, subject_filter, newer_than_days) from a
-    type=gmail-style query string. Any token this doesn't recognize
+    Gmail-search-style query string. Any token this doesn't recognize
     (e.g. `after:`, `-label:`) is silently ignored — same fail-open
     behavior as an IMAP SEARCH that just doesn't narrow on it."""
     query = query or ""
@@ -140,9 +148,7 @@ def _decode_payload(part: Message) -> str:
 
 
 def _find_body(msg: Message) -> tuple[str | None, str | None]:
-    """Walks a (possibly multipart) message and returns (html, plain) —
-    mirrors gmail._find_body's contract so refresh.py's downstream
-    pipeline doesn't need to know which connector produced the entry."""
+    """Walks a (possibly multipart) message and returns (html, plain)."""
     if not msg.is_multipart():
         content_type = msg.get_content_type()
         if content_type == "text/html":
@@ -191,19 +197,11 @@ def parse_message(raw: bytes) -> NormalizedEntry:
     if html:
         content_html = html
     elif plain:
-        # Mirrors gmail.parse_message: collapse long blank-line runs before
-        # <pre> preserves whitespace literally.
-        content_html = f"<pre>{re.sub(r'\n{3,}', '\n\n', plain)}</pre>"
+        content_html = plain_text_to_html(plain)
     else:
         content_html = ""
 
-    published_at = None
-    date_header = msg.get("Date")
-    if date_header:
-        try:
-            published_at = parsedate_to_datetime(date_header).astimezone(UTC).isoformat()
-        except (TypeError, ValueError):
-            published_at = None
+    published_at = parse_date(msg.get("Date"))
 
     return NormalizedEntry(
         guid=message_id,

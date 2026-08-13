@@ -7,8 +7,8 @@ algorithm.
 - **RSS/Atom feeds with regex filtering** — `include`/`exclude` rules per
   source, matched against title/summary/content/author/url. Every kept
   article stores *which* rule let it through.
-- **Gmail newsletters** — read-only (`gmail.readonly` only; never sends,
-  labels, drafts, or deletes).
+- **Newsletters via IMAP** — reads a mailbox with an app password (no
+  OAuth, no re-auth or token-expiry maintenance), read-only throughout.
 - **LLM-generated topic tracking** — for interests with no good feed,
   define a research brief and press Generate. Runs on your Claude
   subscription (not API billing), only on manual trigger, and every
@@ -80,57 +80,48 @@ Environment variables (all optional, sensible defaults):
 | `READER_CONFIG` | `config/feeds.yaml` |
 | `READER_DB` | `data/reader.db` |
 | `READER_MEDIA` | `data/media` |
-| `READER_GMAIL_TOKEN` | `data/token.json` |
 | `READER_IMAP_HOST` / `_USER` / `_PASSWORD` | unset — required together for `type: imap` sources |
 | `READER_READONLY_CONFIG` | unset — set to `1` to make `PUT /api/config` return 403 |
 
-### Gmail (optional)
+### IMAP newsletters (optional)
 
-Pulls newsletters straight from your inbox as sources, read-only
-(`gmail.readonly` scope only — the connector only ever calls
-`messages.list`/`messages.get`/`history.list`; it never sends, labels,
-drafts, or deletes).
+Pulls newsletters straight from a mailbox as sources, read-only throughout
+(SEARCH/FETCH only, opened with `readonly=True` — never STORE/EXPUNGE/DELETE).
+Authenticates with an app password rather than OAuth: no consent screen, no
+token to refresh, nothing that expires and needs re-auth.
 
-1. **Create/select a Google Cloud project.**
-   https://console.cloud.google.com/projectcreate (or pick an existing
-   project from the switcher).
-2. **Enable the Gmail API** for that project.
-   https://console.cloud.google.com/apis/library/gmail.googleapis.com →
-   **Enable**.
-3. **Configure the OAuth consent screen** (once per project).
-   https://console.cloud.google.com/apis/credentials/consent → **External**
-   → fill in an app name and your email. You can leave it in **Testing**
-   mode (no Google review needed) — but you MUST add your own Google
-   account under **Test users**, or consent fails with `Error 403:
-   access_denied` / "has not completed the Google verification process".
-4. **Create OAuth credentials.**
-   https://console.cloud.google.com/apis/credentials → **Create
-   Credentials → OAuth client ID** → type **Desktop app** → **Create** →
-   **Download JSON**. Save it as `config/gmail_client_secret.json`
-   (gitignored).
-5. **One-time consent, run locally:**
-   ```bash
-   cd backend
-   uv run --extra gmail-auth python ../scripts/gmail_auth.py
-   ```
-   Opens a browser for the read-only consent screen, then writes
-   `data/token.json` (gitignored). The running server only ever reads that
-   file to mint short-lived access tokens — it never sees your Google
-   password, and `google-auth-oauthlib` is never imported outside this one
-   script. Re-run this script any time the token is revoked or expires.
-6. **Add a `type: gmail` source** to `feeds.yaml`, with a Gmail search
-   `query` (same syntax as the Gmail search box):
+1. **Get an app password** for the mailbox you want to read from (for a
+   Gmail account: [Google Account → Security → App
+   passwords](https://myaccount.google.com/apppasswords) — requires 2-Step
+   Verification to be enabled). A dedicated newsletter-only mailbox is
+   worth setting up separately from your primary inbox, so this app only
+   ever sees what you've deliberately routed to it.
+2. **Set the three IMAP environment variables** before starting the
+   backend: `READER_IMAP_HOST` (e.g. `imap.gmail.com`), `READER_IMAP_USER`,
+   `READER_IMAP_PASSWORD` (the app password, not your account password).
+   All three are required together — a partial set is treated as "IMAP not
+   configured".
+3. **Add a `type: imap` source** to `feeds.yaml`, with a Gmail-search-style
+   `query` (`from:`/`subject:`/`newer_than:` — IMAP SEARCH doesn't support
+   Gmail's full operator set, so only those three tokens are understood):
    ```yaml
    - key: some-newsletter
-     type: gmail
+     type: imap
      title: Some Newsletter
      folder: Newsletters
      query: "from:sender@example.com newer_than:30d"
    ```
    `newer_than:N` in the query keeps the first refresh from backfilling
-   years of inbox history. Press **Refresh feeds** in the app (or `POST
-   /api/refresh`) to pull — like everything else in v1, there's no
-   scheduler, refresh is always a manual trigger.
+   years of mailbox history. `mailbox_folder` (optional, defaults to
+   `INBOX`) picks which folder to SEARCH if your mail client filters
+   newsletters into their own folder. Press **Refresh feeds** in the app
+   (or `POST /api/refresh`) to pull — like everything else in v1, there's
+   no scheduler, refresh is always a manual trigger.
+
+   All IMAP sources in one refresh share a single connection, opened once
+   and reused sequentially rather than one connection per source — mail
+   providers can silently throttle a datacenter IP that opens many fresh
+   logins in quick succession.
 
 ### LLM generation (optional)
 
@@ -157,15 +148,13 @@ frontend test suite yet).
 
 ```
 backend/app/
-├── connectors/    # RSS/Atom/RDF parser, Gmail REST client, date normalization
+├── connectors/    # RSS/Atom/RDF parser, IMAP client, date normalization
 ├── ingest/        # regex rules engine, dedup, lazy full-text extraction, sanitize
 ├── generate/      # claude CLI wrapper, job tracking, out-of-process worker
 └── api/           # Starlette route handlers
 frontend/src/
 ├── components/    # Sidebar, ArticleList, ArticleReader, ConfigEditor, ...
 └── App.tsx         # 3-pane shell + state
-scripts/
-└── gmail_auth.py  # one-time OAuth consent (only place google-auth-oauthlib is used)
 docs/
 ├── PRD.md          # product requirements
 ├── ERD.md           # architecture + entity-relationship diagram

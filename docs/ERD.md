@@ -1,6 +1,6 @@
 # OpenReader — Technical Design & ERD
 
-Status: reflects the app as built (2026-08-12). Companion to `docs/PRD.md`.
+Status: reflects the app as built (2026-08-13). Companion to `docs/PRD.md`.
 
 ## 1. Architecture overview
 
@@ -16,9 +16,9 @@ Status: reflects the app as built (2026-08-12). Companion to `docs/PRD.md`.
                         ┌───────────────────────────┼───────────────────────────┐
                         ▼                           ▼                           ▼
               ┌──────────────────┐       ┌──────────────────┐        ┌──────────────────────┐
-              │ RSS connector     │       │ Gmail connector   │        │ Generation worker      │
-              │ httpx + defusedxml│       │ REST + OAuth       │        │ out-of-process,        │
-              │ conditional GET   │       │ refresh token       │        │ spawned via subprocess │
+              │ RSS connector     │       │ IMAP connector    │        │ Generation worker      │
+              │ httpx + defusedxml│       │ imaplib, app       │        │ out-of-process,        │
+              │ conditional GET   │       │ password auth      │        │ spawned via subprocess │
               └──────────────────┘       └──────────────────┘        │ runs `claude` CLI       │
                         │                           │                └──────────────────────┘
                         └───────────────┬───────────┘                           │
@@ -48,8 +48,8 @@ else — article list, sources, config, job status — is a local SQLite read.
 backend/app/
 ├── main.py            # Starlette app factory, route table
 ├── asgi.py             # production entrypoint (uvicorn app.asgi:app)
-├── settings.py         # env-driven paths (DB, config, media, gmail token,
-│                        # IMAP host/user/password, readonly-config flag)
+├── settings.py         # env-driven paths (DB, config, media, IMAP
+│                        # host/user/password, readonly-config flag)
 ├── config.py            # msgspec Config/Source/Rule/Topic structs,
 │                        # YAML parse+validate+serialize (to_yaml),
 │                        # credential-key guard (see §5)
@@ -60,10 +60,9 @@ backend/app/
 │   ├── rss.py             # Atom/RSS2.0/RDF parser (defusedxml)
 │   ├── dates.py           # RFC822 + ISO8601 -> canonical UTC ISO string
 │   ├── http_fetch.py       # conditional-GET wrapper (ETag/Last-Modified)
-│   ├── gmail.py             # Gmail REST client + MIME parser (OAuth)
-│   └── imap.py               # plain IMAP client + MIME parser (app
-│                              # password) — type=imap, the no-OAuth-expiry
-│                              # alternative to gmail.py (see §5)
+│   └── imap.py               # IMAP client + MIME parser, app-password
+│                              # auth — type=imap, the only newsletter
+│                              # connector (see §5 for why)
 ├── ingest/
 │   ├── rules.py             # regex include/exclude engine (pure)
 │   ├── dedup.py              # URL canonicalization + content hash (pure)
@@ -84,10 +83,10 @@ backend/app/
 ```
 
 Design rule followed throughout: **pure logic is separated from I/O** and
-every I/O boundary (HTTP fetch, subprocess call, Gmail API) is injectable
+every I/O boundary (HTTP fetch, IMAP socket, subprocess call) is injectable
 in tests via a `Fetcher`/`Runner`/`GenerateFn`-style callable parameter, so
 the entire pipeline is unit-tested without a real network call or
-subprocess spawn. 207 backend tests, zero of which touch the network.
+subprocess spawn. 192 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
@@ -99,10 +98,10 @@ erDiagram
     sources {
         int id PK
         text key UK "stable identifier from config, or topic.key for llm sources"
-        text type "rss | gmail | llm"
+        text type "rss | imap | llm"
         text title
         text folder
-        text url "null for gmail/llm"
+        text url "null for imap/llm"
         text etag "RSS conditional-GET cache"
         text last_modified
         text last_fetched_at
@@ -113,7 +112,7 @@ erDiagram
     articles {
         int id PK
         int source_id FK
-        text guid "unique per source; feed guid / gmail msg id / job-N-index"
+        text guid "unique per source; feed guid / email Message-Id / job-N-index"
         text url "empty string for llm-generated articles"
         text canonical_url
         text title
@@ -124,7 +123,7 @@ erDiagram
         text content_html "sanitized, images rewritten through /api/img"
         text content_hash "sha256(canonical_url + normalized title)"
         text matched_rule "which include/exclude rule let this through"
-        text origin "feed | gmail | llm"
+        text origin "feed | email | llm"
         int job_id FK "set only when origin=llm"
         text citations_json "sources[] for llm articles"
         text hydrated_at "lazy full-text fetch completed"
@@ -156,7 +155,7 @@ Notes on choices that aren't obvious from the columns alone:
 - **LLM-generated articles get a real row in `sources`** (`type='llm'`,
   keyed by the topic's `key`), created on first generation. This means
   generated content reuses the exact same list/folder/unread-count
-  machinery as RSS/Gmail sources for free — no parallel data path in the
+  machinery as RSS/IMAP sources for free — no parallel data path in the
   API or frontend for "generated" content.
 - **`content_hash`** is *not* currently used for cross-source duplicate
   detection (e.g. the same story from two outlets) — it's indexed for a
@@ -173,7 +172,7 @@ Notes on choices that aren't obvious from the columns alone:
 | Method & path | Purpose | Blocking I/O? |
 |---|---|---|
 | `GET /api/sources` | List sources with unread counts, filtered to keys present in the live config — a source removed from `feeds.yaml` stops appearing here immediately, even though its DB row and articles aren't deleted (§5) | No |
-| `POST /api/sources` | Structured add-source, any type (rss/gmail/imap) (validates, writes YAML, creates DB row) | No |
+| `POST /api/sources` | Structured add-source, any type (rss/imap) (validates, writes YAML, creates DB row) | No |
 | `GET /api/sources/:id` | Full detail for one source (url/query/mailbox_folder/fetch_full_text/rules) — `list_sources` deliberately omits these; backs the edit form's pre-fill | No |
 | `PUT /api/sources/:id` | Edit a source's fields in place; `key`/`type` locked to the existing entry regardless of what's sent (§5) | No |
 | `DELETE /api/sources/:id` | Remove from config only — DB rows/articles untouched, same behavior as a raw-YAML removal (§5) | No |
@@ -184,7 +183,7 @@ Notes on choices that aren't obvious from the columns alone:
 | `POST /api/articles/:id/read` | Mark read (idempotent, one-directional) | No |
 | `POST /api/articles/:id/toggle-read` | Manual read/unread toggle | No |
 | `POST /api/articles/:id/star` | Toggle starred | No |
-| `POST /api/refresh` | Refresh (`?source=key` for one); RSS and IMAP each fetch concurrently within their type (own bounded pool per type), Gmail sequential (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-5s typical) |
+| `POST /api/refresh` | Refresh (`?source=key` for one); RSS fetches concurrently (bounded pool), IMAP sequentially over one shared connection (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-5s typical) |
 | `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |
 | `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | SSRF-check DNS lookup runs off the event loop (`asyncio.to_thread`, §5); the actual fetch is async `httpx` |
 | `GET /api/topics` | List configured topics + `llm.enabled` flag | No |
@@ -198,14 +197,13 @@ and test; the per-source report (`fetched/new/filtered/error`) is the
 thing that actually matters when tuning regex rules, and you only get that
 naturally from a synchronous, on-demand call.
 
-**RSS and IMAP sources each fetch concurrently within their own type
-(separate bounded thread pools); the DB write path stays single-threaded
-regardless.** Measured live, 2026-08-13: 9 sequential RSS fetches took
-7.7s with no single dominant outlier — just ordinary per-host TLS+network
-latency, paid one at a time. Both `refresh_source` (RSS) and
-`refresh_imap_source` (IMAP)'s logic is split into a fetch half
-(`_rss_fetch_only`/`_imap_fetch_only`, pure network I/O, safe on a pool
-worker) and a persist half (`_persist_rss_result`/`_persist_imap_result`,
+**RSS sources fetch concurrently (bounded thread pool); IMAP sources
+fetch sequentially over one shared connection; the DB write path stays
+single-threaded regardless.** Measured live, 2026-08-13: 9 sequential RSS
+fetches took 7.7s with no single dominant outlier — just ordinary
+per-host TLS+network latency, paid one at a time. `refresh_source`
+(RSS)'s logic is split into a fetch half (`_rss_fetch_only`, pure network
+I/O, safe on a pool worker) and a persist half (`_persist_rss_result`,
 all DB writes, always on the calling thread) because `sqlite3` connections
 default to `check_same_thread=True` — persistence can never move to a
 worker thread, only the fetch can. `refresh_all()`'s whole call also runs
@@ -215,18 +213,21 @@ matter, not assumed: a request fired 0.3s into a refresh, before that fix,
 sat blocked for the remaining 8.4s before uvicorn's single event loop
 could serve anything else.
 
-IMAP needed a different shape than RSS to parallelize: HTTP requests are
-independent, but IMAP is a stateful protocol — one connection can't run
-concurrent commands from multiple threads. `refresh_imap_source` (the
-original single-source function, still used directly by its own tests)
-keeps taking one pre-connected client; the new batch path
-(`_refresh_imap_batch`) instead takes a `connect_fn` factory and opens a
-dedicated connection per source. Gmail is the one type still sequential —
-it pages through a single shared access token per refresh rather than
-independent per-source resources, and wasn't the cost driver measured
-live (only IMAP was, once deployed and re-measured against the VM's real
-sources — see WORKLOG for the two-step "fix RSS, measure again, extend to
-IMAP" sequence).
+IMAP briefly went through the same per-source-concurrent shape RSS uses
+(`_refresh_imap_batch`, one connection per source via a `connect_fn`
+factory, opened concurrently) but was reverted the same day: IMAP is a
+stateful protocol, so parallelizing meant every refresh opened as many
+fresh TLS+LOGIN sessions as there were IMAP sources, from one datacenter
+IP — indistinguishable from abuse to Gmail's IMAP servers, which respond
+by silently stalling the connection (accept the handshake, never answer
+LOGIN) rather than erroring, hanging the request forever since
+`imaplib.IMAP4_SSL` also had no socket timeout at the time. Two fixes
+landed together: `connect()` now passes an explicit `timeout` so a stall
+fails instead of hanging, and `_refresh_imap_sequential` opens one
+connection via `connect_fn` and reuses it across every IMAP source in the
+refresh, sequentially, via the single-source `refresh_imap_source` —
+fewer logins, indistinguishable from a normal mail client. See
+docs/WORKLOG.md, 2026-08-13.
 
 **Lazy, per-article full-text extraction, not a background hydration
 pass.** Bandwidth and CPU are spent only on the ~10% of articles actually
@@ -263,16 +264,16 @@ URLs, and the exact brief snapshot stored on the job row — because
 synthesized text sitting next to real reporting is easy to misread later,
 and the stored brief is what lets you debug a topic producing bad output.
 
-**Gmail refresh is scoped incrementally, not a fixed re-query.** A Gmail
-source's configured `query` (e.g. `from:x@example.com newer_than:30d`) is
-only ever used verbatim on the first refresh. Every refresh after that
-appends `after:<epoch of the source's last_fetched_at, minus a 5-minute
-overlap>` — so a routine refresh lists only messages since it last ran
-instead of re-listing (though not re-fetching bodies for, thanks to the
-`(source_id, guid)` dedup) the source's entire configured window every
-single time. The overlap window exists because Gmail's search index can
-lag slightly behind delivery; re-seeing a message id there is a no-op, not
-a duplicate, since persistence already dedupes on guid.
+**IMAP refresh is scoped incrementally, not a fixed re-query.** A source's
+configured `query` (e.g. `from:x@example.com newer_than:30d`) only bounds
+the *first* refresh's window. Every refresh after that computes SEARCH
+SINCE from the source's `last_fetched_at`, minus a one-day overlap (IMAP
+SEARCH SINCE is date-only, no time-of-day, so the overlap has to be a
+whole day rather than a few minutes) — a routine refresh SEARCHes only
+messages since it last ran instead of re-walking the source's entire
+configured window every single time. Re-seeing a message id in that
+overlap is a no-op, not a duplicate, since persistence already dedupes on
+the parsed message's Message-Id.
 
 **Article list is paginated at the API, not truncated.** `GET
 /api/articles` defaults to `limit=50` with an `offset` param; the frontend
@@ -352,21 +353,20 @@ proxy — see §7.1) and leave the flag unset, since the endpoint is no
 longer anonymously reachable. The VM deployment moved from the former to
 the latter on 2026-08-13 once basic auth was added.
 
-**`type: imap` exists specifically because Google expires OAuth refresh
-tokens after 7 days for unverified apps.** Discovered when planning an
-unattended deployment: any app in "Testing" publishing status — which
-personal/hobby OAuth clients stay in indefinitely — has every refresh
-token revoked after a week, and escaping that for a *restricted* scope
-like `gmail.readonly` requires full Google verification plus a paid CASA
-security assessment. Re-running `scripts/gmail_auth.py` by hand every
-week is viable on a laptop, not on a box meant to run unattended.
-`connectors/imap.py` is the same `NormalizedEntry`-producing shape as
-`gmail.py` (parse_message mirrors `_find_body`'s multipart-walk contract
-exactly) but authenticates with a Google app password over plain
-`IMAP4_SSL` — no token, no expiry, no Cloud project. Its `parse_query`
-understands the same `from:`/`subject:`/`newer_than:Nd` tokens a
-`type: gmail` source's query already used, so migrating a source is
-changing one field, not rewriting config. Deliberately paired with a
+**`type: imap` is the only newsletter connector — a `type: gmail` OAuth
+connector existed early on and was fully removed 2026-08-13.** Discovered
+when planning an unattended deployment: any app in "Testing" publishing
+status — which personal/hobby OAuth clients stay in indefinitely — has
+every refresh token revoked after 7 days, and escaping that for a
+*restricted* scope like `gmail.readonly` requires full Google verification
+plus a paid CASA security assessment. Re-running a one-time OAuth consent
+script by hand every week is viable on a laptop, not on a box meant to run
+unattended, so `type: gmail` never had a realistic path to working on the
+VM. `connectors/imap.py` authenticates with an app password over plain
+`IMAP4_SSL` instead — no token, no expiry, no Cloud project — and its
+`parse_query` understands the same `from:`/`subject:`/`newer_than:Nd`
+tokens Gmail's own search box uses, for familiarity, even though nothing
+Gmail-specific remains in the codebase. Deliberately paired with a
 dedicated, throwaway mailbox rather than the user's real inbox: an app
 password isn't scoped per-protocol the way OAuth is — it authorizes SMTP
 too, not just IMAP read access — so the blast radius of the credential
@@ -441,20 +441,19 @@ existing source's query round-trips through the friendly from/subject/
 window fields on edit, not just compose cleanly on create.
 
 **Dependency minimalism.** Deliberately avoided FastAPI/pydantic
-(Starlette + msgspec instead), feedparser (stdlib `defusedxml.ElementTree`
-+ a ~150-line normalizer instead), and the Google API client library
-(raw REST over httpx instead) — each swap was chosen to keep the idle
-resident footprint small for a service meant to run indefinitely on a
-personal machine. `google-auth-oauthlib` is scoped to an optional
-dependency group (`--extra gmail-auth`) and imported only by the one-time
-auth script, never by the server.
+(Starlette + msgspec instead) and feedparser (stdlib
+`defusedxml.ElementTree` + a ~150-line normalizer instead) — each swap
+was chosen to keep the idle resident footprint small for a service meant
+to run indefinitely on a personal machine. IMAP uses stdlib `imaplib`
+directly, so newsletters need no client library at all, unlike the
+now-removed Gmail OAuth path (`google-auth-oauthlib`).
 
 ## 6. Testing strategy
 
 - **Unit, no network/subprocess**: every connector, the rules engine,
   dedup, date normalization, the readability extractor, the image proxy
   rewriter, and the `claude` CLI wrapper are tested via injected
-  fetch/runner functions against fixtures. 148 tests as of this writing —
+  fetch/runner functions against fixtures. 192 tests as of this writing —
   see `docs/WORKLOG.md` for what each new round added.
 - **Live verification for the pieces that can't be meaningfully faked**:
   real RSS feeds (including a CJK-language, hotlink-protected, non-UTF8
@@ -475,12 +474,9 @@ auth script, never by the server.
   `/api` to `127.0.0.1:8787`). Production build (`npm run build`) is
   served directly by the backend via `StaticFiles` when `frontend/dist`
   exists.
-- Gmail: one-time `uv run --extra gmail-auth python scripts/gmail_auth.py`
-  after placing a Google Cloud OAuth client secret at
-  `config/gmail_client_secret.json` (gitignored). Writes
-  `data/token.json` (gitignored); the server reads it at refresh time and
-  never touches it otherwise. Requires re-running weekly on an unattended
-  deployment (see §5's `type: imap` entry) — not used for the VM below.
+- Newsletters: set `READER_IMAP_HOST`/`_USER`/`_PASSWORD` (an app
+  password against a dedicated mailbox) — no setup script, no consent
+  flow, nothing to re-run (see §5's `type: imap` entry).
 
 ### 7.1 Co-hosted VM deployment (`pengyaochen.com/reader/`)
 

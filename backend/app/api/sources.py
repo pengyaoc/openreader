@@ -2,21 +2,10 @@ import msgspec
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from app import settings, store
-from app.config import ConfigError, Rule, Source, to_yaml, validate_config
+from app import store
+from app.api._common import readonly_response, save_config
+from app.config import ConfigError, Rule, Source, validate_config
 from app.ingest.refresh import get_or_create_source, reconcile_read_state
-
-
-def _readonly_response() -> JSONResponse | None:
-    # Same hard write-lock as config_api.put_config, extended to every
-    # source-mutating endpoint in this module — add_source previously
-    # didn't check this at all, an inconsistency with the raw-YAML PUT
-    # /api/config endpoint that closed the same door.
-    if settings.READONLY_CONFIG:
-        return JSONResponse(
-            {"error": "config is read-only on this deployment"}, status_code=403
-        )
-    return None
 
 
 async def list_sources(request: Request) -> JSONResponse:
@@ -30,10 +19,10 @@ async def add_source(request: Request) -> JSONResponse:
     to hand-editing config/feeds.yaml. Validates exactly like a manual edit
     (bad regex, duplicate key, missing required field all reject the same
     way) and writes back through the same to_yaml() serializer. Works for
-    any SourceType (rss/gmail/imap) the request body specifies — nothing
+    any SourceType (rss/imap) the request body specifies — nothing
     here is RSS-specific; that restriction was only ever in the old
     frontend modal."""
-    if (resp := _readonly_response()) is not None:
+    if (resp := readonly_response()) is not None:
         return resp
 
     body = await request.json()
@@ -51,8 +40,7 @@ async def add_source(request: Request) -> JSONResponse:
     except ConfigError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    request.app.state.config_path.write_text(to_yaml(new_config))
-    request.app.state.config = new_config
+    save_config(request, new_config)
 
     # Make it appear in the sidebar immediately — GET /api/sources reads the
     # DB, and without this the source would be invisible until the next
@@ -71,31 +59,18 @@ async def get_source(request: Request) -> JSONResponse:
     not just what the sidebar shows."""
     conn = request.app.state.get_conn()
     source_id = int(request.path_params["source_id"])
-    row = conn.execute(
-        """SELECT id, key, type, title, folder, last_fetched_at, last_error,
-                  (SELECT COUNT(*) FROM articles a
-                   WHERE a.source_id = sources.id AND a.is_read = 0) AS unread_count
-           FROM sources WHERE id = ?""",
-        (source_id,),
-    ).fetchone()
+    row = store.get_source(conn, source_id)
     if row is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
     config = request.app.state.config
-    cfg_source = next((s for s in config.sources if s.key == row[1]), None)
+    cfg_source = config.source(row["key"])
     if cfg_source is None:
         return JSONResponse({"error": "source not in current config"}, status_code=404)
 
     return JSONResponse(
         {
-            "id": row[0],
-            "key": row[1],
-            "type": row[2],
-            "title": row[3],
-            "folder": row[4],
-            "last_fetched_at": row[5],
-            "last_error": row[6],
-            "unread_count": row[7],
+            **row,
             "url": cfg_source.url,
             "query": cfg_source.query,
             "mailbox_folder": cfg_source.mailbox_folder,
@@ -122,7 +97,7 @@ async def update_source(request: Request) -> JSONResponse:
     without this an edit would silently not show up in the sidebar until
     someone reads the code closely enough to notice it never will.
     """
-    if (resp := _readonly_response()) is not None:
+    if (resp := readonly_response()) is not None:
         return resp
 
     conn = request.app.state.get_conn()
@@ -133,7 +108,7 @@ async def update_source(request: Request) -> JSONResponse:
     key = row[0]
 
     config = request.app.state.config
-    existing = next((s for s in config.sources if s.key == key), None)
+    existing = config.source(key)
     if existing is None:
         return JSONResponse({"error": "source not in current config"}, status_code=404)
 
@@ -153,8 +128,7 @@ async def update_source(request: Request) -> JSONResponse:
     except ConfigError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    request.app.state.config_path.write_text(to_yaml(new_config))
-    request.app.state.config = new_config
+    save_config(request, new_config)
 
     conn.execute(
         "UPDATE sources SET title = ?, folder = ?, url = ? WHERE id = ?",
@@ -176,7 +150,7 @@ async def remove_source(request: Request) -> JSONResponse:
     (list_sources' valid_keys) hides it immediately; reconcile_read_state
     marks its still-unread articles read, same as any other config-driven
     removal — see that function's docstring for the full reasoning."""
-    if (resp := _readonly_response()) is not None:
+    if (resp := readonly_response()) is not None:
         return resp
 
     conn = request.app.state.get_conn()
@@ -192,8 +166,7 @@ async def remove_source(request: Request) -> JSONResponse:
         return JSONResponse({"error": "source not in current config"}, status_code=404)
     new_config = msgspec.structs.replace(config, sources=new_sources)
 
-    request.app.state.config_path.write_text(to_yaml(new_config))
-    request.app.state.config = new_config
+    save_config(request, new_config)
 
     reconciled = reconcile_read_state(conn, new_config)
 

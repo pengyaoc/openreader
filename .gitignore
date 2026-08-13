@@ -1,11 +1,14 @@
-# Data: DB, media cache, Gmail OAuth token — never committed
+# Data: DB, media cache — never committed
 /data/
 
 # Your personal feed list, filter rules, and interest profile — never
 # committed. See config/feeds.example.yaml for the template this repo ships.
 /config/feeds.yaml
 
-# Gmail OAuth client secret downloaded from Google Cloud Console
+# Leftover from the removed Gmail OAuth connector (2026-08-13, see
+# docs/WORKLOG.md) — no longer read by any code path, but still a real
+# credential file if present on disk, so it stays ignored rather than
+# risking it getting committed by a future broad `git add`.
 /config/gmail_client_secret.json
 
 # IMAP credentials (READER_IMAP_HOST/_USER/_PASSWORD) if ever kept in a

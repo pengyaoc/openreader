@@ -13,7 +13,7 @@ import yaml
 
 RuleAction = Literal["include", "exclude"]
 RuleField = Literal["title", "summary", "content", "author", "url", "any"]
-SourceType = Literal["rss", "gmail", "imap"]
+SourceType = Literal["rss", "imap"]
 
 # feeds.yaml is served verbatim, unauthenticated, by GET /api/config — so a
 # credential ever written into it would be published at that URL. msgspec
@@ -83,6 +83,12 @@ class Config(msgspec.Struct, frozen=True, kw_only=True):
     sources: list[Source] = msgspec.field(default_factory=list)
     topics: list[Topic] = msgspec.field(default_factory=list)
 
+    def source(self, key: str) -> Source | None:
+        return next((s for s in self.sources if s.key == key), None)
+
+    def topic(self, key: str) -> Topic | None:
+        return next((t for t in self.topics if t.key == key), None)
+
 
 def _validate_rules(source_key: str, rules: list[Rule]) -> None:
     for rule in rules:
@@ -103,8 +109,6 @@ def validate_config(config: Config) -> None:
         seen_keys.add(source.key)
         if source.type == "rss" and not source.url:
             raise ConfigError(f"source '{source.key}': type=rss requires 'url'")
-        if source.type == "gmail" and not source.query:
-            raise ConfigError(f"source '{source.key}': type=gmail requires 'query'")
         # type=imap has no required field: an absent query means "everything
         # in the mailbox folder", which is a reasonable default for a
         # dedicated newsletter-only account.

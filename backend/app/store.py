@@ -30,19 +30,36 @@ def list_sources(conn: sqlite3.Connection, valid_keys: set[str] | None = None) -
     query += " GROUP BY s.id ORDER BY s.folder, s.title"
 
     rows = conn.execute(query, params).fetchall()
-    return [
-        {
-            "id": r[0],
-            "key": r[1],
-            "type": r[2],
-            "title": r[3],
-            "folder": r[4],
-            "last_fetched_at": r[5],
-            "last_error": r[6],
-            "unread_count": r[7],
-        }
-        for r in rows
-    ]
+    return [_source_row_to_dict(r) for r in rows]
+
+
+def get_source(conn: sqlite3.Connection, source_id: int) -> dict | None:
+    """Single-source counterpart to list_sources, same column/aggregation
+    shape (including unread_count) so both read paths agree on the count."""
+    row = conn.execute(
+        """SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
+                  s.last_error,
+                  COUNT(a.id) FILTER (WHERE a.is_read = 0) AS unread_count
+           FROM sources s
+           LEFT JOIN articles a ON a.source_id = s.id
+           WHERE s.id = ?
+           GROUP BY s.id""",
+        (source_id,),
+    ).fetchone()
+    return _source_row_to_dict(row) if row else None
+
+
+def _source_row_to_dict(r) -> dict:
+    return {
+        "id": r[0],
+        "key": r[1],
+        "type": r[2],
+        "title": r[3],
+        "folder": r[4],
+        "last_fetched_at": r[5],
+        "last_error": r[6],
+        "unread_count": r[7],
+    }
 
 
 _ARTICLE_COLUMNS = (

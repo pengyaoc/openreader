@@ -5,10 +5,8 @@ to tune interactively (design doc Part 2).
 RSS sources are fetched concurrently (see _refresh_rss_batch) — found live,
 2026-08-13: 9 sequential RSS fetches took ~7.7s with no single dominant
 outlier, just ordinary per-host TLS+network latency summed one at a time.
-Gmail/IMAP stay sequential: both page through a single shared, stateful
-connection/token (one IMAP connection, one access token) rather than
-independent per-source connections, so there's nothing to parallelize
-there without a larger change to how those are provisioned.
+IMAP stays sequential over one shared connection — see
+_refresh_imap_sequential for why.
 """
 from __future__ import annotations
 
@@ -23,7 +21,6 @@ import httpx
 from app.config import Config, Source, compile_rule
 from app.connectors import imap as imap_connector
 from app.connectors.base import NormalizedEntry
-from app.connectors.gmail import get_message, list_message_ids, parse_message
 from app.connectors.http_fetch import FetchResult, conditional_get
 from app.connectors.rss import FeedParseError, parse_feed
 from app.ingest.dedup import canonicalize_url, content_hash
@@ -31,8 +28,6 @@ from app.ingest.rules import RawArticle, evaluate_rules
 from app.ingest.textutil import plain_text_excerpt, proxy_image_urls, tighten_newsletter_whitespace
 
 Fetcher = Callable[[Source, str | None, str | None], FetchResult]
-GmailListFn = Callable[[str, str], list[str]]
-GmailGetFn = Callable[[str, str], dict]
 ImapSearchFn = Callable[..., list[str]]
 ImapFetchFn = Callable[[object, str], bytes]
 ImapConnectFn = Callable[[], object]
@@ -46,13 +41,6 @@ EXCERPT_LIMIT = 900
 # single-user app hitting a handful of distinct hosts, without opening an
 # unreasonable number of simultaneous connections out of one process.
 _RSS_FETCH_CONCURRENCY = 6
-
-# Separate constant from the RSS one even though the value's the same —
-# different reasoning: this is bounded by how many simultaneous IMAP
-# connections is reasonable to open from one account (Gmail allows up to
-# 15), not by host count. Realistically never more than a handful of
-# type=imap sources exist, so this is more headroom than ceiling.
-_IMAP_FETCH_CONCURRENCY = 6
 
 
 def _default_fetcher(client: httpx.Client) -> Fetcher:
@@ -127,7 +115,7 @@ def _persist_entry(
     raw_content = entry.content_html or entry.summary
     excerpt = plain_text_excerpt(raw_content, limit=EXCERPT_LIMIT)
     content_html = proxy_image_urls(raw_content)
-    if origin == "gmail":
+    if origin == "email":
         content_html = tighten_newsletter_whitespace(content_html)
     matched_rule_str = (
         f"{matched_rule.action}/{matched_rule.field}/{matched_rule.pattern}" if matched_rule else None
@@ -273,100 +261,15 @@ def _refresh_rss_batch(conn: sqlite3.Connection, sources: list[Source], fetcher:
     return reports
 
 
-_GMAIL_OVERLAP_SECONDS = 300  # re-check a small trailing window on every
-# refresh so a message Gmail's search index hadn't caught up on yet during
-# the previous run isn't permanently missed. Cheap: overlap just means a
-# handful of message ids get re-listed, and _persist_entry already dedupes
-# on (source_id, guid), so re-seeing one is a no-op, not a duplicate.
-
-
-def _scoped_gmail_query(query: str, last_fetched_at: str | None) -> str:
-    """Narrows a source's Gmail query to messages since the last successful
-    refresh, so a routine refresh lists only what's new instead of
-    re-walking the source's entire configured window (e.g. `newer_than:30d`)
-    every single time."""
-    if not last_fetched_at:
-        return query
-    epoch = int(datetime.fromisoformat(last_fetched_at).timestamp()) - _GMAIL_OVERLAP_SECONDS
-    return f"{query} after:{epoch}"
-
-
-def refresh_gmail_source(
-    conn: sqlite3.Connection,
-    source: Source,
-    access_token: str,
-    list_fn: GmailListFn = list_message_ids,
-    get_fn: GmailGetFn = get_message,
-) -> dict:
-    """Mirrors refresh_source's shape but for Gmail: list message ids for
-    the source's query — scoped to messages since the last successful
-    refresh — fetch+persist only the ones not already ingested. Read-only —
-    only ever calls list/get, never touches labels or content.
-    """
-    source_id, _, _ = get_or_create_source(conn, source)
-    last_fetched_at = conn.execute(
-        "SELECT last_fetched_at FROM sources WHERE id = ?", (source_id,)
-    ).fetchone()[0]
-    now = datetime.now(UTC).isoformat()
-
-    scoped_query = _scoped_gmail_query(source.query, last_fetched_at)
-    try:
-        message_ids = list_fn(access_token, scoped_query)
-    except Exception as exc:  # noqa: BLE001 — isolates this source, matches refresh_source
-        conn.execute(
-            "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
-            (str(exc), now, source_id),
-        )
-        conn.commit()
-        return {"key": source.key, "status": "error", "error": str(exc)}
-
-    rules = [compile_rule(r) for r in source.rules]
-    new_count = 0
-    filtered_count = 0
-    for message_id in message_ids:
-        already = conn.execute(
-            "SELECT id FROM articles WHERE source_id = ? AND guid = ?", (source_id, message_id)
-        ).fetchone()
-        if already:
-            continue
-
-        try:
-            raw = get_fn(access_token, message_id)
-        except Exception:  # noqa: BLE001 — one bad message must not sink the refresh
-            continue
-
-        entry = parse_message(raw)
-        passed, matched = evaluate_rules(_entry_to_raw_article(entry), rules)
-        if not passed:
-            filtered_count += 1
-            continue
-        if _persist_entry(conn, source_id, entry, matched, origin="gmail"):
-            new_count += 1
-
-    conn.execute(
-        "UPDATE sources SET last_fetched_at = ?, last_error = NULL WHERE id = ?",
-        (now, source_id),
-    )
-    conn.commit()
-
-    return {
-        "key": source.key,
-        "status": "ok",
-        "fetched": len(message_ids),
-        "new": new_count,
-        "filtered": filtered_count,
-    }
-
-
 _IMAP_OVERLAP_DAYS = 1  # IMAP SEARCH SINCE is date-only (no time-of-day), so
-# the overlap has to be a whole day, not the few minutes _GMAIL_OVERLAP_SECONDS
-# uses — otherwise a message that arrives after this run's SINCE boundary but
-# before the exact same calendar day next runs could be missed at the edge.
-# Cheap: _persist_entry already dedupes on (source_id, guid), so re-seeing a
-# day's worth of messages is a no-op, not a duplicate.
+# the overlap has to be a whole day, not a few minutes — otherwise a message
+# that arrives after this run's SINCE boundary but before the exact same
+# calendar day next runs could be missed at the edge. Cheap: _persist_entry
+# already dedupes on (source_id, guid), so re-seeing a day's worth of
+# messages is a no-op, not a duplicate.
 _IMAP_DEFAULT_WINDOW_DAYS = 30  # first-refresh bound when the source's query
-# has no newer_than:Nd token — mirrors type=gmail's README guidance to avoid
-# backfilling years of inbox history on the very first run.
+# has no newer_than:Nd token, to avoid backfilling years of inbox history
+# on the very first run.
 
 
 def _scoped_imap_since(last_fetched_at: str | None, default_window_days: int) -> datetime:
@@ -382,8 +285,7 @@ def refresh_imap_source(
     search_fn: ImapSearchFn = imap_connector.search_message_ids,
     fetch_fn: ImapFetchFn = imap_connector.fetch_message,
 ) -> dict:
-    """Mirrors refresh_gmail_source's shape but for a plain IMAP mailbox —
-    SEARCH for message ids scoped to messages since the last successful
+    """SEARCH for message ids scoped to messages since the last successful
     refresh, then FETCH+persist only the ones not already ingested.
     Read-only: opens the mailbox with readonly=True and only ever calls
     SEARCH/FETCH, never STORE/EXPUNGE.
@@ -417,9 +319,9 @@ def refresh_imap_source(
     new_count = 0
     filtered_count = 0
     for message_id in message_ids:
-        # IMAP sequence/UID numbers aren't a stable guid across sessions,
-        # unlike Gmail's message id — the dedup check below is on the
-        # parsed entry's Message-Id, after fetch, not on message_id itself.
+        # IMAP sequence/UID numbers aren't a stable guid across sessions —
+        # the dedup check below is on the parsed entry's Message-Id, after
+        # fetch, not on message_id itself.
         try:
             raw = fetch_fn(imap_client, message_id)
         except Exception:  # noqa: BLE001 — one bad message must not sink the refresh
@@ -436,7 +338,7 @@ def refresh_imap_source(
         if not passed:
             filtered_count += 1
             continue
-        if _persist_entry(conn, source_id, entry, matched, origin="gmail"):
+        if _persist_entry(conn, source_id, entry, matched, origin="email"):
             new_count += 1
 
     conn.execute(
@@ -454,52 +356,45 @@ def refresh_imap_source(
     }
 
 
-def _imap_fetch_only(
-    connect_fn: ImapConnectFn,
-    source: Source,
-    since: datetime,
-    from_filter: str | None,
-    subject_filter: str | None,
-    search_fn: ImapSearchFn,
-    fetch_fn: ImapFetchFn,
-) -> tuple[list[NormalizedEntry] | None, Exception | None]:
-    """The network-bound half of an IMAP source refresh — opens its own
-    connection via connect_fn (unlike RSS's independent HTTP requests,
-    IMAP is a stateful protocol: a connection can't be used concurrently
-    from multiple threads, so parallelizing across sources means each one
-    gets its own, not sharing the single connection refresh_imap_source
-    takes as a parameter). Searches, fetches, and parses every message,
-    then always logs out. No DB access — safe on a worker thread.
+def _mark_source_error(conn: sqlite3.Connection, source: Source, exc: Exception) -> dict:
+    """Records a source-level failure and returns its report dict — shared
+    by callers that fail before ever reaching a per-source fetch (e.g. one
+    connect_fn covering several sources), so the error is stamped on every
+    affected source without re-deriving the same UPDATE at each call site."""
+    source_id, _, _ = get_or_create_source(conn, source)
+    conn.execute(
+        "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
+        (str(exc), datetime.now(UTC).isoformat(), source_id),
+    )
+    conn.commit()
+    return {"key": source.key, "status": "error", "error": str(exc)}
 
-    A single bad message is skipped (matches refresh_imap_source: one bad
-    message must not sink the refresh); a failed connection or a failed
-    SEARCH fails the whole source, same as before.
+
+def _refresh_imap_sequential(
+    conn: sqlite3.Connection,
+    sources: list[Source],
+    connect_fn: ImapConnectFn,
+    search_fn: ImapSearchFn = imap_connector.search_message_ids,
+    fetch_fn: ImapFetchFn = imap_connector.fetch_message,
+) -> dict[str, dict]:
+    """One shared IMAP connection, reused sequentially across every source
+    in this refresh (not one connection each, like RSS) — a concurrent
+    per-source connection made Gmail silently stall connections from this
+    app's datacenter IP; see docs/WORKLOG.md 2026-08-13. Logs out once at
+    the end. Assumes a handful of imap sources, matching this app's
+    single-user scope — a much larger source count would need pooling
+    rather than one login serving all of them.
     """
     try:
         client = connect_fn()
-    except Exception as exc:  # noqa: BLE001 — isolates this source
-        return None, exc
+    except Exception as exc:  # noqa: BLE001 — one failed connect fails every imap source this refresh
+        return {s.key: _mark_source_error(conn, s, exc) for s in sources}
 
     try:
-        try:
-            message_ids = search_fn(
-                client,
-                source.mailbox_folder or imap_connector.DEFAULT_FOLDER,
-                since=since,
-                from_filter=from_filter,
-                subject_filter=subject_filter,
-            )
-        except Exception as exc:  # noqa: BLE001 — isolates this source
-            return None, exc
-
-        entries = []
-        for message_id in message_ids:
-            try:
-                raw = fetch_fn(client, message_id)
-            except Exception:  # noqa: BLE001 — one bad message must not sink the refresh
-                continue
-            entries.append(imap_connector.parse_message(raw))
-        return entries, None
+        return {
+            s.key: refresh_imap_source(conn, s, client, search_fn, fetch_fn)
+            for s in sources
+        }
     finally:
         try:
             client.logout()
@@ -507,100 +402,11 @@ def _imap_fetch_only(
             pass
 
 
-def _persist_imap_result(
-    conn: sqlite3.Connection,
-    source: Source,
-    source_id: int,
-    entries: list[NormalizedEntry] | None,
-    exc: Exception | None,
-) -> dict:
-    """The DB-writing half — always runs on the connection's own thread."""
-    now = datetime.now(UTC).isoformat()
-
-    if exc is not None:
-        conn.execute(
-            "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
-            (str(exc), now, source_id),
-        )
-        conn.commit()
-        return {"key": source.key, "status": "error", "error": str(exc)}
-
-    rules = [compile_rule(r) for r in source.rules]
-    new_count = 0
-    filtered_count = 0
-    for entry in entries:
-        already = conn.execute(
-            "SELECT id FROM articles WHERE source_id = ? AND guid = ?", (source_id, entry.guid)
-        ).fetchone()
-        if already:
-            continue
-        passed, matched = evaluate_rules(_entry_to_raw_article(entry), rules)
-        if not passed:
-            filtered_count += 1
-            continue
-        if _persist_entry(conn, source_id, entry, matched, origin="gmail"):
-            new_count += 1
-
-    conn.execute(
-        "UPDATE sources SET last_fetched_at = ?, last_error = NULL WHERE id = ?",
-        (now, source_id),
-    )
-    conn.commit()
-
-    return {
-        "key": source.key,
-        "status": "ok",
-        "fetched": len(entries),
-        "new": new_count,
-        "filtered": filtered_count,
-    }
-
-
-def _refresh_imap_batch(
-    conn: sqlite3.Connection,
-    sources: list[Source],
-    connect_fn: ImapConnectFn,
-    search_fn: ImapSearchFn = imap_connector.search_message_ids,
-    fetch_fn: ImapFetchFn = imap_connector.fetch_message,
-) -> dict[str, dict]:
-    """Fetches every given IMAP source concurrently (each on its own
-    connection, opened by connect_fn), then persists sequentially on the
-    calling thread — mirrors _refresh_rss_batch's split for the same
-    reason (sqlite3's check_same_thread=True default). Returns a dict
-    keyed by source key so refresh_all can reassemble original order.
-    """
-    prepared = []
-    for s in sources:
-        source_id, _, _ = get_or_create_source(conn, s)
-        last_fetched_at = conn.execute(
-            "SELECT last_fetched_at FROM sources WHERE id = ?", (source_id,)
-        ).fetchone()[0]
-        from_filter, subject_filter, newer_than_days = imap_connector.parse_query(s.query)
-        since = _scoped_imap_since(last_fetched_at, newer_than_days or _IMAP_DEFAULT_WINDOW_DAYS)
-        prepared.append((s, source_id, since, from_filter, subject_filter))
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=_IMAP_FETCH_CONCURRENCY) as pool:
-        fetch_results = list(
-            pool.map(
-                lambda p: _imap_fetch_only(
-                    connect_fn, p[0], p[2], p[3], p[4], search_fn, fetch_fn
-                ),
-                prepared,
-            )
-        )
-
-    reports = {}
-    for (source, source_id, *_rest), (entries, exc) in zip(prepared, fetch_results):
-        reports[source.key] = _persist_imap_result(conn, source, source_id, entries, exc)
-    return reports
-
-
 def refresh_all(
     conn: sqlite3.Connection,
     sources: list[Source],
     fetcher: Fetcher | None = None,
     only_key: str | None = None,
-    gmail_access_token: str | None = None,
     imap_connect: ImapConnectFn | None = None,
 ) -> dict:
     if fetcher is None:
@@ -610,18 +416,17 @@ def refresh_all(
                 sources,
                 fetcher=_default_fetcher(client),
                 only_key=only_key,
-                gmail_access_token=gmail_access_token,
                 imap_connect=imap_connect,
             )
 
     started = time.monotonic()
     to_refresh = [s for s in sources if only_key is None or s.key == only_key]
 
-    # RSS and IMAP sources are each fetched as one concurrent batch, not in
-    # the per-source loop below — see _refresh_rss_batch/_refresh_imap_batch.
-    # Results are keyed by source key and merged with the loop's gmail
-    # output so the final report list matches `to_refresh`'s original order
-    # regardless of how source types are interleaved in config.
+    # RSS sources are fetched as one concurrent batch, IMAP sequentially
+    # over one shared connection — see _refresh_rss_batch/_refresh_imap_sequential.
+    # Results are keyed by source key so the final report list matches
+    # `to_refresh`'s original order regardless of how source types are
+    # interleaved in config.
     rss_sources = [s for s in to_refresh if s.type == "rss"]
     rss_reports = _refresh_rss_batch(conn, rss_sources, fetcher) if rss_sources else {}
 
@@ -638,22 +443,9 @@ def refresh_all(
             for s in imap_sources
         }
     else:
-        imap_reports = _refresh_imap_batch(conn, imap_sources, imap_connect)
+        imap_reports = _refresh_imap_sequential(conn, imap_sources, imap_connect)
 
     reports_by_key: dict[str, dict] = {**rss_reports, **imap_reports}
-    for s in to_refresh:
-        if s.type in ("rss", "imap"):
-            continue  # already in reports_by_key
-        elif s.type == "gmail":
-            if gmail_access_token is None:
-                reports_by_key[s.key] = {
-                    "key": s.key,
-                    "status": "error",
-                    "error": "Gmail not authenticated — run scripts/gmail_auth.py",
-                }
-            else:
-                reports_by_key[s.key] = refresh_gmail_source(conn, s, gmail_access_token)
-
     reports = [reports_by_key[s.key] for s in to_refresh]
 
     elapsed_ms = int((time.monotonic() - started) * 1000)

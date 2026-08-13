@@ -1,7 +1,7 @@
 """Tests for the IMAP connector's pure functions — parse_message() (raw
-RFC822 bytes -> NormalizedEntry, mirroring gmail.parse_message's contract)
-and parse_query() (gmail-style query string -> from/subject/newer_than
-filters). No network, no imaplib socket use.
+RFC822 bytes -> NormalizedEntry) and parse_query() (Gmail-search-style query
+string -> from/subject/newer_than filters). No network, no imaplib socket
+use.
 """
 from email.message import EmailMessage
 

@@ -7,7 +7,7 @@
 // call site.
 export const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, '')
 
-export type ArticleOrigin = 'feed' | 'gmail' | 'llm'
+export type ArticleOrigin = 'feed' | 'email' | 'llm'
 
 export interface Article {
   id: number
@@ -34,7 +34,7 @@ export interface Article {
   source_title?: string
 }
 
-export type SourceType = 'rss' | 'gmail' | 'imap'
+export type SourceType = 'rss' | 'imap'
 
 export interface Source {
   id: number
