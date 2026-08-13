@@ -10,6 +10,41 @@ from app.main import create_app
 
 
 @pytest.fixture()
+def client_multi(tmp_path):
+    """Like `client`, but source s1 has two unread articles instead of
+    one — needed for bulk mark-all-read tests, where a single-article
+    fixture can't distinguish "marked everything" from "marked one thing
+    that happened to be everything"."""
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES (?, ?, ?, ?, ?)",
+        ("s1", "rss", "Source One", "Test", "https://x/feed"),
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    for guid, title in (("g1", "Hello World"), ("g2", "Second Article")):
+        conn.execute(
+            """INSERT INTO articles
+               (source_id, guid, url, title, excerpt, content_html, published_at, origin)
+               VALUES (?, ?, ?, ?, 'An excerpt', '<p>Body</p>',
+                       '2026-08-01T00:00:00Z', 'feed')""",
+            (source_id, guid, f"https://x/{guid}", title),
+        )
+    conn.commit()
+    conn.close()
+
+    from app.config import to_yaml
+
+    config = Config(sources=[Source(key="s1", type="rss", title="Source One", folder="Test", url="https://x/feed")])
+    config_path = tmp_path / "feeds.yaml"
+    config_path.write_text(to_yaml(config))
+    app = create_app(db_path=db_path, config=config, config_path=config_path)
+    return TestClient(app)
+
+
+@pytest.fixture()
 def client(tmp_path):
     db_path = tmp_path / "reader.db"
     conn = connect(db_path)
@@ -277,3 +312,34 @@ def test_put_config_is_blocked_when_readonly(client, monkeypatch):
 
     assert resp.status_code == 403
     assert client.get("/api/config").json()["yaml"] == original  # untouched
+
+
+def test_mark_all_read_marks_every_unread_article_on_the_source(client_multi):
+    source_id = client_multi.get("/api/sources").json()[0]["id"]
+
+    resp = client_multi.post(f"/api/sources/{source_id}/mark-all-read")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "marked": 2}
+
+    articles = client_multi.get("/api/articles").json()
+    assert all(a["is_read"] for a in articles)
+
+    sources = client_multi.get("/api/sources").json()
+    assert sources[0]["unread_count"] == 0
+
+
+def test_mark_all_read_leaves_already_read_articles_alone_and_is_idempotent(client_multi):
+    source_id = client_multi.get("/api/sources").json()[0]["id"]
+    article_id = client_multi.get("/api/articles").json()[0]["id"]
+    client_multi.post(f"/api/articles/{article_id}/read")  # pre-mark one
+
+    resp = client_multi.post(f"/api/sources/{source_id}/mark-all-read")
+    assert resp.json() == {"ok": True, "marked": 1}  # only the other one
+
+    resp2 = client_multi.post(f"/api/sources/{source_id}/mark-all-read")
+    assert resp2.json() == {"ok": True, "marked": 0}  # nothing left to mark
+
+
+def test_mark_all_read_404_for_missing_source(client):
+    resp = client.post("/api/sources/9999/mark-all-read")
+    assert resp.status_code == 404

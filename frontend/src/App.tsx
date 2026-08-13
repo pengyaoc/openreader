@@ -257,6 +257,30 @@ export default function App() {
     },
   })
 
+  const markAllReadMutation = useMutation({
+    mutationFn: (sourceId: number) => api.markAllRead(sourceId),
+    onSuccess: (_data, sourceId) => {
+      // Same in-place-patch philosophy as patchArticleCaches/adjustSourceUnread
+      // above: flip is_read without removing rows from an already-rendered
+      // Unread list, so a bulk mark-read doesn't yank the list out from
+      // under the user mid-scroll.
+      qc.setQueriesData<ArticlesPages>({ queryKey: ['articles'] }, (old) =>
+        old && {
+          ...old,
+          pages: old.pages.map((page) =>
+            page.map((a) => (a.source_id === sourceId ? { ...a, is_read: true } : a)),
+          ),
+        },
+      )
+      qc.setQueriesData<Article>({ queryKey: ['article'] }, (old) =>
+        old && old.source_id === sourceId ? { ...old, is_read: true } : old,
+      )
+      qc.setQueryData<Source[]>(['sources'], (old) =>
+        old?.map((s) => (s.id === sourceId ? { ...s, unread_count: 0 } : s)),
+      )
+    },
+  })
+
   const openArticle = useCallback(
     (article: Article) => {
       setOpenArticleId(article.id)
@@ -359,6 +383,7 @@ export default function App() {
         topics={topicsQuery.data?.topics ?? []}
         jobsByTopic={jobsByTopic}
         onGenerate={(key) => generateMutation.mutate(key)}
+        onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
       />
 
       <div className="main">
@@ -384,6 +409,7 @@ export default function App() {
           articles={articles}
           selectedId={cursorId}
           onOpen={openArticle}
+          onToggleRead={(a) => toggleReadMutation.mutate(a)}
           hasMore={articlesQuery.hasNextPage}
           loadingMore={articlesQuery.isFetchingNextPage}
           onLoadMore={() => articlesQuery.fetchNextPage()}

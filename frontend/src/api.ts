@@ -157,6 +157,11 @@ export const api = {
       body: JSON.stringify(source),
     }).then((r) => json<{ ok: boolean; key: string }>(r)),
 
+  markAllRead: (sourceId: number) =>
+    fetch(`${API_BASE}/api/sources/${sourceId}/mark-all-read`, { method: 'POST' }).then((r) =>
+      json<{ ok: boolean; marked: number }>(r),
+    ),
+
   topics: () =>
     fetch(`${API_BASE}/api/topics`).then((r) => json<{ enabled: boolean; topics: Topic[] }>(r)),
 

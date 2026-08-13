@@ -109,6 +109,22 @@ def mark_read(conn: sqlite3.Connection, article_id: int) -> bool:
     return True
 
 
+def mark_all_read(conn: sqlite3.Connection, source_id: int) -> int | None:
+    """Bulk counterpart to mark_read(), scoped to every unread article on
+    one source. Returns None if the source doesn't exist, else the number
+    of rows actually flipped (already-read articles aren't touched, so a
+    second call against the same source returns 0 — idempotent)."""
+    row = conn.execute("SELECT id FROM sources WHERE id = ?", (source_id,)).fetchone()
+    if row is None:
+        return None
+    cur = conn.execute(
+        "UPDATE articles SET is_read = 1, read_at = ? WHERE source_id = ? AND is_read = 0",
+        (datetime.now(UTC).isoformat(), source_id),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def toggle_star(conn: sqlite3.Connection, article_id: int) -> dict | None:
     row = conn.execute("SELECT is_starred FROM articles WHERE id = ?", (article_id,)).fetchone()
     if row is None:

@@ -42,3 +42,12 @@ async def add_source(request: Request) -> JSONResponse:
     get_or_create_source(conn, source)
 
     return JSONResponse({"ok": True, "key": source.key}, status_code=201)
+
+
+async def mark_all_read(request: Request) -> JSONResponse:
+    conn = request.app.state.get_conn()
+    source_id = int(request.path_params["source_id"])
+    marked = store.mark_all_read(conn, source_id)
+    if marked is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"ok": True, "marked": marked})

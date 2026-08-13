@@ -20,6 +20,7 @@ interface Props {
   topics: Topic[]
   jobsByTopic: Record<string, Job | undefined>
   onGenerate: (topicKey: string) => void
+  onMarkAllRead: (sourceId: number) => void
 }
 
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
@@ -48,6 +49,7 @@ export function Sidebar({
   topics,
   jobsByTopic,
   onGenerate,
+  onMarkAllRead,
 }: Props) {
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
@@ -141,14 +143,24 @@ export function Sidebar({
               <div className="sidebar__section-label">{folder}</div>
               <div className="folder-group">
                 {folderSources.map((s) => (
-                  <NavRow
-                    key={s.id}
-                    label={s.title}
-                    count={s.unread_count || undefined}
-                    hasError={!!s.last_error}
-                    active={isSame(selection, { kind: 'source', sourceId: s.id, title: s.title })}
-                    onClick={() => select({ kind: 'source', sourceId: s.id, title: s.title })}
-                  />
+                  <div className="source-row" key={s.id}>
+                    <NavRow
+                      label={s.title}
+                      count={s.unread_count || undefined}
+                      hasError={!!s.last_error}
+                      active={isSame(selection, { kind: 'source', sourceId: s.id, title: s.title })}
+                      onClick={() => select({ kind: 'source', sourceId: s.id, title: s.title })}
+                    />
+                    {s.unread_count > 0 && (
+                      <button
+                        className="source-row__mark-read"
+                        onClick={() => onMarkAllRead(s.id)}
+                        title={`Mark all ${s.unread_count} as read`}
+                      >
+                        ✓
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
