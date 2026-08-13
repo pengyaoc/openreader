@@ -1,9 +1,18 @@
 """Synchronous refresh loop: the only ingest path in v1. No scheduler, no
-background polling. Fetches sources sequentially and returns a per-source
-report so filter rules are easy to tune interactively (design doc Part 2).
+background polling. Returns a per-source report so filter rules are easy
+to tune interactively (design doc Part 2).
+
+RSS sources are fetched concurrently (see _refresh_rss_batch) — found live,
+2026-08-13: 9 sequential RSS fetches took ~7.7s with no single dominant
+outlier, just ordinary per-host TLS+network latency summed one at a time.
+Gmail/IMAP stay sequential: both page through a single shared, stateful
+connection/token (one IMAP connection, one access token) rather than
+independent per-source connections, so there's nothing to parallelize
+there without a larger change to how those are provisioned.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -30,6 +39,12 @@ ImapFetchFn = Callable[[object, str], bytes]
 # List-view subtitle length. Long enough to actually convey whether an
 # article is worth opening, not just echo the first clause of a sentence.
 EXCERPT_LIMIT = 900
+
+# Bounded pool for the RSS fetch phase. Enough to overlap most sources'
+# network latency in one batch (measured: 9 sources, none over ~2.6s) for a
+# single-user app hitting a handful of distinct hosts, without opening an
+# unreasonable number of simultaneous connections out of one process.
+_RSS_FETCH_CONCURRENCY = 6
 
 
 def _default_fetcher(client: httpx.Client) -> Fetcher:
@@ -134,12 +149,40 @@ def _persist_entry(
 
 
 def refresh_source(conn: sqlite3.Connection, source: Source, fetcher: Fetcher) -> dict:
+    """Single-source fetch + persist, both on the calling thread. The
+    RSS batch path (_refresh_rss_batch) instead fetches many sources
+    concurrently first, then calls _persist_rss_result (this function's
+    second half, factored out below) sequentially — this function stays
+    as the direct single-source entry point tests and callers use."""
     source_id, etag, last_modified = get_or_create_source(conn, source)
+    result, exc = _rss_fetch_only(fetcher, source, etag, last_modified)
+    return _persist_rss_result(conn, source, source_id, result, exc)
+
+
+def _rss_fetch_only(
+    fetcher: Fetcher, source: Source, etag: str | None, last_modified: str | None
+) -> tuple[FetchResult | None, Exception | None]:
+    """The network-bound half of a source refresh — no DB access, safe to
+    run on a worker thread. Never raises: catches and returns the
+    exception instead, so a thread-pool map can collect every source's
+    result (success or failure) without one bad source aborting the batch."""
+    try:
+        return fetcher(source, etag, last_modified), None
+    except Exception as exc:  # noqa: BLE001 — isolates this source
+        return None, exc
+
+
+def _persist_rss_result(
+    conn: sqlite3.Connection,
+    source: Source,
+    source_id: int,
+    result: FetchResult | None,
+    exc: Exception | None,
+) -> dict:
+    """The DB-writing half — always runs on the connection's own thread."""
     now = datetime.now(UTC).isoformat()
 
-    try:
-        result = fetcher(source, etag, last_modified)
-    except Exception as exc:  # noqa: BLE001 — any fetch failure isolates this source
+    if exc is not None:
         conn.execute(
             "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
             (str(exc), now, source_id),
@@ -157,13 +200,13 @@ def refresh_source(conn: sqlite3.Connection, source: Source, fetcher: Fetcher) -
 
     try:
         entries = parse_feed(result.body)
-    except FeedParseError as exc:
+    except FeedParseError as parse_exc:
         conn.execute(
             "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
-            (str(exc), now, source_id),
+            (str(parse_exc), now, source_id),
         )
         conn.commit()
-        return {"key": source.key, "status": "error", "error": str(exc)}
+        return {"key": source.key, "status": "error", "error": str(parse_exc)}
 
     rules = [compile_rule(r) for r in source.rules]
     new_count = 0
@@ -191,6 +234,35 @@ def refresh_source(conn: sqlite3.Connection, source: Source, fetcher: Fetcher) -
         "new": new_count,
         "filtered": filtered_count,
     }
+
+
+def _refresh_rss_batch(conn: sqlite3.Connection, sources: list[Source], fetcher: Fetcher) -> dict[str, dict]:
+    """Fetches every given RSS source concurrently, then persists results
+    sequentially on the calling thread. Returns a dict keyed by source key
+    so the caller can reassemble reports in the original source order.
+
+    get_or_create_source() runs upfront, sequentially — it's a cheap local
+    DB read/insert, not worth parallelizing, and it has to happen before
+    the fetch anyway (need each source's etag/last_modified to send). The
+    fetches themselves are the actual cost (network + TLS per distinct
+    host) and the only part that's safe to run off-thread: sqlite3
+    connections default to check_same_thread=True, so every DB write below
+    has to stay on the thread that opened `conn`, not a pool worker.
+    """
+    prepared = [(s, *get_or_create_source(conn, s)) for s in sources]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_RSS_FETCH_CONCURRENCY) as pool:
+        fetch_results = list(
+            pool.map(
+                lambda p: _rss_fetch_only(fetcher, p[0], p[2], p[3]),
+                prepared,
+            )
+        )
+
+    reports = {}
+    for (source, source_id, _etag, _last_modified), (result, exc) in zip(prepared, fetch_results):
+        reports[source.key] = _persist_rss_result(conn, source, source_id, result, exc)
+    return reports
 
 
 _GMAIL_OVERLAP_SECONDS = 300  # re-check a small trailing window on every
@@ -396,32 +468,39 @@ def refresh_all(
     started = time.monotonic()
     to_refresh = [s for s in sources if only_key is None or s.key == only_key]
 
-    reports = []
+    # RSS sources are fetched as one concurrent batch, not in the per-source
+    # loop below — see _refresh_rss_batch. Results are keyed by source key
+    # and merged into the loop's output so the final report list still
+    # matches `to_refresh`'s original order regardless of source type
+    # interleaving, which is what the loop below builds directly for
+    # gmail/imap.
+    rss_sources = [s for s in to_refresh if s.type == "rss"]
+    rss_reports = _refresh_rss_batch(conn, rss_sources, fetcher) if rss_sources else {}
+
+    reports_by_key: dict[str, dict] = dict(rss_reports)
     for s in to_refresh:
         if s.type == "rss":
-            reports.append(refresh_source(conn, s, fetcher))
+            continue  # already in rss_reports
         elif s.type == "gmail":
             if gmail_access_token is None:
-                reports.append(
-                    {
-                        "key": s.key,
-                        "status": "error",
-                        "error": "Gmail not authenticated — run scripts/gmail_auth.py",
-                    }
-                )
+                reports_by_key[s.key] = {
+                    "key": s.key,
+                    "status": "error",
+                    "error": "Gmail not authenticated — run scripts/gmail_auth.py",
+                }
             else:
-                reports.append(refresh_gmail_source(conn, s, gmail_access_token))
+                reports_by_key[s.key] = refresh_gmail_source(conn, s, gmail_access_token)
         elif s.type == "imap":
             if imap_client is None:
-                reports.append(
-                    {
-                        "key": s.key,
-                        "status": "error",
-                        "error": "IMAP not configured — set READER_IMAP_HOST/_USER/_PASSWORD",
-                    }
-                )
+                reports_by_key[s.key] = {
+                    "key": s.key,
+                    "status": "error",
+                    "error": "IMAP not configured — set READER_IMAP_HOST/_USER/_PASSWORD",
+                }
             else:
-                reports.append(refresh_imap_source(conn, s, imap_client))
+                reports_by_key[s.key] = refresh_imap_source(conn, s, imap_client)
+
+    reports = [reports_by_key[s.key] for s in to_refresh]
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {"elapsed_ms": elapsed_ms, "sources": reports}

@@ -87,7 +87,7 @@ Design rule followed throughout: **pure logic is separated from I/O** and
 every I/O boundary (HTTP fetch, subprocess call, Gmail API) is injectable
 in tests via a `Fetcher`/`Runner`/`GenerateFn`-style callable parameter, so
 the entire pipeline is unit-tested without a real network call or
-subprocess spawn. 192 backend tests, zero of which touch the network.
+subprocess spawn. 194 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
@@ -181,7 +181,7 @@ Notes on choices that aren't obvious from the columns alone:
 | `POST /api/articles/:id/read` | Mark read (idempotent, one-directional) | No |
 | `POST /api/articles/:id/toggle-read` | Manual read/unread toggle | No |
 | `POST /api/articles/:id/star` | Toggle starred | No |
-| `POST /api/refresh` | Synchronous refresh (`?source=key` for one) | **Yes** |
+| `POST /api/refresh` | Refresh (`?source=key` for one); RSS sources fetched concurrently, Gmail/IMAP sequential (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-4s typical) |
 | `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |
 | `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | SSRF-check DNS lookup runs off the event loop (`asyncio.to_thread`, §5); the actual fetch is async `httpx` |
 | `GET /api/topics` | List configured topics + `llm.enabled` flag | No |
@@ -194,6 +194,25 @@ Notes on choices that aren't obvious from the columns alone:
 and test; the per-source report (`fetched/new/filtered/error`) is the
 thing that actually matters when tuning regex rules, and you only get that
 naturally from a synchronous, on-demand call.
+
+**RSS sources fetch concurrently (bounded thread pool); the DB write path
+stays single-threaded regardless.** Measured live, 2026-08-13: 9
+sequential RSS fetches took 7.7s with no single dominant outlier — just
+ordinary per-host TLS+network latency, paid one at a time. `refresh_source`
+is split into a fetch half (`_rss_fetch_only`, pure network I/O, safe on a
+pool worker) and a persist half (`_persist_rss_result`, all DB writes,
+always on the calling thread) because `sqlite3` connections default to
+`check_same_thread=True` — persistence can never move to a worker thread,
+only the fetch can. `refresh_all()`'s whole call also now runs via
+`asyncio.to_thread` from the API layer (own SQLite connection, same
+pattern as the SSRF-guard and hydration fixes above) — proven live to
+matter, not assumed: a request fired 0.3s into a refresh, before that fix,
+sat blocked for the remaining 8.4s before uvicorn's single event loop
+could serve anything else. Gmail/IMAP stay sequential — both page through
+one shared, stateful connection/token per refresh rather than independent
+per-source ones, so there's nothing to parallelize without provisioning a
+connection per source, and IMAP servers can rate-limit concurrent logins
+from one account regardless.
 
 **Lazy, per-article full-text extraction, not a background hydration
 pass.** Bandwidth and CPU are spent only on the ~10% of articles actually

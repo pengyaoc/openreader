@@ -792,3 +792,69 @@ No backend changes, no new tests (a decorative asset, not logic) — both
 changes deployed via `scripts/deploy.sh` and confirmed live by grepping
 the deployed JS bundle for the new class name, not just trusting the
 deploy script's own success output.
+
+## 2026-08-13 (cont.) — Refresh took ~9s and froze the whole app while it ran
+
+Feedback: *"Refresh takes ~9s. Any inefficiency there? How we can scope
+the fetch as much as possible?"*
+
+Measured before touching anything (9 real RSS sources, sequential,
+against the actual configured feeds): 7.74s total, no single dominant
+outlier — `xilei`/dapenti.com was slowest at 2.6s, but the rest still
+summed to ~5.2s. Ordinary per-host TLS+network latency, paid out one
+source at a time. IMAP (4 more sources, each its own SEARCH round-trip)
+accounted for the rest of the reported ~9s.
+
+Separately, and worse: `POST /api/refresh` called `refresh_all()`
+directly — synchronously — from an `async def` handler, with no
+`asyncio.to_thread`. Claimed live that this "doesn't freeze the app even
+today"; rather than argue from theory, tested it directly — fired a
+refresh, then a concurrent `GET /api/sources` 0.3s later. That request
+sat blocked for **8.36s**, only returning once the refresh finished. With
+one uvicorn worker, a synchronous blocking call inside an async handler
+blocks the entire event loop for its duration — not just that request,
+every request, for the whole process. (Likely why it didn't *feel*
+broken day to day: articles already loaded render from the frontend's
+local cache with no round-trip needed, so browsing what's already on
+screen keeps working; only a *new* server request would visibly hang.)
+
+Two fixes, agreed to do together after the concurrent-block was proven
+live rather than assumed:
+
+- **`_refresh_rss_batch()`** (`refresh.py`): RSS sources are fetched
+  concurrently now, via a bounded `ThreadPoolExecutor` (6 workers) —
+  network I/O only, no DB access in the pool. `refresh_source` was split
+  into `_rss_fetch_only` (safe off-thread) and `_persist_rss_result`
+  (DB writes, always back on the calling thread — `sqlite3` connections
+  default to `check_same_thread=True`, so persistence can't cross into a
+  worker thread the way the fetch can). `get_or_create_source` for every
+  source runs upfront, sequentially, before the pool starts (cheap local
+  reads, and each source's etag/last_modified has to be known before its
+  fetch can even be sent). Report order is preserved by keying results on
+  source key and reassembling in the caller's original order — batching
+  by type internally shouldn't reorder output relative to a config where
+  rss/gmail/imap sources are interleaved. Gmail/IMAP stay sequential:
+  both page through one shared, stateful connection/token per refresh
+  (one IMAP connection, one Gmail access token) rather than independent
+  per-source connections, so there's nothing to parallelize there without
+  provisioning per-source connections instead — judged not worth it given
+  RSS was the dominant cost (7.7 of ~9s) and IMAP/Gmail servers can rate-
+  limit concurrent logins from one account.
+- **`_refresh_off_thread()`** (`refresh_api.py`): the whole refresh call
+  now runs via `asyncio.to_thread`, with its own SQLite connection (same
+  `_hydrate_off_thread` pattern as the earlier event-loop-blocking fixes
+  this session) — the request handler's own connection can't be reused
+  from a different thread.
+
+Verified live, not just re-run through the test suite: fired the same
+concurrent-request-during-refresh test again — the second request now
+returns in **0.004s** instead of 8.36s. Total refresh wall time dropped
+from 8.68s to **3.80s** (RSS batch now bounded by its slowest single
+source instead of their sum; local config has no IMAP configured, so
+this run's remaining time is close to pure RSS-batch cost).
+
+194 backend tests passing (192 → 194: a timing-based test proving 5
+sources with an artificial per-fetch delay finish in roughly one delay's
+worth rather than five — the actual concurrency claim, not just "the
+code still returns the right data" — and a source-order-preservation test
+across interleaved rss/imap/gmail types).

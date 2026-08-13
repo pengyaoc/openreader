@@ -590,3 +590,59 @@ def test_reconcile_is_idempotent(tmp_path):
     new_config = Config(sources=[])
     assert reconcile_read_state(conn, new_config) == 1
     assert reconcile_read_state(conn, new_config) == 0  # already handled
+
+
+def test_rss_sources_fetch_concurrently_not_sequentially(tmp_path):
+    # The actual point of the batching change: N sources whose fetcher each
+    # takes T seconds must finish in roughly T total (bounded by the pool),
+    # not N*T (what the old sequential loop did — measured live, 2026-08-13:
+    # 9 real sources summed to ~7.7s with no single dominant outlier).
+    import time as time_module
+
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    n = 5
+    delay = 0.3
+    sources = [
+        Source(key=f"s{i}", type="rss", title=f"S{i}", folder="Test", url=f"https://x/{i}")
+        for i in range(n)
+    ]
+
+    def slow_fetcher(source, etag, last_modified):
+        time_module.sleep(delay)
+        return FetchResult(304, None, etag, last_modified)
+
+    started = time_module.monotonic()
+    report = refresh_all(conn, sources, fetcher=slow_fetcher)
+    elapsed = time_module.monotonic() - started
+
+    assert len(report["sources"]) == n
+    assert all(s["status"] == "not_modified" for s in report["sources"])
+    # Sequential would take n*delay = 1.5s; concurrent (pool of 6) should
+    # land close to one delay's worth. Generous ceiling to avoid flakiness
+    # on a loaded CI box while still clearly distinguishing the two shapes.
+    assert elapsed < n * delay * 0.6
+
+
+def test_refresh_all_preserves_source_order_across_mixed_types(tmp_path):
+    # refresh_all reassembles RSS-batch results (keyed by source key, no
+    # inherent order from the thread pool) back into the caller's original
+    # per-source order — this proves that reassembly is correct even when
+    # rss/imap/gmail sources are interleaved in the config, not just when
+    # they're grouped by type.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    sources = [
+        Source(key="rss-a", type="rss", title="A", folder="F", url="https://x/a"),
+        Source(key="newsletters", type="imap", title="N", folder="F", query=""),
+        Source(key="rss-b", type="rss", title="B", folder="F", url="https://x/b"),
+    ]
+    fetcher = make_fetcher({"rss-a": None, "rss-b": None})  # both 304
+
+    report = refresh_all(
+        conn, sources, fetcher=fetcher,
+        imap_client=None,  # reports "IMAP not configured" without a real connection
+    )
+
+    keys_in_order = [s["key"] for s in report["sources"]]
+    assert keys_in_order == ["rss-a", "newsletters", "rss-b"]
