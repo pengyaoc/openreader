@@ -155,17 +155,14 @@ a {
 .sidebar__brand {
   padding: 20px 18px 14px;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--line);
 }
 
 .sidebar__brand-mark {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: var(--amber);
-  transform: rotate(45deg);
+  width: 21px;
+  height: 21px;
   flex-shrink: 0;
 }
 

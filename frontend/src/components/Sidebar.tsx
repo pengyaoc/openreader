@@ -74,7 +74,24 @@ export function Sidebar({
       {mobileOpen && <div className="sidebar-backdrop" onClick={onCloseMobile} />}
       <aside className={`sidebar ${mobileOpen ? 'sidebar--open' : ''}`}>
         <div className="sidebar__brand">
-          <span className="sidebar__brand-mark" />
+          <svg className="sidebar__brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <rect width="32" height="32" rx="7" fill="var(--amber)" />
+            <circle cx="9" cy="23" r="3.2" fill="var(--bg)" />
+            <path
+              d="M9 15 A8 8 0 0 1 17 23"
+              fill="none"
+              stroke="var(--bg)"
+              strokeWidth="3.1"
+              strokeLinecap="round"
+            />
+            <path
+              d="M9 8 A15 15 0 0 1 24 23"
+              fill="none"
+              stroke="var(--bg)"
+              strokeWidth="3.1"
+              strokeLinecap="round"
+            />
+          </svg>
           <span className="sidebar__brand-name">OpenReader</span>
           <button
             className="theme-toggle"
