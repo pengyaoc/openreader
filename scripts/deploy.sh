@@ -78,10 +78,11 @@ gcloud compute ssh --zone "$ZONE" --project "$PROJECT" "$VM" --command "
 
 echo "==> Verifying..."
 sleep 1
-# /reader/ is behind HTTP basic auth (2026-08-13) — a bare request without
-# -u correctly gets 401, not 200. That's confirmation the auth gate and the
-# proxy are both up, not a failure; this script doesn't carry the password,
-# so it can't check past the gate. Log in via the browser to confirm the
-# app itself loaded.
-curl -s -o /dev/null -w "https://pengyaochen.com/reader/ -> %{http_code} (401 is expected — see comment above)\n" \
+# /reader/ serves the SPA shell unauthenticated by design (2026-08-13 cont.
+# — app-layer login replaced Apache Basic Auth; the login screen itself has
+# to load before anyone's authenticated) — a bare request should get 200.
+# The API underneath is still gated (AuthMiddleware); this script doesn't
+# carry a session, so it can't check past that. Log in via the browser to
+# confirm the app itself loaded.
+curl -s -o /dev/null -w "https://pengyaochen.com/reader/ -> %{http_code} (200 is expected — see comment above)\n" \
   https://pengyaochen.com/reader/
