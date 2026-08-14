@@ -224,6 +224,17 @@ export default function App() {
     },
   })
 
+  const pullFullMutation = useMutation({
+    mutationFn: (id: number) => api.pullFullArticle(id),
+    onSuccess: (data, id) => {
+      patchArticleCaches(qc, id, {
+        content_html: data.content_html,
+        hydrated_at: data.hydrated_at,
+        hydrate_failed_at: data.hydrate_failed_at,
+      })
+    },
+  })
+
   const markAllReadMutation = useMutation({
     mutationFn: (sourceId: number) => api.markAllRead(sourceId),
     onSuccess: (_data, sourceId) => {
@@ -411,6 +422,8 @@ export default function App() {
           loading={openArticleQuery.isLoading}
           onClose={closeArticle}
           onToggleStar={() => toggleStarMutation.mutate(openArticleId)}
+          onPullFull={() => pullFullMutation.mutate(openArticleId)}
+          pullingFull={pullFullMutation.isPending}
           onSummarize={() => summarizeMutation.mutate(openArticleId)}
           summarizing={summarizeMutation.isPending}
           llmEnabled={llmStatusQuery.data?.enabled ?? false}

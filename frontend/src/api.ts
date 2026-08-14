@@ -170,6 +170,13 @@ export const api = {
       json<{ summary_html: string; llm_summary_at: string }>(r),
     ),
 
+  pullFullArticle: (id: number) =>
+    apiFetch(`/api/articles/${id}/hydrate`, { method: 'POST' }).then((r) =>
+      json<{ content_html: string; hydrated_at: string | null; hydrate_failed_at: string | null }>(
+        r,
+      ),
+    ),
+
   toggleRead: (id: number) =>
     apiFetch(`/api/articles/${id}/toggle-read`, { method: 'POST' }).then((r) =>
       json<{ is_read: boolean }>(r),

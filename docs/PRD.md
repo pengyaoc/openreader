@@ -125,6 +125,15 @@ other devices (phone, tablet) on the same LAN.
   fetches and extracts the full page once, then caches it forever. No
   background hydration sweep — bandwidth is spent only on what's actually
   read.
+- A **Pull full article** button in the reader (left of Summarize) lets you
+  force that same fetch-and-extract on demand, regardless of the source's
+  `fetch_full_text` setting — for sources that leave it off, or whenever
+  the auto-hydrated text came back thin. Same one-shot semantics as the
+  passive path: it disappears once an attempt has been made (success or
+  failure) for that article, and the pulled full text replaces the partial
+  one in place — a later Summarize click naturally summarizes the full
+  article, not the truncated excerpt, since it reads whatever `content_html`
+  is stored at that point.
 - Images always render through a same-origin proxy, so hotlink-protected
   images (a real issue with several real-world feeds) still load, and the
   reader's IP/referrer is never leaked to third-party image hosts.

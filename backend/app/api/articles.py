@@ -68,6 +68,37 @@ async def get_article(request: Request) -> JSONResponse:
     return JSONResponse(article)
 
 
+async def pull_full_article(request: Request) -> JSONResponse:
+    """Explicit, on-demand full-text pull — same hydrate_article used by
+    get_article's passive hydration, but forcing fetch_full_text=True
+    regardless of source config, since the user asked for it directly.
+    Still one-shot: a prior hydrated_at/hydrate_failed_at short-circuits,
+    same as the passive path."""
+    conn = request.app.state.get_conn()
+    article_id = int(request.path_params["article_id"])
+    article = store.get_article(conn, article_id)
+    if article is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    result = await run_off_thread(
+        request.app.state.db_path, hydrate_article, article_id, True
+    )
+    if result["content_html"]:
+        article["content_html"] = result["content_html"]
+    row = conn.execute(
+        "SELECT hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article_id,)
+    ).fetchone()
+    article["hydrated_at"], article["hydrate_failed_at"] = row
+
+    return JSONResponse(
+        {
+            "content_html": article["content_html"],
+            "hydrated_at": article["hydrated_at"],
+            "hydrate_failed_at": article["hydrate_failed_at"],
+        }
+    )
+
+
 def _run_summarize(
     conn: sqlite3.Connection, article_id: int, text: str, word_count: int
 ) -> tuple[str, str]:

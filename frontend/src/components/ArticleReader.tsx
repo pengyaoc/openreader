@@ -8,6 +8,8 @@ interface Props {
   loading: boolean
   onClose: () => void
   onToggleStar: () => void
+  onPullFull: () => void
+  pullingFull: boolean
   onSummarize: () => void
   summarizing: boolean
   llmEnabled: boolean
@@ -43,6 +45,8 @@ export function ArticleReader({
   loading,
   onClose,
   onToggleStar,
+  onPullFull,
+  pullingFull,
   onSummarize,
   summarizing,
   llmEnabled,
@@ -106,6 +110,16 @@ export function ArticleReader({
           <span className="reader-source">{article.source_title}</span>
         </div>
         <div className="reader-bar__right">
+          {article.url && !article.hydrated_at && !article.hydrate_failed_at && (
+            <button
+              className={`icon-btn ${pullingFull ? 'icon-btn--busy' : ''}`}
+              onClick={onPullFull}
+              disabled={pullingFull}
+              title={pullingFull ? 'Pulling full article…' : 'Pull full article'}
+            >
+              {pullingFull ? <span className="spinner" /> : '⤓'}
+            </button>
+          )}
           {llmEnabled && (
             <button
               className={`icon-btn ${summarizing ? 'icon-btn--busy' : ''} ${

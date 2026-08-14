@@ -187,6 +187,7 @@ cookie required) otherwise, matching this app's local/LAN default.
 | `POST /api/articles/:id/toggle-read` | Manual read/unread toggle | No |
 | `POST /api/articles/:id/star` | Toggle starred | No |
 | `POST /api/articles/:id/summarize` | On-demand summary via `claude -p` (sonnet, hardcoded); cached forever once generated — returns the cached value with no subprocess call on repeat requests; 404 if `llm.enabled=false` | Runs off the event loop (`asyncio.to_thread`, §5) — a single call is ~5-20s |
+| `POST /api/articles/:id/hydrate` | On-demand full-text pull — reuses the same `hydrate_article()` as the passive path (§4.4), forcing `fetch_full_text=True` regardless of source config; one-shot like the passive path (short-circuits on an existing `hydrated_at`/`hydrate_failed_at`) | Runs off the event loop (`asyncio.to_thread`, §5) |
 | `GET /api/llm-status` | `{"enabled": bool}` — lets the frontend hide the Summarize button entirely rather than showing one that would just 404 | No |
 | `POST /api/refresh` | Refresh (`?source=key` for one); RSS fetches concurrently (bounded pool), IMAP sequentially over one shared connection (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-5s typical) |
 | `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |

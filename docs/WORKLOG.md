@@ -1662,3 +1662,26 @@ schema (dropping `jobs`/`job_id`/`citations_json`) and flips a behavior
 change (the Generate feature disappearing from the sidebar), so it should
 go out deliberately via `scripts/deploy.sh`, not bundled silently into
 some other change.
+
+## 2026-08-13 — On-demand "Pull full article" button
+
+Feedback: the reader already hydrates full text lazily on open, but only
+when the source's `fetch_full_text` config is on, and only once — there
+was no way to force it for a specific article on demand. Added a button
+in the reader bar, left of Summarize, that does exactly that.
+
+Deliberately reused `hydrate_article()` unchanged rather than adding a
+force-refetch flag or new DB column: the new `POST
+/api/articles/:id/hydrate` endpoint just calls it with
+`fetch_full_text=True` hardcoded, ignoring the source's own config. Its
+existing one-shot short-circuit (`hydrated_at`/`hydrate_failed_at`) does
+double duty as the button's own idempotency guard — no new state to
+track. The frontend hides the button once either field is set, so it
+disappears after one attempt whether it succeeded or failed (kept it
+simple rather than adding a retry-on-failure path, since nothing in the
+request asked for one).
+
+Because the pulled text is written to `content_html` synchronously and
+patched into the query cache immediately, a later Summarize click reads
+the already-replaced full article for free — no special-casing needed to
+make summarization prefer full text over the truncated excerpt.
