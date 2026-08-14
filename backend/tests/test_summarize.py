@@ -1,14 +1,12 @@
-"""Tests for the summarization CLI wrapper — mirrors
-test_generate_client.py's conventions: the subprocess call is injected, no
-real `claude` process spawned here.
+"""Tests for the summarization CLI wrapper — the subprocess call is
+injected, no real `claude` process spawned here.
 """
 import json
 import subprocess
 
 import pytest
 
-from app.generate.client import ClaudeError
-from app.generate.summarize import build_summarize_command, build_user_prompt, summarize_text
+from app.summarize import ClaudeError, build_summarize_command, build_user_prompt, summarize_text
 
 
 def test_build_summarize_command_never_passes_bare():

@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app import settings
-from app.api import articles, auth_api, config_api, generate_api, images, refresh_api, sources
+from app.api import articles, auth_api, config_api, images, refresh_api, sources
 from app.auth import AuthMiddleware
 from app.config import Config, load_config
 from app.db import connect, init_schema
@@ -47,13 +47,11 @@ def create_app(
         Route("/api/articles/{article_id}/star", articles.toggle_star, methods=["POST"]),
         Route("/api/articles/{article_id}/toggle-read", articles.toggle_read, methods=["POST"]),
         Route("/api/articles/{article_id}/summarize", articles.summarize, methods=["POST"]),
+        Route("/api/llm-status", articles.llm_status),
         Route("/api/refresh", refresh_api.refresh, methods=["POST"]),
         Route("/api/config", config_api.get_config, methods=["GET"]),
         Route("/api/config", config_api.put_config, methods=["PUT"]),
         Route("/api/img", images.proxy_image),
-        Route("/api/topics", generate_api.list_topics),
-        Route("/api/topics/{topic_key}/generate", generate_api.generate, methods=["POST"]),
-        Route("/api/jobs/{job_id}", generate_api.get_job_status),
         Route("/api/login", auth_api.login, methods=["POST"]),
         Route("/api/logout", auth_api.logout, methods=["POST"]),
     ]

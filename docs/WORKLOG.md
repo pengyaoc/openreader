@@ -518,7 +518,7 @@ way.
   bind (port 8787 unreachable from the VM's external IP) all held on the
   real deployment.
 
-**IMAP mailbox, live.** User created `openreaderinbox@gmail.com`, enabled
+**IMAP mailbox, live.** User created a dedicated Gmail mailbox, enabled
 2SV, generated an app password, and — after confirming they understood
 the tradeoff of pasting it into chat rather than typing it directly on
 the VM — handed it over to write directly. Written to
@@ -1487,3 +1487,178 @@ deployment: one env file, not two" section — the full `openreader.env`
 template and unit file, not just the narrative of what changed, so
 someone standing up their own systemd deployment from the GitHub repo
 doesn't have to reconstruct this from WORKLOG archaeology.
+
+## 2026-08-14 (cont.) — IMAP refresh: one SEARCH/FETCH pass per folder, not one per source
+
+Feedback: "instead of doing one separate call for each of the newsletters,
+we can do one call to fetch all the emails from the last sync time and
+then apply the filter." Fair — `_refresh_imap_sequential` already shared
+one login across sources (2026-08-13), but each source still ran its own
+`SEARCH` scoped by its own `from:`/`subject:` query tokens, applied
+server-side.
+
+Talked through the tradeoff before building: per-source SEARCH's FROM/
+SUBJECT filtering means the server never hands back a message that won't
+match — one shared SEARCH ALL/SINCE trades that for fewer round-trips, at
+the cost of FETCHing (the actually expensive part — full RFC822 bodies)
+messages that might not match any configured source. Reasonable for this
+app specifically, since the README already recommends a dedicated
+newsletter-only mailbox — close to 100% of messages there should match
+something.
+
+Landed as `refresh_imap_sources` (`ingest/refresh.py`): groups sources by
+`mailbox_folder`, one `SEARCH` per distinct folder, one `FETCH` per
+message id regardless of how many sources it matches (dispatch happens
+after the fetch, not before — confirmed no source's presence causes a
+duplicate FETCH, per explicit feedback to check that). `from:`/`subject:`
+matching that used to happen server-side moved to a new
+`imap_connector.matches_query()`, applied locally per source after fetch —
+had to add `parse_message_with_from_header()` alongside the existing
+`parse_message()` because IMAP's own FROM SEARCH matches the *whole*
+header (display name + address), and `NormalizedEntry.author` only keeps
+the display name (`parseaddr()`'d already, inside `parse_message`) — a
+`from:someone@example.com` query would never have matched against that.
+`refresh_imap_source` (singular) is now a thin wrapper calling
+`refresh_imap_sources` with a group of one, so every existing single-
+source test kept passing unchanged.
+
+Three rounds of live back-and-forth on the shared SEARCH's `since` bound,
+each one changing the actual answer:
+1. First cut: `max` of the group's per-source `since` values (scope to
+   the most-recently-synced source). Caught before shipping: a source's
+   own `since` check after the fetch can only *narrow* what it accepts,
+   never pull in a message the SEARCH never returned — so `max` would
+   silently and **permanently** skip a newly-added source's intended
+   backfill (its `last_fetched_at` still advances to `now` regardless of
+   what it actually saw), not just delay it to next refresh.
+2. Corrected to `min` instead — identical to `max` in the steady state
+   (every source in a group already shares one `last_fetched_at` after a
+   joint refresh), only diverges for a source that's genuinely behind, and
+   in that case `min` is what actually gives it a real chance to backfill
+   instead of quietly losing history.
+3. Feedback: "min - but limit to last 7 days." `min` alone means one
+   brand-new source (30-day default window) sharing a folder with
+   already-synced siblings forces the *whole group* through a wide
+   30-day re-SEARCH+FETCH every refresh until that source catches up —
+   added `_IMAP_SEARCH_LOOKBACK_CAP_DAYS = 7` as a floor clamped onto the
+   `min` result (`max(min(...), now - 7d)`), applied uniformly (including
+   the single-source path, since `refresh_imap_source` now shares the
+   same code). A brand-new source's first sync backfills at most 7 days,
+   not its full configured/default window — bounded cost over full
+   backfill, matching this app's "no scheduler, adhoc use" posture
+   elsewhere. An explicit `newer_than:Nd` with N > 7 is capped the same
+   way now too, worth knowing if anyone configures one.
+
+Caught one real bug before it shipped: `_refresh_imap_sequential` (the
+actual multi-source entry point `refresh_all` calls) was still looping
+`refresh_imap_source(...)` once per source — meaning it kept calling the
+new grouped function with a group of *one* every time, batching nothing
+in practice. Fixed to call `refresh_imap_sources(conn, sources, ...)`
+once for the whole batch, and added a dedicated regression test
+(`test_refresh_imap_sequential_issues_one_search_across_all_sources_in_one_folder`)
+asserting exactly one `SEARCH` call across multiple sources through that
+actual entry point — the earlier "one search per folder" test only
+exercised `refresh_imap_sources` directly and wouldn't have caught this.
+
+10 new backend tests: `matches_query`/`parse_message_with_from_header`
+unit tests in `test_imap.py`, plus grouped-refresh tests in
+`test_refresh.py` covering one-search-per-folder (both at the
+`refresh_imap_sources` level and through the real `_refresh_imap_sequential`
+entry point), no-duplicate-fetch-across-matching-sources, local from:
+routing, the 7-day cap, and the min-not-max new-source-backfill case
+specifically. 239 backend tests passing (228 → 239).
+
+## 2026-08-14 (cont.) — Removed LLM-generated topic tracking; Summarize stays
+
+Feedback: *"Remove the LLM generate feed article feature. I don't [think]
+that's useful. Remove from readme as well. Keep the LLM summary feature
+though."* Confirmed on the VM first — production DB had zero rows in
+`jobs`, zero `origin='llm'` articles, zero `type='llm'` sources (the
+`topics: []` block had been empty the entire time llm.enabled was ever
+on) — so this was a clean removal, not a lossy one, and safe to drop the
+DB schema for it too, not just leave it inert.
+
+**Backend**: deleted `app/generate/` entirely (`client.py`, `prompt.py`,
+`jobs.py`, `worker.py`) and `app/api/generate_api.py`. `summarize.py` was
+the only real consumer of `client.py`'s shared pieces (`ClaudeError`,
+`Runner`, `_default_runner`) — rather than leave a nearly-empty `client.py`
+around for three symbols, flattened the whole `app/generate/` package down
+to a single `app/summarize.py` at the top level, now self-contained. This
+is also the actual answer to "look for opportunities to simplify" asked
+alongside this removal: one file, one responsibility, no package nesting
+left over from a feature that's gone.
+
+`config.py`: removed the `Topic` struct, `Config.topics`, and
+`Config.topic()`; `LLMSettings` shrank to just `enabled` (`model`/
+`timeout_minutes` were only ever read by the removed worker/generate_api).
+Also dropped `interest_profile` — it existed solely as free-text context
+for topic briefs, unused by anything else, so it's dead weight now too
+(msgspec silently drops unknown YAML keys, so this doesn't break loading
+an existing `feeds.yaml` that still has old `topics:`/`interest_profile:`
+content — confirmed against both `feeds.example.yaml` and the real local
+`feeds.yaml`).
+
+**Removing `/api/topics` broke something non-obvious**: the frontend's
+`llmEnabled` gate on the Summarize button was reading `/api/topics`'s
+`enabled` field, not anything summarize-specific. Added a small
+replacement, `GET /api/llm-status` → `{"enabled": bool}`, rather than
+leave Summarize with no way to know if it should show itself.
+
+**DB schema**: dropped the `jobs` table and `articles.job_id`/
+`citations_json` columns for real, not just stopped creating them for new
+databases — `init_schema()` gained `DROP TABLE IF EXISTS jobs` (naturally
+idempotent) and a `_drop_column_if_present` helper mirroring the existing
+`_add_column_if_missing` one (catches "no such column" the way its sibling
+catches "duplicate column name"). Confirmed `ALTER TABLE ... DROP COLUMN`
+support first — SQLite 3.53.1 bundled with Python's stdlib `sqlite3`,
+checked on both this machine and the VM, well past the 3.35 minimum.
+New test simulates a pre-removal database (full old schema, `jobs` table
+included) and asserts `init_schema()` cleans it up on next startup,
+idempotently on a second call too — not just that a fresh DB never creates
+these anymore.
+
+**Frontend**: removed the Topics sidebar section (`.gen-topic`/`.gen-btn`/
+`.gen-spinner` and their now-dead CSS, including a duplicate `@keyframes
+spin` left over once the old generation spinner was deleted — the
+Summarize button already had its own), the `generateMutation`/job-polling
+`useEffect` in `App.tsx`, the "Generated by Claude" badge and citations/
+Sources block in `ArticleReader.tsx` (`citations_json` doesn't exist
+anymore either), and the `origin === 'llm'` badge in `ArticleList.tsx`.
+`ArticleOrigin` narrowed from `'feed' | 'email' | 'llm'` to `'feed' |
+'email'`. `topicsQuery` replaced by `llmStatusQuery` reading the new
+endpoint.
+
+**Tests**: deleted `test_generate_client.py`/`test_generate_jobs.py`/
+`test_generate_worker.py` outright (tested code that no longer exists).
+Stripped the topic/job tests from `test_api.py`, replaced with two for
+`/api/llm-status`. `test_summarize.py` and the summarize-specific tests in
+`test_api.py` just needed their import path updated
+(`app.generate.summarize`/`app.generate.client` → `app.summarize`) — the
+feature itself and its test coverage were untouched, exactly as asked.
+Added a `test_db.py` case for the schema-drop migration. 212 backend tests
+passing (239 → 212 — a large net removal, as expected for deleting a
+feature rather than adding one).
+
+**Docs**: rewrote `README.md`'s intro as a positioning pitch per explicit
+request — "open-source, self-hosted alternative to Feedly/Inoreader,
+runs on a sub-1GB VM" — backed by a real fact already true of this app
+(the co-hosted VM is a 1GB e2-micro also running WordPress), not an
+invented claim. Restructured the rest of the README into a numbered
+"Self-hosting" walkthrough (local run → sources → IMAP → login →
+summarization → VM deploy) rather than a flat list of independent
+sections. `docs/PRD.md` §4.3 (topic tracking) removed outright and
+sections renumbered; §4.4 (now the on-demand-summarization section)
+reworded to stop referencing the removed feature ("the same subscription
+topic generation uses" → just states its own facts). `docs/ERD.md`'s
+architecture diagram, module map, data model, API table, and "key
+technical decisions" prose all updated — including removing the
+`--permission-mode bypassPermissions` decision entry entirely, since that
+was specific to the removed feature's WebSearch/WebFetch tool use and
+doesn't apply to `summarize.py` (`--tools ""`, no research, no permission
+question to answer).
+
+Not yet deployed to the VM — this removal touches the production DB
+schema (dropping `jobs`/`job_id`/`citations_json`) and flips a behavior
+change (the Generate feature disappearing from the sidebar), so it should
+go out deliberately via `scripts/deploy.sh`, not bundled silently into
+some other change.

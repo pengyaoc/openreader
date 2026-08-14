@@ -5,7 +5,12 @@ use.
 """
 from email.message import EmailMessage
 
-from app.connectors.imap import parse_message, parse_query
+from app.connectors.imap import (
+    matches_query,
+    parse_message,
+    parse_message_with_from_header,
+    parse_query,
+)
 
 
 def make_message(
@@ -135,3 +140,40 @@ def test_parse_query_ignores_unsupported_gmail_tokens():
     assert from_filter is None
     assert subject_filter is None
     assert newer_than is None
+
+
+def test_parse_message_with_from_header_returns_undecomposed_header():
+    # Needed for local from:/subject: matching (ingest/refresh.py) when one
+    # shared SEARCH/FETCH pass covers several sources — must match the
+    # *whole* From header (display name + address), not just the display
+    # name parse_message's NormalizedEntry.author narrows to via parseaddr.
+    raw = make_message(from_header="Jane Doe <jane@newsletter.example.com>")
+    entry, from_header = parse_message_with_from_header(raw)
+    assert entry.author == "Jane Doe"
+    assert from_header == "Jane Doe <jane@newsletter.example.com>"
+
+
+def test_matches_query_from_filter_matches_full_header_not_just_display_name():
+    # A from:jane@newsletter.example.com query must match against the
+    # address, which parse_message's own .author field wouldn't contain.
+    assert matches_query(
+        "Jane Doe <jane@newsletter.example.com>", "Weekly digest", "jane@newsletter.example.com", None
+    )
+    assert not matches_query(
+        "Jane Doe <jane@newsletter.example.com>", "Weekly digest", "someone-else@example.com", None
+    )
+
+
+def test_matches_query_is_case_insensitive_substring():
+    assert matches_query("Jane Doe <JANE@example.com>", "Subject", "jane@example.com", None)
+
+
+def test_matches_query_requires_both_from_and_subject_when_both_given():
+    from_header, subject = "Jane Doe <jane@example.com>", "Weekly Digest #42"
+    assert matches_query(from_header, subject, "jane@example.com", "Weekly Digest")
+    assert not matches_query(from_header, subject, "jane@example.com", "Something Else")
+    assert not matches_query(from_header, subject, "someone-else@example.com", "Weekly Digest")
+
+
+def test_matches_query_with_no_filters_always_matches():
+    assert matches_query("anyone <x@example.com>", "anything", None, None)

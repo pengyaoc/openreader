@@ -12,6 +12,7 @@ from app.ingest.refresh import (
     reconcile_read_state,
     refresh_all,
     refresh_imap_source,
+    refresh_imap_sources,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -573,3 +574,179 @@ def test_imap_refresh_persists_correctly_across_multiple_sources(tmp_path):
         "SELECT s.key, a.title FROM articles a JOIN sources s ON s.id = a.source_id ORDER BY a.title"
     ).fetchall()
     assert rows == [("imapB", "Also From B"), ("imapA", "From A"), ("imapB", "From B")]
+
+
+def test_refresh_imap_sequential_issues_one_search_across_all_sources_in_one_folder(tmp_path):
+    # Regression guard: _refresh_imap_sequential is the actual multi-source
+    # entry point refresh_all uses — it must batch every source into one
+    # refresh_imap_sources() call, not call it once per source (which would
+    # each be a "group of one" and defeat the whole consolidation).
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    sources = [
+        Source(key=f"nl{i}", type="imap", title=f"N{i}", folder="Test", query="")
+        for i in range(3)
+    ]
+    search_calls = []
+
+    def search_fn(client, folder, **kw):
+        search_calls.append(folder)
+        return []
+
+    class FakeClient:
+        def logout(self):
+            pass
+
+    reports = _refresh_imap_sequential(
+        conn, sources, lambda: FakeClient(), search_fn=search_fn, fetch_fn=lambda c, m: b""
+    )
+
+    assert len(search_calls) == 1
+    assert len(reports) == 3
+
+
+def test_refresh_imap_sources_issues_one_search_per_folder_not_per_source(tmp_path):
+    # The actual point of the consolidation: N newsletter sources sharing
+    # the default folder must produce exactly one SEARCH, not one each.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    sources = [
+        Source(key=f"nl{i}", type="imap", title=f"N{i}", folder="Test", query="")
+        for i in range(4)
+    ]
+    search_calls = []
+
+    def search_fn(client, folder, **kw):
+        search_calls.append(folder)
+        return []
+
+    reports = refresh_imap_sources(
+        conn, sources, imap_client=object(), search_fn=search_fn, fetch_fn=lambda c, m: b""
+    )
+
+    assert len(search_calls) == 1
+    assert len(reports) == 4
+    assert all(r["status"] == "ok" for r in reports.values())
+
+
+def test_refresh_imap_sources_fetches_each_message_exactly_once_even_when_it_matches_two_sources(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    # Both sources have an empty query (matches everything), so the same
+    # message legitimately belongs to both — must still be FETCHed once.
+    sources = [
+        Source(key="nl-a", type="imap", title="A", folder="Test", query=""),
+        Source(key="nl-b", type="imap", title="B", folder="Test", query=""),
+    ]
+    fetch_calls = []
+
+    def fetch_fn(client, message_id):
+        fetch_calls.append(message_id)
+        return make_imap_message("m1", "Shared newsletter")
+
+    reports = refresh_imap_sources(
+        conn, sources, imap_client=object(),
+        search_fn=lambda c, f, **kw: ["1"], fetch_fn=fetch_fn,
+    )
+
+    assert fetch_calls == ["1"]  # exactly one FETCH, not two
+    assert reports["nl-a"]["new"] == 1
+    assert reports["nl-b"]["new"] == 1
+    row = conn.execute("SELECT COUNT(*) FROM articles").fetchone()
+    assert row[0] == 2  # one row per source, both from the single fetch
+
+
+def test_refresh_imap_sources_routes_by_from_query_locally(tmp_path):
+    # Two sources sharing a folder, distinguished only by from: — replaces
+    # what used to be a server-side SEARCH FROM filter with local matching
+    # after one shared SEARCH+FETCH pass.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    sources = [
+        Source(key="from-a", type="imap", title="A", folder="Test", query="from:sender-a@example.com"),
+        Source(key="from-b", type="imap", title="B", folder="Test", query="from:sender-b@example.com"),
+    ]
+
+    def make(mid, subject, sender):
+        from email.message import EmailMessage
+
+        msg = EmailMessage()
+        msg["Message-Id"] = f"<{mid}@newsletter.example.com>"
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["Date"] = "Tue, 11 Aug 2026 05:30:24 +0000"
+        msg.set_content("<p>body</p>", subtype="html")
+        return bytes(msg)
+
+    raw_messages = {
+        "1": make("m1", "From A", "Sender A <sender-a@example.com>"),
+        "2": make("m2", "From B", "Sender B <sender-b@example.com>"),
+    }
+
+    reports = refresh_imap_sources(
+        conn, sources, imap_client=object(),
+        search_fn=lambda c, f, **kw: list(raw_messages.keys()),
+        fetch_fn=lambda c, mid: raw_messages[mid],
+    )
+
+    assert reports["from-a"]["new"] == 1
+    assert reports["from-b"]["new"] == 1
+    rows = dict(conn.execute(
+        "SELECT s.key, a.title FROM articles a JOIN sources s ON s.id = a.source_id"
+    ).fetchall())
+    assert rows == {"from-a": "From A", "from-b": "From B"}
+
+
+def test_refresh_imap_sources_caps_lookback_at_seven_days(tmp_path):
+    from datetime import UTC, datetime
+
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    # No last_fetched_at yet — would otherwise default to a 30-day window.
+    source = Source(key="brand-new", type="imap", title="New", folder="Test", query="")
+    sinces_seen = []
+
+    def search_fn(client, folder, since=None, **kw):
+        sinces_seen.append(since)
+        return []
+
+    refresh_imap_sources(conn, [source], imap_client=object(), search_fn=search_fn, fetch_fn=lambda c, m: b"")
+
+    age_days = (datetime.now(UTC) - sinces_seen[0]).days
+    assert age_days <= 7
+
+
+def test_refresh_imap_sources_new_source_backfill_not_truncated_by_synced_sibling(tmp_path):
+    # The min-not-max fix: a source that's already caught up (recent,
+    # narrow `since`) sharing a folder with a brand-new source (wide
+    # default `since`, capped at 7 days) must not narrow the shared SEARCH
+    # down to the synced sibling's tighter window — that would silently
+    # and permanently skip the new source's intended backfill.
+    from datetime import UTC, datetime, timedelta
+
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+
+    synced = Source(key="synced", type="imap", title="Synced", folder="Test", query="")
+    new = Source(key="brand-new", type="imap", title="New", folder="Test", query="")
+
+    # Prime "synced" with a very recent last_fetched_at, as if it just ran.
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, last_fetched_at) VALUES (?, 'imap', 'Synced', 'Test', ?)",
+        ("synced", datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+    sinces_seen = []
+
+    def search_fn(client, folder, since=None, **kw):
+        sinces_seen.append(since)
+        return []
+
+    refresh_imap_sources(
+        conn, [synced, new], imap_client=object(), search_fn=search_fn, fetch_fn=lambda c, m: b""
+    )
+
+    # Should reach back close to the 7-day cap for the new source, not be
+    # truncated to ~1 day (synced's own since, after overlap subtraction).
+    assert sinces_seen[0] < datetime.now(UTC) - timedelta(days=5)

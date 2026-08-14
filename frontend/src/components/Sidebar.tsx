@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { Job, Source, Topic } from '../api'
+import type { Source } from '../api'
 import type { ViewSelection } from '../types'
 
 interface Props {
@@ -17,10 +17,6 @@ interface Props {
   onEditSource: (sourceId: number) => void
   mobileOpen: boolean
   onCloseMobile: () => void
-  llmEnabled: boolean
-  topics: Topic[]
-  jobsByTopic: Record<string, Job | undefined>
-  onGenerate: (topicKey: string) => void
   onMarkAllRead: (sourceId: number) => void
   onMarkAllUnreadRead: () => void
   onLogout: () => void
@@ -49,10 +45,6 @@ export function Sidebar({
   onEditSource,
   mobileOpen,
   onCloseMobile,
-  llmEnabled,
-  topics,
-  jobsByTopic,
-  onGenerate,
   onMarkAllRead,
   onMarkAllUnreadRead,
   onLogout,
@@ -140,37 +132,6 @@ export function Sidebar({
               onClick={() => select({ kind: 'saved', view: 'starred' })}
             />
           </div>
-
-          {llmEnabled && topics.length > 0 && (
-            <div className="sidebar__section">
-              <div className="sidebar__section-label">Generate</div>
-              {topics.map((t) => {
-                const job = jobsByTopic[t.key]
-                const running = job?.status === 'queued' || job?.status === 'running'
-                return (
-                  <div className="gen-topic" key={t.key}>
-                    <span className="gen-topic__label" title={job?.error ?? t.title}>
-                      {t.title}
-                    </span>
-                    {job?.status === 'error' && (
-                      <span className="nav-row__dot" title={job.error ?? 'Generation failed'} />
-                    )}
-                    {running ? (
-                      <span className="gen-spinner" title="Generating…" />
-                    ) : (
-                      <button
-                        className="gen-btn"
-                        onClick={() => onGenerate(t.key)}
-                        title={`Generate: ${t.brief}`}
-                      >
-                        Generate
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-          )}
 
           {folders.map(([folder, folderSources]) => (
             <div className="sidebar__section" key={folder}>

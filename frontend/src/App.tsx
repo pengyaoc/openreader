@@ -6,7 +6,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from '@tanstack/react-query'
-import { api, UnauthorizedError, type Article, type Job, type RefreshReport, type Source } from './api'
+import { api, UnauthorizedError, type Article, type RefreshReport, type Source } from './api'
 import type { ViewSelection } from './types'
 import { Sidebar } from './components/Sidebar'
 import { ArticleList } from './components/ArticleList'
@@ -121,7 +121,6 @@ export default function App() {
   const [sourceModal, setSourceModal] = useState<'closed' | 'add' | number>('closed')
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [refreshReport, setRefreshReport] = useState<RefreshReport | null>(null)
-  const [jobsByTopic, setJobsByTopic] = useState<Record<string, Job>>({})
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('reader-theme') as 'dark' | 'light' | null) ?? 'dark',
   )
@@ -132,7 +131,7 @@ export default function App() {
   }, [theme])
 
   const sourcesQuery = useQuery({ queryKey: ['sources'], queryFn: api.sources })
-  const topicsQuery = useQuery({ queryKey: ['topics'], queryFn: api.topics })
+  const llmStatusQuery = useQuery({ queryKey: ['llm-status'], queryFn: api.llmStatus })
 
   const needsLogin = sourcesQuery.error instanceof UnauthorizedError
 
@@ -191,52 +190,6 @@ export default function App() {
       qc.invalidateQueries({ queryKey: ['articles'] })
     },
   })
-
-  const generateMutation = useMutation({
-    mutationFn: (topicKey: string) => api.generateTopic(topicKey),
-    onSuccess: (data, topicKey) => {
-      setJobsByTopic((prev) => ({
-        ...prev,
-        [topicKey]: {
-          id: data.job_id,
-          topic_key: topicKey,
-          status: 'queued',
-          brief_snapshot: null,
-          model: null,
-          started_at: null,
-          finished_at: null,
-          error: null,
-          articles_created: 0,
-        },
-      }))
-    },
-  })
-
-  // Poll active generation jobs every 3s until each settles. Job state
-  // lives in SQLite (not this component), so this survives navigating away
-  // and back — it's just re-reading status, not driving the job itself.
-  useEffect(() => {
-    const active = Object.entries(jobsByTopic).filter(
-      ([, j]) => j.status === 'queued' || j.status === 'running',
-    )
-    if (active.length === 0) return
-
-    const interval = setInterval(() => {
-      active.forEach(async ([topicKey, job]) => {
-        try {
-          const updated = await api.getJob(job.id)
-          setJobsByTopic((prev) => ({ ...prev, [topicKey]: updated }))
-          if (updated.status === 'done' || updated.status === 'error') {
-            qc.invalidateQueries({ queryKey: ['sources'] })
-            qc.invalidateQueries({ queryKey: ['articles'] })
-          }
-        } catch {
-          // transient poll failure — try again next tick
-        }
-      })
-    }, 3000)
-    return () => clearInterval(interval)
-  }, [jobsByTopic, qc])
 
   const markReadMutation = useMutation({
     mutationFn: (article: Article) => api.markRead(article.id),
@@ -418,10 +371,6 @@ export default function App() {
         onEditSource={(id) => setSourceModal(id)}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
-        llmEnabled={topicsQuery.data?.enabled ?? false}
-        topics={topicsQuery.data?.topics ?? []}
-        jobsByTopic={jobsByTopic}
-        onGenerate={(key) => generateMutation.mutate(key)}
         onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
         onMarkAllUnreadRead={() => markAllUnreadReadMutation.mutate()}
         onLogout={() => api.logout().finally(() => qc.invalidateQueries())}
@@ -464,7 +413,7 @@ export default function App() {
           onToggleStar={() => toggleStarMutation.mutate(openArticleId)}
           onSummarize={() => summarizeMutation.mutate(openArticleId)}
           summarizing={summarizeMutation.isPending}
-          llmEnabled={topicsQuery.data?.enabled ?? false}
+          llmEnabled={llmStatusQuery.data?.enabled ?? false}
           onPrev={goPrev}
           onNext={goNext}
           hasPrev={hasPrev}

@@ -7,18 +7,12 @@
 # You can also edit sources/rules from inside the app (the "Add source"
 # form or the raw config editor) — both write back to feeds.yaml directly.
 
-interest_profile: |
-  Only used by the LLM generation tier (see `topics` below) as context for
-  what you care about. Free text. Leave blank if you're not using
-  generation.
-
 llm:
-  enabled: false        # kill switch — false means the LLM tier is fully
-                         # inert: no UI, no endpoints, `claude` is never
-                         # invoked. Flip to true only once you understand
-                         # what a topic brief does (see docs/PRD.md).
-  model: sonnet
-  timeout_minutes: 10
+  enabled: false   # kill switch for the Summarize button in the reader —
+                   # false means it's fully inert: hidden in the UI, its
+                   # API endpoint 404s, `claude` is never invoked. Requires
+                   # the `claude` CLI installed and logged into your Claude
+                   # subscription (see README's LLM generation section).
 
 defaults:
   poll_interval_minutes: 30   # informational only in v1 — refresh is manual
@@ -56,16 +50,3 @@ sources:
   #   title: Newsletters
   #   folder: Newsletters
   #   query: "from:hello@newsletter.example.com newer_than:14d"
-
-topics: []
-  # LLM-generated articles for things with no good feed. Only used when
-  # llm.enabled is true, and only ever runs when you press Generate.
-  # - key: claude-code-updates
-  #   title: Claude Code updates
-  #   folder: Generated
-  #   brief: >
-  #     Recent notable changes or releases for Anthropic's Claude Code CLI.
-  #     Favor primary sources (Anthropic's own changelog/blog) over
-  #     secondhand commentary.
-  #   lookback_days: 14
-  #   max_articles: 2

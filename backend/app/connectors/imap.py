@@ -180,12 +180,7 @@ def _fallback_guid(msg: Message) -> str:
     return "imap-" + hashlib.sha256(basis).hexdigest()[:16]
 
 
-def parse_message(raw: bytes) -> NormalizedEntry:
-    """Pure — no network. Extracts a NormalizedEntry from a raw RFC822
-    message. `url` is deliberately left empty: unlike Gmail's API, which
-    hands back an internal id usable in a mail.google.com deep link, plain
-    IMAP has no equivalent — the frontend already hides the 'open original'
-    link when url is falsy."""
+def _parse(raw: bytes) -> tuple[Message, NormalizedEntry]:
     msg = message_from_bytes(raw)
 
     message_id = _decode_header_value(msg.get("Message-Id")) or _fallback_guid(msg)
@@ -203,7 +198,7 @@ def parse_message(raw: bytes) -> NormalizedEntry:
 
     published_at = parse_date(msg.get("Date"))
 
-    return NormalizedEntry(
+    entry = NormalizedEntry(
         guid=message_id,
         url="",
         title=subject,
@@ -212,6 +207,42 @@ def parse_message(raw: bytes) -> NormalizedEntry:
         summary="",
         content_html=content_html,
     )
+    return msg, entry
+
+
+def parse_message(raw: bytes) -> NormalizedEntry:
+    """Pure — no network. Extracts a NormalizedEntry from a raw RFC822
+    message. `url` is deliberately left empty: unlike Gmail's API, which
+    hands back an internal id usable in a mail.google.com deep link, plain
+    IMAP has no equivalent — the frontend already hides the 'open original'
+    link when url is falsy."""
+    _, entry = _parse(raw)
+    return entry
+
+
+def parse_message_with_from_header(raw: bytes) -> tuple[NormalizedEntry, str]:
+    """Like parse_message, but also returns the decoded From header
+    verbatim (display name + address, undecomposed) — needed when routing
+    one shared SEARCH/FETCH pass across several sources' own from:/subject:
+    query tokens locally (see ingest/refresh.py), since IMAP's own FROM
+    SEARCH matches the whole header, not just the display name
+    NormalizedEntry.author narrows to via parseaddr."""
+    msg, entry = _parse(raw)
+    return entry, _decode_header_value(msg.get("From"))
+
+
+def matches_query(
+    from_header: str, subject: str, from_filter: str | None, subject_filter: str | None
+) -> bool:
+    """Local equivalent of the FROM/SUBJECT criteria search_message_ids
+    would otherwise apply server-side — same semantics IMAP SEARCH uses:
+    case-insensitive substring, both required (AND) when both are given.
+    A filter that's None/empty always passes (nothing to narrow on)."""
+    if from_filter and from_filter.lower() not in (from_header or "").lower():
+        return False
+    if subject_filter and subject_filter.lower() not in (subject or "").lower():
+        return False
+    return True
 
 
 __all__: list[str] = [

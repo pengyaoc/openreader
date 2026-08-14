@@ -9,38 +9,37 @@ Status: reflects the app as built (2026-08-14). Companion to `docs/PRD.md`.
 │  Frontend (React/Vite)   │  HTTP  │  Backend (Starlette, Python)      │
 │  3-pane UI, dark/light,  │◄──────►│  Sync request handlers only —     │
 │  responsive drawer        │  /api  │  no request ever does network     │
-└─────────────────────────┘        │  I/O except /api/refresh, /api/img │
-                                    │  and /api/topics/:key/generate     │
+└─────────────────────────┘        │  I/O except /api/refresh, /api/img,│
+                                    │  and /api/articles/:id/summarize   │
                                     └──────────────┬─────────────────────┘
                                                     │
                         ┌───────────────────────────┼───────────────────────────┐
                         ▼                           ▼                           ▼
               ┌──────────────────┐       ┌──────────────────┐        ┌──────────────────────┐
-              │ RSS connector     │       │ IMAP connector    │        │ Generation worker      │
-              │ httpx + defusedxml│       │ imaplib, app       │        │ out-of-process,        │
-              │ conditional GET   │       │ password auth      │        │ spawned via subprocess │
-              └──────────────────┘       └──────────────────┘        │ runs `claude` CLI       │
+              │ RSS connector     │       │ IMAP connector    │        │ app/summarize.py       │
+              │ httpx + defusedxml│       │ imaplib, app       │        │ `claude` CLI subprocess│
+              │ conditional GET   │       │ password auth      │        │ off the event loop     │
+              └──────────────────┘       └──────────────────┘        │ (asyncio.to_thread)     │
                         │                           │                └──────────────────────┘
                         └───────────────┬───────────┘                           │
                                         ▼                                        ▼
                               ┌────────────────────┐                  ┌──────────────────┐
-                              │  Ingest pipeline     │                  │  jobs table        │
-                              │  rules → dedup →     │                  │  (status tracking) │
+                              │  Ingest pipeline     │                  │  articles.        │
+                              │  rules → dedup →     │                  │  llm_summary_html │
                               │  persist              │                  └──────────────────┘
                               └────────────────────┘
                                         │
                                         ▼
                               ┌────────────────────┐
                               │  SQLite (WAL)        │
-                              │  sources / articles / │
-                              │  jobs                 │
+                              │  sources / articles   │
                               └────────────────────┘
 ```
 
 Key architectural rule: **the request path never blocks on external I/O**
-except the three endpoints that are inherently about triggering external
-work (`/api/refresh`, `/api/img`, `/api/topics/:key/generate`). Everything
-else — article list, sources, config, job status — is a local SQLite read.
+except the endpoints that are inherently about triggering external work
+(`/api/refresh`, `/api/img`, `/api/articles/:id/summarize`). Everything
+else — article list, sources, config — is a local SQLite read.
 
 ## 2. Backend module map
 
@@ -51,8 +50,8 @@ backend/app/
 ├── settings.py         # env-driven paths (DB, config, media, IMAP
 │                        # host/user/password, readonly-config flag,
 │                        # auth password hash/session secret)
-├── config.py            # msgspec Config/Source/Rule/Topic structs,
-│                        # YAML parse+validate+serialize (to_yaml),
+├── config.py            # msgspec Config/Source/Rule structs, YAML
+│                        # parse+validate+serialize (to_yaml),
 │                        # credential-key guard (see §5)
 ├── auth.py               # app-layer login: bcrypt password check,
 │                         # HMAC-signed session cookie, AuthMiddleware
@@ -76,40 +75,33 @@ backend/app/
 │   ├── hydrate.py              # lazy per-article full-text fetch (once, ever)
 │   └── refresh.py               # orchestrates one sync refresh pass;
 │                                 # also reconcile_read_state() (§5)
-├── generate/
-│   ├── prompt.py                 # system prompt + JSON schema for the model
-│   ├── client.py                  # `claude` CLI subprocess wrapper
-│   ├── summarize.py                # on-demand single-article summarization —
-│   │                                # zero tools, no jobs/polling; reuses
-│   │                                # client.py's subprocess plumbing directly
-│   ├── jobs.py                     # SQLite job status transitions
-│   └── worker.py                    # out-of-process job runner (__main__)
+├── summarize.py         # `claude` CLI subprocess wrapper for on-demand
+│                        # article summarization — zero tools, no jobs/
+│                        # polling, a single synchronous call
 └── api/
     ├── sources.py, articles.py, refresh_api.py, config_api.py,
-    │ images.py, generate_api.py, auth_api.py   # thin Starlette handlers
-    │                                            # over the above
+    │ images.py, auth_api.py   # thin Starlette handlers over the above
 ```
 
 Design rule followed throughout: **pure logic is separated from I/O** and
 every I/O boundary (HTTP fetch, IMAP socket, subprocess call) is injectable
-in tests via a `Fetcher`/`Runner`/`GenerateFn`-style callable parameter, so
-the entire pipeline is unit-tested without a real network call or
-subprocess spawn. 228 backend tests, zero of which touch the network.
+in tests via a `Fetcher`/`Runner`-style callable parameter, so the entire
+pipeline is unit-tested without a real network call or subprocess spawn.
+212 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
 ```mermaid
 erDiagram
     sources ||--o{ articles : "has many"
-    jobs ||--o{ articles : "produced (llm origin only)"
 
     sources {
         int id PK
-        text key UK "stable identifier from config, or topic.key for llm sources"
-        text type "rss | imap | llm"
+        text key UK "stable identifier from config"
+        text type "rss | imap"
         text title
         text folder
-        text url "null for imap/llm"
+        text url "null for imap"
         text etag "RSS conditional-GET cache"
         text last_modified
         text last_fetched_at
@@ -120,8 +112,8 @@ erDiagram
     articles {
         int id PK
         int source_id FK
-        text guid "unique per source; feed guid / email Message-Id / job-N-index"
-        text url "empty string for llm-generated articles"
+        text guid "unique per source; feed guid or email Message-Id"
+        text url
         text canonical_url
         text title
         text author
@@ -131,9 +123,7 @@ erDiagram
         text content_html "sanitized, images rewritten through /api/img"
         text content_hash "sha256(canonical_url + normalized title)"
         text matched_rule "which include/exclude rule let this through"
-        text origin "feed | email | llm"
-        int job_id FK "set only when origin=llm"
-        text citations_json "sources[] for llm articles"
+        text origin "feed | email"
         text hydrated_at "lazy full-text fetch completed"
         text hydrate_failed_at "lazy full-text fetch failed (suppresses retry)"
         bool is_read
@@ -141,18 +131,6 @@ erDiagram
         bool is_starred
         text llm_summary_html "sanitized; cached forever once generated"
         text llm_summary_at
-    }
-
-    jobs {
-        int id PK
-        text topic_key "matches config Topic.key, not a FK (config-defined)"
-        text status "queued | running | done | error"
-        text brief_snapshot "the brief at job creation time, for auditability"
-        text model
-        text started_at
-        text finished_at
-        text error
-        int articles_created
     }
 ```
 
@@ -162,11 +140,13 @@ Notes on choices that aren't obvious from the columns alone:
   mechanism for re-ingestion: a refresh that sees the same guid again is a
   no-op insert, which is also what makes refresh idempotent and cheap to
   run repeatedly.
-- **LLM-generated articles get a real row in `sources`** (`type='llm'`,
-  keyed by the topic's `key`), created on first generation. This means
-  generated content reuses the exact same list/folder/unread-count
-  machinery as RSS/IMAP sources for free — no parallel data path in the
-  API or frontend for "generated" content.
+- **`job_id`/`citations_json` columns and the `jobs` table were dropped
+  2026-08-14** (topic-generation removal, see docs/WORKLOG.md) — confirmed
+  zero rows/zero `origin='llm'` articles in production before dropping, so
+  this was a clean removal via `ALTER TABLE ... DROP COLUMN` /
+  `DROP TABLE`, not a lossy one. `db.py`'s `init_schema()` still has no
+  general migration framework — this was a one-off, same idempotent-guard
+  pattern as the `ADD COLUMN` helper it sits next to.
 - **`content_hash`** is *not* currently used for cross-source duplicate
   detection (e.g. the same story from two outlets) — it's indexed for a
   future dedup pass but the only active dedup key today is `(source_id,
@@ -206,13 +186,11 @@ cookie required) otherwise, matching this app's local/LAN default.
 | `POST /api/articles/:id/read` | Mark read (idempotent, one-directional) | No |
 | `POST /api/articles/:id/toggle-read` | Manual read/unread toggle | No |
 | `POST /api/articles/:id/star` | Toggle starred | No |
-| `POST /api/articles/:id/summarize` | On-demand summary via `claude -p` (sonnet, hardcoded); cached forever once generated — returns the cached value with no subprocess call on repeat requests; 404 if `llm.enabled=false` (same kill switch as `/generate`) | Runs off the event loop (`asyncio.to_thread`, §5) — a single call is ~5-20s |
+| `POST /api/articles/:id/summarize` | On-demand summary via `claude -p` (sonnet, hardcoded); cached forever once generated — returns the cached value with no subprocess call on repeat requests; 404 if `llm.enabled=false` | Runs off the event loop (`asyncio.to_thread`, §5) — a single call is ~5-20s |
+| `GET /api/llm-status` | `{"enabled": bool}` — lets the frontend hide the Summarize button entirely rather than showing one that would just 404 | No |
 | `POST /api/refresh` | Refresh (`?source=key` for one); RSS fetches concurrently (bounded pool), IMAP sequentially over one shared connection (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-5s typical) |
 | `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |
 | `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | SSRF-check DNS lookup runs off the event loop (`asyncio.to_thread`, §5); the actual fetch is async `httpx` |
-| `GET /api/topics` | List configured topics + `llm.enabled` flag | No |
-| `POST /api/topics/:key/generate` | Create a job, spawn worker subprocess, return immediately | No (spawn is fire-and-forget) |
-| `GET /api/jobs/:id` | Poll job status | No |
 
 ## 5. Key technical decisions (and why)
 
@@ -249,9 +227,10 @@ LOGIN) rather than erroring, hanging the request forever since
 landed together: `connect()` now passes an explicit `timeout` so a stall
 fails instead of hanging, and `_refresh_imap_sequential` opens one
 connection via `connect_fn` and reuses it across every IMAP source in the
-refresh, sequentially, via the single-source `refresh_imap_source` —
-fewer logins, indistinguishable from a normal mail client. See
-docs/WORKLOG.md, 2026-08-13.
+refresh — fewer logins, indistinguishable from a normal mail client. As of
+2026-08-14 it's also one SEARCH per distinct mailbox folder shared across
+those sources, not one per source — see the "one shared SEARCH/FETCH pass"
+entry below. See docs/WORKLOG.md, 2026-08-13 and 2026-08-14.
 
 **Lazy, per-article full-text extraction, not a background hydration
 pass.** Bandwidth and CPU are spent only on the ~10% of articles actually
@@ -266,32 +245,17 @@ silently blocked. Routing every image through the server sidesteps that
 and also avoids leaking the reader's IP/referrer to third-party hosts on
 every article view.
 
-**`claude` CLI subprocess, not the Anthropic API.** Both topic generation
-and article summarization run against the user's Claude subscription via
-OAuth (keychain), not `ANTHROPIC_API_KEY`. Two invariants protect that:
-never pass `--bare` (its own docs: under `--bare`, OAuth/keychain are
-never read — only `ANTHROPIC_API_KEY`), and the API key is explicitly
-scrubbed from the child environment regardless. `summarize.py` reuses
-`client.py`'s subprocess plumbing directly rather than duplicating either
-invariant. On the VM, this also meant `openreader.service`'s `PATH` had
-to include the CLI's actual install location and `MemoryMax` had to be
-raised well past a single call's own ~300MB peak RSS — see
-docs/WORKLOG.md, 2026-08-14.
-
-**`--permission-mode bypassPermissions`, not `dontAsk`.** Found live,
-mid-build: `dontAsk` silently *denies* every WebSearch/WebFetch call in
-headless mode — the run completes successfully with zero real research
-done, which is a dangerous silent-failure shape (you'd get a job marked
-"done" with 0 articles and no obvious reason why). `bypassPermissions`
-actually lets the two tools `--tools` already restricts the model to
-run. Locked in with a regression test
-(`test_build_command_uses_bypass_permissions_not_dont_ask`).
-
-**Generated articles carry hard provenance.** `origin='llm'`, a visible
-"Generated by Claude" badge, a mandatory Sources block with real citation
-URLs, and the exact brief snapshot stored on the job row — because
-synthesized text sitting next to real reporting is easy to misread later,
-and the stored brief is what lets you debug a topic producing bad output.
+**`claude` CLI subprocess, not the Anthropic API.** Article summarization
+runs against the user's Claude subscription via OAuth (keychain), not
+`ANTHROPIC_API_KEY`. Two invariants protect that: never pass `--bare` (its
+own docs: under `--bare`, OAuth/keychain are never read — only
+`ANTHROPIC_API_KEY`), and the API key is explicitly scrubbed from the
+child environment regardless. `--tools ""` disables all tools — the
+article's text is handed to the model directly, nothing to research — so
+there's no permission-mode question to answer either. On the VM, this
+also meant `openreader.service`'s `PATH` had to include the CLI's actual
+install location and `MemoryMax` had to be raised well past a single
+call's own ~300MB peak RSS — see docs/WORKLOG.md, 2026-08-14.
 
 **IMAP refresh is scoped incrementally, not a fixed re-query.** A source's
 configured `query` (e.g. `from:x@example.com newer_than:30d`) only bounds
@@ -303,6 +267,36 @@ messages since it last ran instead of re-walking the source's entire
 configured window every single time. Re-seeing a message id in that
 overlap is a no-op, not a duplicate, since persistence already dedupes on
 the parsed message's Message-Id.
+
+**One shared SEARCH/FETCH pass per mailbox folder, not one per source
+(2026-08-14).** `refresh_imap_sources` (`ingest/refresh.py`) groups every
+IMAP source by `mailbox_folder`, issues a single `SEARCH SINCE <bound>`
+per group, `FETCH`es each returned message exactly once regardless of how
+many sources it ends up matching, then applies each source's own
+`from:`/`subject:` query tokens *locally* (`imap_connector.matches_query`,
+matching the whole decoded From header the way IMAP's own FROM SEARCH
+does — not just the display name `NormalizedEntry.author` narrows to) and
+the regex rules engine, same as before. Replaces N `SEARCH` round-trips
+with 1 per folder — at the cost of `FETCH`ing a message that ends up
+matching no configured source, which per-source server-side `SEARCH`
+never did. A reasonable trade for this app's intended shape: a dedicated
+newsletter mailbox where ~every message matches something.
+
+The shared bound is `min` of the group's per-source `since` values, not
+`max`, capped at `_IMAP_SEARCH_LOOKBACK_CAP_DAYS` (7 days) either way.
+`min` matters for correctness, not just symmetry: a source's own `since`
+check after the fetch can only *narrow* what it accepts, never
+retroactively pull in a message the shared SEARCH never returned — so
+scoping the SEARCH to the most-recently-synced sibling (`max`) would
+silently and permanently skip a newly-added source's intended backfill,
+not just delay it, since that source's `last_fetched_at` still advances to
+`now` regardless. In steady state, every source in a group already shares
+the same `last_fetched_at` (a joint refresh stamps them all at once), so
+`min` and `max` are identical and this costs nothing — it only reaches
+further back than `max` for a source that's genuinely behind (just added,
+or its last refresh errored without advancing), and even then no further
+than the 7-day cap, so one straggling wide-default source can't force a
+full 30-day re-SEARCH+FETCH of a shared folder on every routine refresh.
 
 **Article list is paginated at the API, not truncated.** `GET
 /api/articles` defaults to `limit=50` with an `offset` param; the frontend
@@ -577,9 +571,9 @@ Full history of the tradeoffs and what was found along the way is in
   that user rather than root (a user manager can only read files it
   owns) — see §5's IMAP entry for why the credential in that file is
   scoped to a throwaway mailbox specifically because of this.
-- **`llm.enabled: true`** as of 2026-08-14, for on-demand summarization
-  (topic generation's `topics: []` stays empty, so that half of the
-  feature remains inactive in practice). A single `claude -p` call peaks
+- **`llm.enabled: true`** as of 2026-08-14, for on-demand summarization —
+  the only LLM feature this app has (topic-generation was removed the
+  same day, see docs/WORKLOG.md). A single `claude -p` call peaks
   around ~300MB RSS, measured live — `MemoryMax` was raised from the
   original `300M` (sized only for the FastAPI process, and smaller than
   one call's own peak alone) to `700M` to accommodate it, verified via a

@@ -65,7 +65,7 @@ def _source_row_to_dict(r) -> dict:
 _ARTICLE_COLUMNS = (
     "id", "source_id", "guid", "url", "canonical_url", "title", "author",
     "published_at", "fetched_at", "excerpt", "content_html", "top_image_path",
-    "matched_rule", "origin", "job_id", "citations_json",
+    "matched_rule", "origin",
     "hydrated_at", "hydrate_failed_at", "is_read", "read_at", "is_starred",
     "llm_summary_html", "llm_summary_at",
 )

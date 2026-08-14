@@ -372,58 +372,6 @@ a {
   background: var(--bg-hover);
 }
 
-.gen-topic {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 18px 7px 30px;
-}
-
-.gen-topic__label {
-  flex: 1;
-  font-size: 12.5px;
-  color: var(--ink-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.gen-btn {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.05em;
-  color: var(--violet);
-  background: var(--violet-wash);
-  border: 1px solid rgba(154, 134, 224, 0.3);
-  border-radius: 4px;
-  padding: 3px 7px;
-  flex-shrink: 0;
-  transition: background 0.12s ease;
-}
-.gen-btn:hover {
-  background: rgba(154, 134, 224, 0.28);
-}
-.gen-btn:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.gen-spinner {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1.5px solid rgba(154, 134, 224, 0.35);
-  border-top-color: var(--violet);
-  animation: spin 0.8s linear infinite;
-  flex-shrink: 0;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .sidebar__footer {
   border-top: 1px solid var(--line);
   padding: 10px 18px;
@@ -621,21 +569,6 @@ a {
   text-transform: uppercase;
 }
 
-.badge {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 1.5px 6px;
-  border-radius: 3px;
-}
-
-.badge--generated {
-  color: var(--violet);
-  background: var(--violet-wash);
-  border: 1px solid rgba(154, 134, 224, 0.3);
-}
-
 .article-row__title {
   font-family: var(--font-read);
   font-size: 18.5px;
@@ -827,12 +760,6 @@ kbd {
   padding: 56px 32px 100px;
 }
 
-.reader-article__badges {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 18px;
-}
-
 .reader-article__title {
   font-family: var(--font-read);
   font-weight: 600;
@@ -1021,34 +948,6 @@ kbd {
   100% {
     background-position: -200% 0;
   }
-}
-
-.reader-sources {
-  margin-top: 44px;
-  padding-top: 26px;
-  border-top: 1px solid var(--line);
-}
-
-.reader-sources__label {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-  margin-bottom: 12px;
-}
-
-.reader-sources__item {
-  display: block;
-  font-family: var(--font-ui);
-  font-size: 13px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--line);
-  color: var(--ink-dim);
-  text-decoration: none;
-}
-.reader-sources__item:hover {
-  color: var(--amber);
 }
 
 /* -------------------------- toast / refresh report -------------------------- */
@@ -1425,7 +1324,6 @@ kbd {
     padding: 10px 18px;
     font-size: 14.5px;
   }
-  .gen-topic,
   .rule-row {
     padding-top: 4px;
     padding-bottom: 4px;

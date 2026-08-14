@@ -58,7 +58,6 @@ export function ArticleList({
               <span className="article-row__source">{a.source_title}</span>
               <span>·</span>
               <span>{timeAgo(a.published_at)}</span>
-              {a.origin === 'llm' && <span className="badge badge--generated">Generated</span>}
             </div>
             <h3 className="article-row__title">{a.title}</h3>
             {a.excerpt && <p className="article-row__excerpt">{a.excerpt}</p>}

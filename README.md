@@ -1,24 +1,74 @@
 # OpenReader
 
-A self-hosted, single-user feed reader for people who want to control
-their information intake programmatically instead of trusting an
-algorithm.
+**The open-source, self-hosted alternative to Feedly and Inoreader —
+without the monthly bill.**
 
-- **RSS/Atom feeds with regex filtering** — `include`/`exclude` rules per
-  source, matched against title/summary/content/author/url. Every kept
-  article stores *which* rule let it through.
-- **Newsletters via IMAP** — reads a mailbox with an app password (no
-  OAuth, no re-auth or token-expiry maintenance), read-only throughout.
-- **LLM-generated topic tracking** — for interests with no good feed,
-  define a research brief and press Generate. Runs on your Claude
-  subscription (not API billing), only on manual trigger, and every
-  generated article carries hard provenance (a visible badge + a Sources
-  block with real citations — never mistakable for a real feed item).
-- **No scheduler, anywhere.** Refresh is a button. Generate is a button.
+Feedly and Inoreader charge you every month for things that are just
+config on your own server: regex filtering, folders, full-text
+extraction, newsletter ingestion, AI summaries. OpenReader gives you all
+of that for free, running on hardware you control, with your data in a
+SQLite file you own — not a third party's database. It's small enough to
+run on a **sub-1GB RAM VM** (it was built and is run daily on a $5/month
+1GB instance, sharing that box with a full WordPress install), so
+self-hosting it doesn't mean paying for a bigger server than the
+subscription you're replacing.
+
+- **No monthly fee.** Deterministic RSS/Atom filtering, IMAP newsletter
+  ingestion, full-text extraction, and a fast keyboard-driven reader —
+  the features other readers put behind a paywall — are just yours.
+- **AI summaries without the SaaS markup.** Feedly AI and Inoreader
+  Intelligence resell LLM summaries at a premium. OpenReader's Summarize
+  button runs on *your own* Claude subscription — same capability,
+  no markup, and the summary is faithful to the article's own text only
+  (no outside knowledge, no speculation).
+- **Your data never leaves your server.** No analytics, no tracking, no
+  third party ever sees your reading list or your mailbox. It's a SQLite
+  file on disk that you control end to end.
+- **Built for one person, properly.** Not a stripped-down multi-tenant
+  SaaS product — a fast, single-user reader with no scheduler, no
+  background jobs, no "upgrade to unlock this" screens. Refresh is a
+  button. Summarize is a button. Nothing runs unless you ask it to.
+- **Cheap to run.** Small enough to co-host with something else on the
+  smallest VM your cloud provider sells.
+
+## Features
+
+- **RSS & Atom feeds** — add any feed by URL. Standard-compliant parsing
+  (RSS 2.0, Atom, RDF) via `defusedxml`, conditional `GET` (ETag/
+  Last-Modified) so a routine refresh costs almost nothing against
+  well-behaved servers.
+- **Email newsletters (IMAP)** — reads a mailbox with an app password, no
+  OAuth, no re-auth or token-expiry maintenance, read-only throughout
+  (SEARCH/FETCH only, mailbox opened `readonly=True` — never
+  STORE/EXPUNGE/DELETE). Sources sharing a mailbox folder are batched
+  into one `SEARCH`/`FETCH` pass, not one per newsletter.
+- **Content filtering** — per-source regex `include`/`exclude` rules,
+  matched against title/summary/content/author/url. `exclude` always
+  wins; `include` (when present) requires at least one match to let an
+  item through. Every kept article stores *which* rule let it in, so
+  filtering is auditable, not a black box.
+- **Full article mode** — many feeds only publish a truncated
+  summary/teaser in the feed itself. Opening one of those fetches and
+  extracts the full page a single time and caches it forever, instead of
+  leaving you stuck reading a "click here to continue" stub. Lazy and
+  per-article — bandwidth is spent only on what you actually open, not a
+  background sweep of the whole feed.
+- **Content summarization** — a Summarize button in the reader, next to
+  Star. Faithful to the article's own text only (no outside knowledge, no
+  speculation), proportional length, formatted with bullets and bold
+  highlighting. Runs on your Claude subscription (not API billing), only
+  on manual trigger, generated once and cached forever per article.
+- **No scheduler, anywhere.** Refresh is a button. Summarize is a button.
   Nothing runs on a timer.
-- Dark/light themes, responsive down to phone width, lazy per-article
-  full-text extraction, images proxied server-side (sidesteps hotlink
-  protection and keeps your IP off third-party image hosts).
+- Dark/light themes, responsive down to phone width, images proxied
+  server-side (sidesteps hotlink protection and keeps your IP off
+  third-party image hosts).
+
+## Screenshots
+
+| Article list | Fullscreen reader |
+|---|---|
+| ![Article list view, showing the sidebar with RSS/newsletter sources grouped into folders, unread counts, and the main list of articles](https://raw.githubusercontent.com/pengyaoc/openreader/main/docs/screenshots/article-list.png) | ![Fullscreen article reader view, showing the article title, byline, prev/next navigation, and Summarize/Star controls in the top bar](https://raw.githubusercontent.com/pengyaoc/openreader/main/docs/screenshots/article-reader.png) |
 
 See [`docs/PRD.md`](docs/PRD.md) for the full product spec and
 [`docs/ERD.md`](docs/ERD.md) for architecture, the database schema, and
@@ -26,7 +76,9 @@ the non-obvious technical decisions (and why). [`docs/WORKLOG.md`](docs/WORKLOG.
 is a running log of what changed and why, including real bugs found along
 the way.
 
-## Quickstart
+## Self-hosting
+
+### 1. Run it locally
 
 Requires Python 3.13+, [`uv`](https://docs.astral.sh/uv/), and Node 18+.
 
@@ -64,14 +116,13 @@ whatever was last built otherwise. (Equivalent to running `cd frontend &&
 npm run build` then `cd ../backend && uv run uvicorn app.asgi:app --host
 0.0.0.0 --port 8787` by hand, in order, every time.)
 
-### Configuration
+### 2. Add your sources
 
-`config/feeds.yaml` is the source of truth for sources, filter rules, and
-LLM topics — copy it from `config/feeds.example.yaml` (it's gitignored:
-it's your personal reading list, not something to commit). Edit it by
-hand, or from inside the app (the "Add source" form, or the raw YAML
-editor — both validate before writing and never leave a broken file on
-disk).
+`config/feeds.yaml` is the source of truth for sources and filter rules —
+copy it from `config/feeds.example.yaml` (it's gitignored: it's your
+personal reading list, not something to commit). Edit it by hand, or from
+inside the app (the "Add source" form, or the raw YAML editor — both
+validate before writing and never leave a broken file on disk).
 
 Environment variables (all optional, sensible defaults):
 
@@ -82,9 +133,9 @@ Environment variables (all optional, sensible defaults):
 | `READER_MEDIA` | `data/media` |
 | `READER_IMAP_HOST` / `_USER` / `_PASSWORD` | unset — required together for `type: imap` sources |
 | `READER_READONLY_CONFIG` | unset — set to `1` to make `PUT /api/config` return 403 |
-| `READER_AUTH_PASSWORD_HASH` / `READER_SESSION_SECRET` | unset — no login required (see Login below); both must be set together |
+| `READER_AUTH_PASSWORD_HASH` / `READER_SESSION_SECRET` | unset — no login required (see step 4); both must be set together |
 
-### IMAP newsletters (optional)
+### 3. (optional) Newsletters via IMAP
 
 Pulls newsletters straight from a mailbox as sources, read-only throughout
 (SEARCH/FETCH only, opened with `readonly=True` — never STORE/EXPUNGE/DELETE).
@@ -122,9 +173,17 @@ token to refresh, nothing that expires and needs re-auth.
    All IMAP sources in one refresh share a single connection, opened once
    and reused sequentially rather than one connection per source — mail
    providers can silently throttle a datacenter IP that opens many fresh
-   logins in quick succession.
+   logins in quick succession. Sources that share a `mailbox_folder` also
+   share a single `SEARCH`/`FETCH` pass rather than one each: each message
+   is fetched once and then matched locally against every source sharing
+   its folder (your `from:`/`subject:` query tokens, then the regex
+   rules), so N newsletters in one folder cost one round-trip, not N. A
+   newly-added source backfills up to 7 days of history on its first sync
+   regardless of what its own `query` requests — a deliberate cap so one
+   wide-window source sharing a folder with already-synced ones can't
+   force a much larger re-scan on every routine refresh.
 
-### Login (optional)
+### 4. (optional) Login, for public access
 
 Off by default — same as everything else on this page, local/LAN use has
 never required a password. Set this up if the app is reachable from the
@@ -154,27 +213,34 @@ time a mobile browser reclaims a backgrounded tab.
    without the other is treated as broken config and locks everything out
    (401), not a silent fallback to no-auth.
 
-### LLM generation (optional)
+### 5. (optional) Article summarization
 
 Off by default (`llm.enabled: false` — a hard kill switch: the UI and API
-endpoints are hidden/404 and `claude` is never invoked while it's off).
+endpoint are hidden/404 and `claude` is never invoked while it's off).
 To use it, you need the [`claude`](https://claude.com/product/claude-code)
-CLI installed and logged into your Claude subscription. Flip
-`llm.enabled: true` in `feeds.yaml`, add a `topics` entry, and press
-**Generate** in the sidebar. The same subscription/CLI setup also backs
-the **Summarize** button in the reader (per-article, on demand) — no
-separate config for that, it shares `llm.enabled`.
+CLI installed and logged into your Claude subscription (not API billing —
+this is the whole point: no per-summary markup). Flip `llm.enabled: true`
+in `feeds.yaml`, then press **Summarize** on any open article.
 
-### Production deployment: one env file, not two
+### 6. Deploy to a small VM
 
-If you're running this as a long-lived `systemd --user` service (as
-opposed to the dev/LAN setup above) — see `docs/ERD.md` §7.1 for the full
-co-hosted-VM writeup this is drawn from — put **every** environment
-variable the service needs, secret and non-secret alike, in one file
-loaded via systemd's `EnvironmentFile=` directive, rather than splitting
-secrets into that file and non-secrets into inline `Environment=` lines in
-the unit itself. One file is easier to audit, back up, and reason about
-than config split across two.
+`scripts/deploy.sh` (typecheck + test + build + push to the VM + restart
+the service) has no real identifiers hardcoded in it — it sources
+`scripts/deploy.env` (gitignored) for your GCP zone/project, VM name, and
+the public URL to verify against after deploying:
+
+```bash
+cp scripts/deploy.env.example scripts/deploy.env   # then edit it
+```
+
+If you're running this as a long-lived `systemd --user` service — see
+`docs/ERD.md` §7.1 for the full co-hosted-VM writeup this is drawn from,
+including exactly how it coexists with WordPress on a single 1GB
+instance — put **every** environment variable the service needs, secret
+and non-secret alike, in one file loaded via systemd's `EnvironmentFile=`
+directive, rather than splitting secrets into that file and non-secrets
+into inline `Environment=` lines in the unit itself. One file is easier to
+audit, back up, and reason about than config split across two.
 
 `EnvironmentFile=` is a systemd directive that loads `KEY=value` lines
 from a plain file at service start — distinct from `Environment=`, which
@@ -189,8 +255,8 @@ below) means "don't error if the file is missing."
    READER_IMAP_HOST=imap.gmail.com
    READER_IMAP_USER=your-newsletter-inbox@example.com
    READER_IMAP_PASSWORD=your-app-password
-   READER_AUTH_PASSWORD_HASH=$2b$...        # from `htpasswd -nbB`, see Login above
-   READER_SESSION_SECRET=...                # from `secrets.token_hex(32)`, see Login above
+   READER_AUTH_PASSWORD_HASH=$2b$...        # from `htpasswd -nbB`, see step 4
+   READER_SESSION_SECRET=...                # from `secrets.token_hex(32)`, see step 4
 
    # Non-secret process wiring — kept in the same file so there's exactly
    # one place to look, not because it's sensitive
@@ -201,10 +267,10 @@ below) means "don't error if the file is missing."
    EOF
    chmod 600 /opt/openreader/openreader.env
    ```
-   The `PATH` override is only needed if you're using LLM
-   generation/summarization — it's what lets the service find the `claude`
-   CLI (installed under `/opt/node` + a user-local npm prefix, since `apt`
-   is often unusable on an old/frozen distro — see `docs/WORKLOG.md`,
+   The `PATH` override is only needed if you're using article
+   summarization — it's what lets the service find the `claude` CLI
+   (installed under `/opt/node` + a user-local npm prefix, since `apt` is
+   often unusable on an old/frozen distro — see `docs/WORKLOG.md`,
    2026-08-14, for why and how) as a subprocess. Drop it if you're not
    using that feature.
 
@@ -229,11 +295,11 @@ below) means "don't error if the file is missing."
    ProtectSystem=strict
    ProtectHome=read-only
    # Carve out exactly what needs to be writable: app data/config, plus
-   # ~/.claude if you're using LLM generation/summarization (the `claude`
-   # CLI needs to write there for its own OAuth token refresh).
+   # ~/.claude if you're using article summarization (the `claude` CLI
+   # needs to write there for its own OAuth token refresh).
    ReadWritePaths=/opt/openreader/data /opt/openreader/config /home/<service-user>/.claude
    # Size well past a single `claude -p` call's own peak RSS (~300MB,
-   # measured live) if using LLM features, not just the FastAPI process's
+   # measured live) if using summarization, not just the FastAPI process's
    # own baseline — see docs/WORKLOG.md, 2026-08-14, for how this was
    # measured and why 300M OOM-killed the first real call.
    MemoryMax=700M
@@ -249,13 +315,13 @@ below) means "don't error if the file is missing."
    ```
 
 `config/feeds.yaml` stays separate from this file on purpose — it's your
-live source list and LLM topics, edited far more often than secrets, and
-already covered under **Configuration** above.
+live source list, edited far more often than secrets, and already covered
+in step 2 above.
 
 ## Development
 
 ```bash
-cd backend && uv run pytest -q      # 147+ tests, no network/subprocess
+cd backend && uv run pytest -q      # 212+ tests, no network/subprocess
 cd frontend && npx tsc --noEmit -p tsconfig.app.json && npm run build
 ```
 
@@ -269,8 +335,10 @@ frontend test suite yet).
 ```
 backend/app/
 ├── connectors/    # RSS/Atom/RDF parser, IMAP client, date normalization
-├── ingest/        # regex rules engine, dedup, lazy full-text extraction, sanitize
-├── generate/      # claude CLI wrapper, job tracking, out-of-process worker
+├── ingest/        # regex rules engine, dedup, lazy full-text extraction,
+│                  # sanitize, the synchronous refresh loop (incl. IMAP's
+│                  # shared per-folder SEARCH/FETCH batching)
+├── summarize.py   # claude CLI wrapper for on-demand article summarization
 └── api/           # Starlette route handlers
 frontend/src/
 ├── components/    # Sidebar, ArticleList, ArticleReader, ConfigEditor, ...
@@ -283,5 +351,4 @@ docs/
 
 ## License
 
-Personal project, no license file yet — treat as all-rights-reserved
-unless/until one is added.
+[MIT](LICENSE).

@@ -43,10 +43,10 @@ export function ConfigEditor({ onClose, onSaved }: Props) {
           </button>
         </div>
         <div className="config-drawer__hint">
-          Sources, per-source regex rules (<code>include</code>/<code>exclude</code> on{' '}
+          Sources and per-source regex rules (<code>include</code>/<code>exclude</code> on{' '}
           <code>title</code>, <code>summary</code>, <code>content</code>, <code>author</code>,{' '}
-          <code>url</code>, or <code>any</code>), and LLM generation topics all live here. Invalid
-          regex or YAML is rejected on save — the file on disk is left untouched.
+          <code>url</code>, or <code>any</code>) live here. Invalid regex or YAML is rejected on
+          save — the file on disk is left untouched.
         </div>
         {error && <div className="config-drawer__error">{error}</div>}
         {loaded ? (

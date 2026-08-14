@@ -2,8 +2,7 @@
 
 Schema per the design doc:
   sources   — one row per configured RSS/IMAP source
-  articles  — normalized items from any origin (feed | email | llm)
-  jobs      — LLM generation job tracking (queued/running/done/error)
+  articles  — normalized items from any origin (feed | email)
 """
 from __future__ import annotations
 
@@ -46,8 +45,6 @@ CREATE TABLE IF NOT EXISTS articles (
     content_hash TEXT,
     matched_rule TEXT,
     origin TEXT NOT NULL DEFAULT 'feed',
-    job_id INTEGER REFERENCES jobs(id),
-    citations_json TEXT,
     hydrated_at TEXT,
     hydrate_failed_at TEXT,
     is_read INTEGER NOT NULL DEFAULT 0,
@@ -61,18 +58,6 @@ CREATE TABLE IF NOT EXISTS articles (
 CREATE INDEX IF NOT EXISTS idx_articles_content_hash ON articles(content_hash);
 CREATE INDEX IF NOT EXISTS idx_articles_unread ON articles(is_read, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_source_pub ON articles(source_id, published_at DESC);
-
-CREATE TABLE IF NOT EXISTS jobs (
-    id INTEGER PRIMARY KEY,
-    topic_key TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'queued',
-    brief_snapshot TEXT,
-    model TEXT,
-    started_at TEXT,
-    finished_at TEXT,
-    error TEXT,
-    articles_created INTEGER NOT NULL DEFAULT 0
-);
 """
 
 
@@ -88,6 +73,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
     _add_column_if_missing(conn, "articles", "llm_summary_html", "TEXT")
     _add_column_if_missing(conn, "articles", "llm_summary_at", "TEXT")
+    # Topic-generation removal, 2026-08-14 (see docs/WORKLOG.md) — confirmed
+    # zero rows in `jobs` and zero origin='llm' articles in production
+    # before dropping, so this is a clean removal, not a lossy one. Both
+    # idempotent: DROP TABLE IF EXISTS is naturally so, and the ADD COLUMN
+    # helper's sibling below just catches "already gone" instead of
+    # "already there".
+    conn.execute("DROP TABLE IF EXISTS jobs")
+    conn.commit()
+    _drop_column_if_present(conn, "articles", "job_id")
+    _drop_column_if_present(conn, "articles", "citations_json")
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
@@ -100,6 +95,19 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, dd
         conn.commit()
     except sqlite3.OperationalError as exc:
         if "duplicate column name" not in str(exc):
+            raise
+
+
+def _drop_column_if_present(conn: sqlite3.Connection, table: str, column: str) -> None:
+    """Mirror of _add_column_if_missing for the removal direction —
+    ALTER TABLE ... DROP COLUMN needs SQLite 3.35+ (bundled with Python
+    3.13's stdlib sqlite3 here, confirmed 3.53.1 both locally and on the
+    deploy target)."""
+    try:
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "no such column" not in str(exc):
             raise
 
 

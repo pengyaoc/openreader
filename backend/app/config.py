@@ -1,6 +1,6 @@
-"""Config loading: config/feeds.yaml is the source of truth for sources,
-regex rules, and LLM generation topics. Validated eagerly on load/save so a
-bad edit never reaches the pipeline.
+"""Config loading: config/feeds.yaml is the source of truth for sources
+and regex rules. Validated eagerly on load/save so a bad edit never
+reaches the pipeline.
 """
 from __future__ import annotations
 
@@ -56,19 +56,8 @@ class Source(msgspec.Struct, frozen=True, kw_only=True):
     rules: list[Rule] = msgspec.field(default_factory=list)
 
 
-class Topic(msgspec.Struct, frozen=True, kw_only=True):
-    key: str
-    title: str
-    folder: str
-    brief: str
-    lookback_days: int = 7
-    max_articles: int = 3
-
-
 class LLMSettings(msgspec.Struct, frozen=True, kw_only=True):
-    enabled: bool = False
-    model: str = "sonnet"
-    timeout_minutes: int = 10
+    enabled: bool = False  # kill switch for the Summarize feature
 
 
 class Defaults(msgspec.Struct, frozen=True, kw_only=True):
@@ -77,17 +66,12 @@ class Defaults(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class Config(msgspec.Struct, frozen=True, kw_only=True):
-    interest_profile: str = ""
     llm: LLMSettings = msgspec.field(default_factory=LLMSettings)
     defaults: Defaults = msgspec.field(default_factory=Defaults)
     sources: list[Source] = msgspec.field(default_factory=list)
-    topics: list[Topic] = msgspec.field(default_factory=list)
 
     def source(self, key: str) -> Source | None:
         return next((s for s in self.sources if s.key == key), None)
-
-    def topic(self, key: str) -> Topic | None:
-        return next((t for t in self.topics if t.key == key), None)
 
 
 def _validate_rules(source_key: str, rules: list[Rule]) -> None:
@@ -113,12 +97,6 @@ def validate_config(config: Config) -> None:
         # in the mailbox folder", which is a reasonable default for a
         # dedicated newsletter-only account.
         _validate_rules(source.key, source.rules)
-
-    topic_keys: set[str] = set()
-    for topic in config.topics:
-        if topic.key in topic_keys:
-            raise ConfigError(f"duplicate topic key: {topic.key}")
-        topic_keys.add(topic.key)
 
 
 def _check_no_credentials(data: dict) -> None:

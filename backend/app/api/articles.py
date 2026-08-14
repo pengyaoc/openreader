@@ -5,10 +5,16 @@ from starlette.responses import JSONResponse
 
 from app import store
 from app.db import run_off_thread
-from app.generate.client import ClaudeError
-from app.generate.summarize import summarize_text
 from app.ingest.hydrate import hydrate_article
 from app.ingest.textutil import plain_text_excerpt
+from app.summarize import ClaudeError, summarize_text
+
+
+async def llm_status(request: Request) -> JSONResponse:
+    """Whether the reader's one LLM feature (Summarize) is usable —
+    read by the frontend to hide the button entirely rather than showing
+    one that would just 404 on click."""
+    return JSONResponse({"enabled": request.app.state.config.llm.enabled})
 
 
 async def list_articles(request: Request) -> JSONResponse:
@@ -71,11 +77,11 @@ def _run_summarize(
 
 
 async def summarize(request: Request) -> JSONResponse:
-    """Adhoc, on-demand summary of one article's already-fetched text — a
-    distinct capability from app.generate (which researches new topics),
-    gated by the same llm.enabled kill switch since both spawn a `claude`
-    subprocess. Cached forever once generated: no regenerate path here,
-    since nothing in the feature calls for one."""
+    """Adhoc, on-demand summary of one article's already-fetched text.
+    Gated by the llm.enabled kill switch — the UI hides the button and
+    this 404s while it's off, so `claude` is never invoked. Cached forever
+    once generated: no regenerate path here, since nothing in the feature
+    calls for one."""
     config = request.app.state.config
     if not config.llm.enabled:
         return JSONResponse({"error": "LLM generation is disabled"}, status_code=404)

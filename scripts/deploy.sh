@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Deploys OpenReader to wordpress-1-vm. Everything that needs Node (tsc,
-# Vite) or a real test run happens here, on your laptop — never on the
-# 1 GB VM, which also runs WordPress. The VM only ever receives finished
-# artifacts (backend source + frontend/dist) and restarts its own service;
-# it never runs `git pull`, `npm install`, or `npm run build` itself.
+# Deploys OpenReader to your VM. Everything that needs Node (tsc, Vite) or
+# a real test run happens here, on your laptop — never on the VM (this
+# script assumes a small, possibly co-hosted box, per docs/ERD.md §7.1).
+# The VM only ever receives finished artifacts (backend source +
+# frontend/dist) and restarts its own service; it never runs `git pull`,
+# `npm install`, or `npm run build` itself.
+#
+# Deployment-specific values (GCP zone/project, VM name, the public URL
+# to verify against) live in scripts/deploy.env, gitignored — copy
+# scripts/deploy.env.example to scripts/deploy.env and fill in your own
+# before running this. Nothing real-identifier-shaped lives in this
+# script itself.
 #
 # Does NOT touch config/feeds.yaml or data/ on the VM — that's the VM's own
 # live state (your real source list, the SQLite DB), not part of a deploy.
@@ -40,13 +47,22 @@
 # would've been OOM-killed by the cgroup. Now PATH includes both, and
 # MemoryMax=700M.
 #
-# Usage: ./scripts/deploy.sh
+# Usage: ./scripts/deploy.sh (after copying deploy.env.example -> deploy.env)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ZONE="us-west1-a"
-PROJECT="pelagic-magpie-277922"
-VM="wordpress-1-vm"
+DEPLOY_ENV="scripts/deploy.env"
+if [[ ! -f "$DEPLOY_ENV" ]]; then
+  echo "Missing $DEPLOY_ENV — copy scripts/deploy.env.example to $DEPLOY_ENV and fill in your own ZONE/PROJECT/VM/DEPLOY_URL." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$DEPLOY_ENV"
+: "${ZONE:?set in $DEPLOY_ENV}"
+: "${PROJECT:?set in $DEPLOY_ENV}"
+: "${VM:?set in $DEPLOY_ENV}"
+: "${DEPLOY_URL:?set in $DEPLOY_ENV}"
+
 REMOTE_USER="openreader"
 REMOTE_DIR="/opt/openreader"
 REMOTE_STAGE="/tmp/openreader_deploy"
@@ -102,11 +118,11 @@ gcloud compute ssh --zone "$ZONE" --project "$PROJECT" "$VM" --command "
 
 echo "==> Verifying..."
 sleep 3
-# /reader/ serves the SPA shell unauthenticated by design (2026-08-13 cont.
-# — app-layer login replaced Apache Basic Auth; the login screen itself has
-# to load before anyone's authenticated) — a bare request should get 200.
+# The SPA shell serves unauthenticated by design (2026-08-13 cont. — app-
+# layer login replaced Apache Basic Auth; the login screen itself has to
+# load before anyone's authenticated) — a bare request should get 200.
 # The API underneath is still gated (AuthMiddleware); this script doesn't
 # carry a session, so it can't check past that. Log in via the browser to
 # confirm the app itself loaded.
-curl -s -o /dev/null -w "https://pengyaochen.com/reader/ -> %{http_code} (200 is expected — see comment above)\n" \
-  https://pengyaochen.com/reader/
+curl -s -o /dev/null -w "$DEPLOY_URL -> %{http_code} (200 is expected — see comment above)\n" \
+  "$DEPLOY_URL"

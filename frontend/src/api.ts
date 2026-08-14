@@ -7,7 +7,7 @@
 // call site.
 export const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, '')
 
-export type ArticleOrigin = 'feed' | 'email' | 'llm'
+export type ArticleOrigin = 'feed' | 'email'
 
 export interface Article {
   id: number
@@ -24,8 +24,6 @@ export interface Article {
   top_image_path: string | null
   matched_rule: string | null
   origin: ArticleOrigin
-  job_id: number | null
-  citations_json: string | null
   hydrated_at: string | null
   hydrate_failed_at: string | null
   is_read: boolean
@@ -58,29 +56,6 @@ export interface SourceDetail extends Source {
   mailbox_folder: string | null
   fetch_full_text: boolean
   rules: Rule[]
-}
-
-export interface Topic {
-  key: string
-  title: string
-  folder: string
-  brief: string
-  lookback_days: number
-  max_articles: number
-}
-
-export type JobStatus = 'queued' | 'running' | 'done' | 'error'
-
-export interface Job {
-  id: number
-  topic_key: string
-  status: JobStatus
-  brief_snapshot: string | null
-  model: string | null
-  started_at: string | null
-  finished_at: string | null
-  error: string | null
-  articles_created: number
 }
 
 export interface RefreshSourceReport {
@@ -237,15 +212,7 @@ export const api = {
       json<{ ok: boolean; marked: number }>(r),
     ),
 
-  topics: () =>
-    apiFetch('/api/topics').then((r) => json<{ enabled: boolean; topics: Topic[] }>(r)),
-
-  generateTopic: (key: string) =>
-    apiFetch(`/api/topics/${encodeURIComponent(key)}/generate`, { method: 'POST' }).then((r) =>
-      json<{ job_id: number }>(r),
-    ),
-
-  getJob: (id: number) => apiFetch(`/api/jobs/${id}`).then((r) => json<Job>(r)),
+  llmStatus: () => apiFetch('/api/llm-status').then((r) => json<{ enabled: boolean }>(r)),
 
   getConfig: () => apiFetch('/api/config').then((r) => json<{ yaml: string }>(r)),
 

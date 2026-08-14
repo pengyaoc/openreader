@@ -271,6 +271,17 @@ _IMAP_DEFAULT_WINDOW_DAYS = 30  # first-refresh bound when the source's query
 # has no newer_than:Nd token, to avoid backfilling years of inbox history
 # on the very first run.
 
+_IMAP_SEARCH_LOOKBACK_CAP_DAYS = 7  # hard ceiling on how far back the actual
+# SEARCH bound (min of the group's per-source `since` values) is allowed to
+# reach, applied after the min — a brand-new source (no last_fetched_at,
+# defaulting to the full 30-day window above) or an explicit `newer_than:Nd`
+# with N > 7 would otherwise force every source sharing that folder to
+# re-SEARCH+FETCH a much wider window on every refresh than steady-state
+# sources need. A brand-new source's first sync backfills at most 7 days,
+# not its full configured/default window — bounded cost beats full backfill
+# here, matching this app's existing "no scheduler, adhoc/personal use"
+# posture elsewhere.
+
 
 def _scoped_imap_since(last_fetched_at: str | None, default_window_days: int) -> datetime:
     if last_fetched_at:
@@ -285,75 +296,145 @@ def refresh_imap_source(
     search_fn: ImapSearchFn = imap_connector.search_message_ids,
     fetch_fn: ImapFetchFn = imap_connector.fetch_message,
 ) -> dict:
-    """SEARCH for message ids scoped to messages since the last successful
-    refresh, then FETCH+persist only the ones not already ingested.
-    Read-only: opens the mailbox with readonly=True and only ever calls
-    SEARCH/FETCH, never STORE/EXPUNGE.
+    """Single-source convenience wrapper around refresh_imap_sources below
+    — same shared-SEARCH machinery, just a group of one."""
+    return refresh_imap_sources(conn, [source], imap_client, search_fn, fetch_fn)[source.key]
+
+
+def refresh_imap_sources(
+    conn: sqlite3.Connection,
+    sources: list[Source],
+    imap_client,
+    search_fn: ImapSearchFn = imap_connector.search_message_ids,
+    fetch_fn: ImapFetchFn = imap_connector.fetch_message,
+) -> dict[str, dict]:
+    """One SEARCH + one FETCH per distinct mailbox folder shared across
+    `sources` — not one SEARCH per source. Each fetched message is parsed
+    once and then matched locally against every source sharing its folder
+    (from:/subject: query tokens via imap_connector.matches_query, then the
+    regex rules engine) instead of letting IMAP's own FROM/SUBJECT SEARCH
+    filter server-side per source. See docs/WORKLOG.md, 2026-08-14, for the
+    tradeoff this makes: it can FETCH a message that ends up matching no
+    source (never happens with per-source SEARCH), in exchange for cutting
+    N round-trips to one per folder — a good trade for this app's usual
+    shape (a dedicated newsletter mailbox where ~every message matches some
+    configured source).
+
+    The per-folder SEARCH is scoped to the *least recently* synced source in
+    that folder (min of the group's per-source `since` values, then capped
+    at `_IMAP_SEARCH_LOOKBACK_CAP_DAYS`) — not the most recently synced one.
+    `min` matters for correctness: a brand-new source's `since` falls back
+    to a wide default window, and its own per-source `since` check below
+    can only *narrow* what it accepts from messages the SEARCH actually
+    returned, never retroactively include messages the SEARCH never
+    fetched — `max` would silently and permanently skip that source's
+    intended backfill instead of just delaying it. In steady state (every
+    source already synced together) `min` and `max` are identical, so this
+    costs nothing in the common case; it only reaches further back than
+    `max` when a source is genuinely behind, and even then no further back
+    than the cap. Each message is FETCHed exactly once per folder no matter
+    how many sources it ends up matching — dispatch across sources happens
+    after the fetch, not before, so no source's presence causes a duplicate
+    FETCH of the same message. Read-only throughout: opens each folder with
+    readonly=True and only ever calls SEARCH/FETCH, never STORE/EXPUNGE.
     """
-    source_id, _, _ = get_or_create_source(conn, source)
-    last_fetched_at = conn.execute(
-        "SELECT last_fetched_at FROM sources WHERE id = ?", (source_id,)
-    ).fetchone()[0]
     now = datetime.now(UTC).isoformat()
 
-    from_filter, subject_filter, newer_than_days = imap_connector.parse_query(source.query)
-    since = _scoped_imap_since(last_fetched_at, newer_than_days or _IMAP_DEFAULT_WINDOW_DAYS)
-
-    try:
-        message_ids = search_fn(
-            imap_client,
-            source.mailbox_folder or imap_connector.DEFAULT_FOLDER,
-            since=since,
-            from_filter=from_filter,
-            subject_filter=subject_filter,
+    prepared = []
+    for source in sources:
+        source_id, _, _ = get_or_create_source(conn, source)
+        last_fetched_at = conn.execute(
+            "SELECT last_fetched_at FROM sources WHERE id = ?", (source_id,)
+        ).fetchone()[0]
+        from_filter, subject_filter, newer_than_days = imap_connector.parse_query(source.query)
+        since = _scoped_imap_since(last_fetched_at, newer_than_days or _IMAP_DEFAULT_WINDOW_DAYS)
+        prepared.append(
+            {
+                "source": source,
+                "source_id": source_id,
+                "folder": source.mailbox_folder or imap_connector.DEFAULT_FOLDER,
+                "since": since,
+                "from_filter": from_filter,
+                "subject_filter": subject_filter,
+                "rules": [compile_rule(r) for r in source.rules],
+                "fetched": 0,
+                "new": 0,
+                "filtered": 0,
+            }
         )
-    except Exception as exc:  # noqa: BLE001 — isolates this source, matches refresh_source
-        conn.execute(
-            "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
-            (str(exc), now, source_id),
-        )
-        conn.commit()
-        return {"key": source.key, "status": "error", "error": str(exc)}
 
-    rules = [compile_rule(r) for r in source.rules]
-    new_count = 0
-    filtered_count = 0
-    for message_id in message_ids:
-        # IMAP sequence/UID numbers aren't a stable guid across sessions —
-        # the dedup check below is on the parsed entry's Message-Id, after
-        # fetch, not on message_id itself.
+    groups: dict[str, list[dict]] = {}
+    for p in prepared:
+        groups.setdefault(p["folder"], []).append(p)
+
+    reports: dict[str, dict] = {}
+    for folder, group in groups.items():
+        lookback_floor = datetime.now(UTC) - timedelta(days=_IMAP_SEARCH_LOOKBACK_CAP_DAYS)
+        folder_since = max(min(p["since"] for p in group), lookback_floor)
         try:
-            raw = fetch_fn(imap_client, message_id)
-        except Exception:  # noqa: BLE001 — one bad message must not sink the refresh
+            message_ids = search_fn(imap_client, folder, since=folder_since)
+        except Exception as exc:  # noqa: BLE001 — isolates this folder's sources
+            for p in group:
+                conn.execute(
+                    "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
+                    (str(exc), now, p["source_id"]),
+                )
+                reports[p["source"].key] = {"key": p["source"].key, "status": "error", "error": str(exc)}
+            conn.commit()
             continue
 
-        entry = imap_connector.parse_message(raw)
-        already = conn.execute(
-            "SELECT id FROM articles WHERE source_id = ? AND guid = ?", (source_id, entry.guid)
-        ).fetchone()
-        if already:
-            continue
+        for message_id in message_ids:
+            # IMAP sequence/UID numbers aren't a stable guid across
+            # sessions — the dedup check below is on the parsed entry's
+            # Message-Id, after fetch, not on message_id itself.
+            try:
+                raw = fetch_fn(imap_client, message_id)
+            except Exception:  # noqa: BLE001 — one bad message must not sink the refresh
+                continue
 
-        passed, matched = evaluate_rules(_entry_to_raw_article(entry), rules)
-        if not passed:
-            filtered_count += 1
-            continue
-        if _persist_entry(conn, source_id, entry, matched, origin="email"):
-            new_count += 1
+            entry, from_header = imap_connector.parse_message_with_from_header(raw)
 
-    conn.execute(
-        "UPDATE sources SET last_fetched_at = ?, last_error = NULL WHERE id = ?",
-        (now, source_id),
-    )
-    conn.commit()
+            for p in group:
+                # This source's own since — narrower than folder_since for
+                # anyone behind the most-recently-synced source in the
+                # group — still gates what it personally accepts.
+                if entry.published_at and datetime.fromisoformat(entry.published_at) < p["since"]:
+                    continue
+                if not imap_connector.matches_query(
+                    from_header, entry.title, p["from_filter"], p["subject_filter"]
+                ):
+                    continue
+                p["fetched"] += 1
 
-    return {
-        "key": source.key,
-        "status": "ok",
-        "fetched": len(message_ids),
-        "new": new_count,
-        "filtered": filtered_count,
-    }
+                already = conn.execute(
+                    "SELECT id FROM articles WHERE source_id = ? AND guid = ?",
+                    (p["source_id"], entry.guid),
+                ).fetchone()
+                if already:
+                    continue
+
+                passed, matched = evaluate_rules(_entry_to_raw_article(entry), p["rules"])
+                if not passed:
+                    p["filtered"] += 1
+                    continue
+                if _persist_entry(conn, p["source_id"], entry, matched, origin="email"):
+                    p["new"] += 1
+
+        for p in group:
+            conn.execute(
+                "UPDATE sources SET last_fetched_at = ?, last_error = NULL WHERE id = ?",
+                (now, p["source_id"]),
+            )
+            reports[p["source"].key] = {
+                "key": p["source"].key,
+                "status": "ok",
+                "fetched": p["fetched"],
+                "new": p["new"],
+                "filtered": p["filtered"],
+            }
+        conn.commit()
+
+    return reports
 
 
 def _mark_source_error(conn: sqlite3.Connection, source: Source, exc: Exception) -> dict:
@@ -391,10 +472,7 @@ def _refresh_imap_sequential(
         return {s.key: _mark_source_error(conn, s, exc) for s in sources}
 
     try:
-        return {
-            s.key: refresh_imap_source(conn, s, client, search_fn, fetch_fn)
-            for s in sources
-        }
+        return refresh_imap_sources(conn, sources, client, search_fn, fetch_fn)
     finally:
         try:
             client.logout()

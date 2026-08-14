@@ -198,7 +198,7 @@ def _client_with_llm_enabled(tmp_path):
     conn.close()
 
     config = Config(
-        llm=LLMSettings(enabled=True, model="sonnet"),
+        llm=LLMSettings(enabled=True),
         sources=[Source(key="s1", type="rss", title="Source One", folder="Test", url="https://x/feed")],
     )
     config_path = tmp_path / "feeds.yaml"
@@ -264,7 +264,7 @@ def test_summarize_returns_cached_summary_without_calling_runner_again(monkeypat
 
 def test_summarize_returns_503_on_claude_error_and_persists_nothing(monkeypatch, tmp_path):
     from app.api import articles
-    from app.generate.client import ClaudeError
+    from app.summarize import ClaudeError
 
     def failing_summarize_text(text, word_count, **kwargs):
         raise ClaudeError("claude exited 1: boom")
@@ -342,81 +342,30 @@ def test_add_source_rejects_missing_required_field(client):
     assert resp.status_code == 400
 
 
-def test_list_topics_reports_enabled_flag_and_topics(client):
-    resp = client.get("/api/topics")
+def test_llm_status_reports_disabled_by_default(client):
+    resp = client.get("/api/llm-status")
     assert resp.status_code == 200
-    data = resp.json()
-    assert "enabled" in data
-    assert "topics" in data
+    assert resp.json() == {"enabled": False}
 
 
-def test_generate_returns_404_when_llm_disabled(client):
-    # The default `client` fixture's Config has llm.enabled=False (the
-    # default) — generation must be unreachable while the kill switch is off.
-    resp = client.post("/api/topics/whatever/generate")
-    assert resp.status_code == 404
-
-
-def test_generate_returns_202_and_spawns_worker_when_enabled(monkeypatch, tmp_path):
-    from app.api import generate_api
-    from app.config import Config, LLMSettings, Topic, Source, to_yaml
-    from app.db import connect, init_schema
-    from app.main import create_app
-    from starlette.testclient import TestClient
-
-    spawned = []
-    monkeypatch.setattr(generate_api, "spawn_worker", lambda job_id: spawned.append(job_id))
-
-    db_path = tmp_path / "reader.db"
-    conn = connect(db_path)
-    init_schema(conn)
-    conn.close()
-
-    config = Config(
-        llm=LLMSettings(enabled=True, model="sonnet", timeout_minutes=10),
-        topics=[Topic(key="ai-evals", title="AI Evals", folder="Generated", brief="track it")],
-    )
-    config_path = tmp_path / "feeds.yaml"
-    config_path.write_text(to_yaml(config))
-    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
-    test_client = TestClient(app)
-
-    resp = test_client.post("/api/topics/ai-evals/generate")
-
-    assert resp.status_code == 202
-    job_id = resp.json()["job_id"]
-    assert spawned == [job_id]
-
-    status_resp = test_client.get(f"/api/jobs/{job_id}")
-    assert status_resp.json()["status"] == "queued"
-
-
-def test_generate_returns_404_for_unknown_topic_even_when_enabled(monkeypatch, tmp_path):
-    from app.api import generate_api
+def test_llm_status_reports_enabled_when_configured(tmp_path):
     from app.config import Config, LLMSettings, to_yaml
     from app.db import connect, init_schema
     from app.main import create_app
     from starlette.testclient import TestClient
 
-    monkeypatch.setattr(generate_api, "spawn_worker", lambda job_id: None)
-
     db_path = tmp_path / "reader.db"
     conn = connect(db_path)
     init_schema(conn)
     conn.close()
-    config = Config(llm=LLMSettings(enabled=True), topics=[])
+    config = Config(llm=LLMSettings(enabled=True))
     config_path = tmp_path / "feeds.yaml"
     config_path.write_text(to_yaml(config))
     app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
     test_client = TestClient(app)
 
-    resp = test_client.post("/api/topics/nonexistent/generate")
-    assert resp.status_code == 404
-
-
-def test_get_job_status_404_for_missing_job(client):
-    resp = client.get("/api/jobs/9999")
-    assert resp.status_code == 404
+    resp = test_client.get("/api/llm-status")
+    assert resp.json() == {"enabled": True}
 
 
 def test_put_config_updates_the_config_file(client, tmp_path):
