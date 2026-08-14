@@ -1426,3 +1426,29 @@ spin`, 0.7s linear) in the button's violet accent, and gave the button
 itself a `.icon-btn--busy` highlight (violet border/wash) while
 `summarizing` is true, so the whole control reads as "actively working,"
 not just disabled. No new dependency — pure CSS animation.
+
+## 2026-08-14 (cont.) — Summary styling wasn't from the model, and the button UX was wrong
+
+Two pieces of feedback on the same session:
+
+1. *"Why are the summarized posts always have a line on the left side and
+   purple highlights? Is it coming from the summarized HTML or is it
+   hardwired?"* — hardwired, not the model's output: `.reader-body--summary`
+   (added alongside the feature itself) set a violet `border-left` and
+   recolored `b`/`strong` violet. Removed both rules entirely — bold text
+   in a summary now renders exactly like bold text in a full article (the
+   article's default ink color, effectively black in light mode), no side
+   border. `summarize.py`'s system prompt and `sanitize_html`'s allowlist
+   were never involved in this — worth confirming explicitly since the
+   question could as easily have been about either of those.
+2. The Full/Summary segmented toggle that replaced the ✨ button once a
+   summary existed was the wrong shape — asked for a single button that
+   never changes shape: click once (no summary yet) to generate, and once
+   generated the *same* button toggles Full↔Summary in place on each
+   subsequent click, showing a selected state (reusing the existing
+   `.icon-btn.active` amber highlight, same visual language as Star)
+   when on the Summary view. Removed `.view-toggle`/`.view-toggle__btn`
+   entirely — `viewMode` local state and the auto-switch-to-summary effect
+   on first generation are unchanged, only the button markup and its click
+   handler changed (branches on whether `article.llm_summary_html` is set:
+   generate vs. toggle).

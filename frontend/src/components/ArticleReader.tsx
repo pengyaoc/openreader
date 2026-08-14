@@ -113,32 +113,26 @@ export function ArticleReader({
           <span className="reader-source">{article.source_title}</span>
         </div>
         <div className="reader-bar__right">
-          {llmEnabled && article.llm_summary_html ? (
-            <div className="view-toggle" role="group" aria-label="View mode">
-              <button
-                className={`view-toggle__btn ${viewMode === 'full' ? 'active' : ''}`}
-                onClick={() => setViewMode('full')}
-              >
-                Full
-              </button>
-              <button
-                className={`view-toggle__btn ${viewMode === 'summary' ? 'active' : ''}`}
-                onClick={() => setViewMode('summary')}
-              >
-                Summary
-              </button>
-            </div>
-          ) : (
-            llmEnabled && (
-              <button
-                className={`icon-btn ${summarizing ? 'icon-btn--busy' : ''}`}
-                onClick={onSummarize}
-                disabled={summarizing}
-                title={summarizing ? 'Summarizing…' : 'Summarize'}
-              >
-                {summarizing ? <span className="spinner" /> : '✨'}
-              </button>
-            )
+          {llmEnabled && (
+            <button
+              className={`icon-btn ${summarizing ? 'icon-btn--busy' : ''} ${
+                viewMode === 'summary' ? 'active' : ''
+              }`}
+              onClick={() => {
+                if (!article.llm_summary_html) onSummarize()
+                else setViewMode((m) => (m === 'summary' ? 'full' : 'summary'))
+              }}
+              disabled={summarizing}
+              title={
+                summarizing
+                  ? 'Summarizing…'
+                  : viewMode === 'summary'
+                    ? 'Show full article'
+                    : 'Summarize'
+              }
+            >
+              {summarizing ? <span className="spinner" /> : '✨'}
+            </button>
           )}
           <button
             className={`icon-btn ${article.is_starred ? 'active' : ''}`}
