@@ -92,7 +92,30 @@ other devices (phone, tablet) on the same LAN.
 - A failed or timed-out generation writes **zero** articles — never a
   partially-generated feed.
 
-### 4.4 Reading experience
+### 4.4 On-demand article summarization
+
+- A **Summarize** button in the fullscreen reader, next to Star — for
+  adhoc, personal use (not a bulk/scheduled feature), it turns the
+  already-open article's own text into a summary via the same Claude
+  subscription (not pay-per-token API billing) topic generation uses,
+  gated by the same `llm.enabled` kill switch.
+- **Faithful, not creative:** grounded purely in the article's own text —
+  no outside knowledge, no speculation, no invented facts/quotes. Always
+  the `sonnet` model, regardless of what topic generation happens to be
+  configured with.
+- **Proportional length:** at least `max(100 words, 20% of the original
+  article's word count)` — a one-paragraph note gets a short summary, a
+  long-form piece gets a substantive one, not a fixed-size blurb either
+  way.
+- **Formatted for readability:** bullet points and bold highlighting for
+  key terms/figures where it helps scanning, rendered with the same
+  styling as a regular article body — not a wall of plain text.
+- **Generated once, kept forever:** the summary is stored and shown again
+  on a later visit to the same article, with no re-generation path (no
+  "refresh" button) since nothing in this feature calls for one. A
+  Full/Summary toggle lets you swap views without losing either one.
+
+### 4.5 Reading experience
 
 - Three-pane layout: sources/folders sidebar, article list (title +
   subtitle + thumbnail), fullscreen reader.
@@ -121,7 +144,7 @@ other devices (phone, tablet) on the same LAN.
   "Article URL: ... / Comments URL: ..." lines some feeds emit) so it
   actually helps decide whether to read something.
 
-### 4.5 Configuration
+### 4.6 Configuration
 
 - `config/feeds.yaml` is the single source of truth for sources, rules,
   topics, and the LLM interest/generation settings.

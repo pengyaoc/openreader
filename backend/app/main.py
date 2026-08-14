@@ -46,6 +46,7 @@ def create_app(
         Route("/api/articles/{article_id}/read", articles.mark_read, methods=["POST"]),
         Route("/api/articles/{article_id}/star", articles.toggle_star, methods=["POST"]),
         Route("/api/articles/{article_id}/toggle-read", articles.toggle_read, methods=["POST"]),
+        Route("/api/articles/{article_id}/summarize", articles.summarize, methods=["POST"]),
         Route("/api/refresh", refresh_api.refresh, methods=["POST"]),
         Route("/api/config", config_api.get_config, methods=["GET"]),
         Route("/api/config", config_api.put_config, methods=["PUT"]),

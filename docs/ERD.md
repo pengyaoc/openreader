@@ -1,6 +1,6 @@
 # OpenReader — Technical Design & ERD
 
-Status: reflects the app as built (2026-08-13). Companion to `docs/PRD.md`.
+Status: reflects the app as built (2026-08-14). Companion to `docs/PRD.md`.
 
 ## 1. Architecture overview
 
@@ -79,6 +79,9 @@ backend/app/
 ├── generate/
 │   ├── prompt.py                 # system prompt + JSON schema for the model
 │   ├── client.py                  # `claude` CLI subprocess wrapper
+│   ├── summarize.py                # on-demand single-article summarization —
+│   │                                # zero tools, no jobs/polling; reuses
+│   │                                # client.py's subprocess plumbing directly
 │   ├── jobs.py                     # SQLite job status transitions
 │   └── worker.py                    # out-of-process job runner (__main__)
 └── api/
@@ -91,7 +94,7 @@ Design rule followed throughout: **pure logic is separated from I/O** and
 every I/O boundary (HTTP fetch, IMAP socket, subprocess call) is injectable
 in tests via a `Fetcher`/`Runner`/`GenerateFn`-style callable parameter, so
 the entire pipeline is unit-tested without a real network call or
-subprocess spawn. 192 backend tests, zero of which touch the network.
+subprocess spawn. 228 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
@@ -136,6 +139,8 @@ erDiagram
         bool is_read
         text read_at
         bool is_starred
+        text llm_summary_html "sanitized; cached forever once generated"
+        text llm_summary_at
     }
 
     jobs {
@@ -171,6 +176,13 @@ Notes on choices that aren't obvious from the columns alone:
   (`Tue, 11 Aug 2026 05:30:24 +0000`) and Atom's ISO-8601 dates sort
   incorrectly against each other as raw strings — this was a real bug
   found and fixed mid-build (see WORKLOG).
+- **No migration framework** — `db.py`'s schema is `CREATE TABLE IF NOT
+  EXISTS` only, a no-op against an already-existing table. Adding
+  `llm_summary_html`/`llm_summary_at` needed an idempotent `ALTER TABLE
+  ... ADD COLUMN` in `init_schema()` (guarded by catching "duplicate
+  column name") so an already-deployed database picks up new columns on
+  its next restart. Same approach whenever a column is added in the
+  future.
 
 ## 4. API surface
 
@@ -194,6 +206,7 @@ cookie required) otherwise, matching this app's local/LAN default.
 | `POST /api/articles/:id/read` | Mark read (idempotent, one-directional) | No |
 | `POST /api/articles/:id/toggle-read` | Manual read/unread toggle | No |
 | `POST /api/articles/:id/star` | Toggle starred | No |
+| `POST /api/articles/:id/summarize` | On-demand summary via `claude -p` (sonnet, hardcoded); cached forever once generated — returns the cached value with no subprocess call on repeat requests; 404 if `llm.enabled=false` (same kill switch as `/generate`) | Runs off the event loop (`asyncio.to_thread`, §5) — a single call is ~5-20s |
 | `POST /api/refresh` | Refresh (`?source=key` for one); RSS fetches concurrently (bounded pool), IMAP sequentially over one shared connection (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-5s typical) |
 | `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |
 | `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | SSRF-check DNS lookup runs off the event loop (`asyncio.to_thread`, §5); the actual fetch is async `httpx` |
@@ -253,12 +266,17 @@ silently blocked. Routing every image through the server sidesteps that
 and also avoids leaking the reader's IP/referrer to third-party hosts on
 every article view.
 
-**`claude` CLI subprocess, not the Anthropic API.** Generation runs
-against the user's Claude subscription via OAuth (keychain), not
-`ANTHROPIC_API_KEY`. Two invariants protect that: never pass `--bare`
-(its own docs: under `--bare`, OAuth/keychain are never read — only
-`ANTHROPIC_API_KEY`), and the API key is explicitly scrubbed from the
-child environment regardless.
+**`claude` CLI subprocess, not the Anthropic API.** Both topic generation
+and article summarization run against the user's Claude subscription via
+OAuth (keychain), not `ANTHROPIC_API_KEY`. Two invariants protect that:
+never pass `--bare` (its own docs: under `--bare`, OAuth/keychain are
+never read — only `ANTHROPIC_API_KEY`), and the API key is explicitly
+scrubbed from the child environment regardless. `summarize.py` reuses
+`client.py`'s subprocess plumbing directly rather than duplicating either
+invariant. On the VM, this also meant `openreader.service`'s `PATH` had
+to include the CLI's actual install location and `MemoryMax` had to be
+raised well past a single call's own ~300MB peak RSS — see
+docs/WORKLOG.md, 2026-08-14.
 
 **`--permission-mode bypassPermissions`, not `dontAsk`.** Found live,
 mid-build: `dontAsk` silently *denies* every WebSearch/WebFetch call in
@@ -535,7 +553,12 @@ Full history of the tradeoffs and what was found along the way is in
   npm run build`, then the backend source + `frontend/dist` go up via
   `gcloud compute scp` and land via `cp` (not `rsync` — the VM's apt broke
   when Debian 10/buster was archived at EOL, so nothing gets installed to
-  fix that). Node/Vite never run on the VM. `git pull` isn't used either —
+  fix that). Vite never runs on the VM — the frontend is always built on
+  the developer's laptop. Node itself *does* run on the VM as of
+  2026-08-14 (installed from nodejs.org's prebuilt tarball, same
+  apt-avoidance reasoning), but only to run the `claude` CLI as a
+  subprocess of the backend, never to build anything. `git pull` isn't
+  used either —
   deliberately: it wouldn't help with the build problem, and a laptop-side
   gate (tests fail → nothing ships) beats a VM that can end up mid-broken-
   state from a bad pull.
@@ -546,15 +569,25 @@ Full history of the tradeoffs and what was found along the way is in
   no root involvement in routine deploys/restarts. Needs
   `loginctl enable-linger openreader` once so the unit survives an SSH
   logout, and the sandboxing directives (`ProtectSystem=strict`,
-  `MemoryMax=300M`, etc.) that would normally need root to install are
-  applied the same way a system unit would, at the cost of the
-  credential file being owned by that user rather than root (a user
-  manager can only read files it owns) — see §5's IMAP entry for why the
-  credential in that file is scoped to a throwaway mailbox specifically
-  because of this.
-- **`llm.enabled: false`** on this deployment — the `claude` CLI subprocess
-  (Node, 300–600 MB, up to 10 minutes) is the one thing that would
-  reliably OOM a 1 GB box also running Apache/MySQL/PHP-FPM.
+  `MemoryMax=700M` — raised from `300M` on 2026-08-14, see below —
+  `ProtectHome=read-only` with `/home/openreader/.claude` carved out via
+  `ReadWritePaths` for the CLI's own OAuth token-refresh writes, etc.)
+  that would normally need root to install are applied the same way a
+  system unit would, at the cost of the credential file being owned by
+  that user rather than root (a user manager can only read files it
+  owns) — see §5's IMAP entry for why the credential in that file is
+  scoped to a throwaway mailbox specifically because of this.
+- **`llm.enabled: true`** as of 2026-08-14, for on-demand summarization
+  (topic generation's `topics: []` stays empty, so that half of the
+  feature remains inactive in practice). A single `claude -p` call peaks
+  around ~300MB RSS, measured live — `MemoryMax` was raised from the
+  original `300M` (sized only for the FastAPI process, and smaller than
+  one call's own peak alone) to `700M` to accommodate it, verified via a
+  `systemd-run --user --scope -p MemoryMax=700M` test that ran the real
+  code path under the identical cgroup limit before trusting it. Still a
+  tight fit on a 1GB box also running Apache/MySQL/PHP-FPM — workable only
+  because usage is sparse/adhoc (personal, ~1 query/5min), not something
+  to run at any real frequency. See docs/WORKLOG.md, 2026-08-14.
 - **App-layer login** (`READER_AUTH_PASSWORD_HASH`/`READER_SESSION_SECRET`
   set in `/opt/openreader/openreader.env`, see §5) stands in front of the
   whole app — `READER_READONLY_CONFIG` is intentionally *not* set here as

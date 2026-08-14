@@ -808,6 +808,34 @@ kbd {
   background: var(--amber-wash);
 }
 
+.view-toggle {
+  display: flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.view-toggle__btn {
+  background: none;
+  border: none;
+  color: var(--ink-dim);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  padding: 0 12px;
+  height: 32px;
+  transition: all 0.12s ease;
+}
+.view-toggle__btn:not(:last-child) {
+  border-right: 1px solid var(--line-strong);
+}
+.view-toggle__btn:hover {
+  color: var(--ink);
+}
+.view-toggle__btn.active {
+  color: var(--violet);
+  background: var(--violet-wash);
+}
+
 .reader-source {
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -865,6 +893,43 @@ kbd {
   font-size: 19px;
   line-height: 1.66;
   color: var(--ink);
+}
+
+.reader-body--summary {
+  padding-left: 18px;
+  border-left: 2px solid var(--violet-wash);
+}
+
+.reader-body--summary b,
+.reader-body--summary strong {
+  color: var(--violet);
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.icon-btn--busy {
+  opacity: 1;
+  color: var(--violet);
+  border-color: rgba(154, 134, 224, 0.35);
+  background: var(--violet-wash);
+}
+
+.spinner {
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid rgba(154, 134, 224, 0.3);
+  border-top-color: var(--violet);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .reader-body p {

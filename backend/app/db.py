@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS articles (
     is_read INTEGER NOT NULL DEFAULT 0,
     read_at TEXT,
     is_starred INTEGER NOT NULL DEFAULT 0,
+    llm_summary_html TEXT,
+    llm_summary_at TEXT,
     UNIQUE(source_id, guid)
 );
 
@@ -84,6 +86,21 @@ def connect(path: str | Path) -> sqlite3.Connection:
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     conn.commit()
+    _add_column_if_missing(conn, "articles", "llm_summary_html", "TEXT")
+    _add_column_if_missing(conn, "articles", "llm_summary_at", "TEXT")
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
+    """No migration framework here (see module docstring) — an already
+    running deployment's DB predates a schema change, since CREATE TABLE IF
+    NOT EXISTS is a no-op against an existing table. ALTER TABLE ADD COLUMN
+    picks it up idempotently on next startup."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
 
 
 async def run_off_thread(db_path: str | Path, fn: Callable[..., T], *args, **kwargs) -> T:

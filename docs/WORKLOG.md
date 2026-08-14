@@ -1302,3 +1302,127 @@ change — already had no spacer rows). Verified article 178 (the one
 actually reported) directly through the live authenticated API afterward:
 `content_html` now 23,794 bytes with 98 `<tr>` — exactly matching the
 local dry-run's prediction (179 → 98) before anything was touched live.
+
+## 2026-08-14 — On-demand article summarization via `claude -p`, and the VM provisioning it needed
+
+Feature request: a "Summarize" button in the reader, next to Star, using
+the *subscription* (not API-key billing) via `claude -p`, for personal
+adhoc use (~1 query/5min). Faithful summaries only — sonnet, no
+hallucination, grounded purely in the article text — proportional length
+(`max(100 words, 20% of the original)`), formatted for readability with
+bullets and bold highlighting, and persisted so a summary is still there
+on the next visit.
+
+Before writing any app code, spent the first part of this session
+provisioning the VM to run `claude -p` at all, and measuring it — apt is
+unusable on this buster VM (archived at EOL, same constraint
+`scripts/deploy.sh`'s header already documents), so Node v24.19.0 LTS was
+installed from the official prebuilt tarball (checksum-verified) under
+`/opt/node`, and `@anthropic-ai/claude-code` installed for the
+`openreader` user via a user-local npm prefix (`~/.npm-global`) —
+no `sudo npm`, no touching apt. One-time interactive `claude` login as
+the `openreader` user seeded `~/.claude/.credentials.json` against the
+Pro/Max subscription's OAuth, not an API key.
+
+Measured live, twice: a single `claude -p` call peaks around 300MB RSS
+(301MB and 308MB in two separate measurements), fully released after the
+process exits — confirmed via `free -h` before/during/after and by
+polling `ps` RSS across the process and its children while a real call
+ran. Against the VM's ~985MB total (MySQL + Apache + the OpenReader
+backend's own steady state already use ~350-400MB), that's tight but
+workable for sparse, adhoc use with the 2GB swap already in place as a
+cushion — not something to run per-request at any real frequency, but
+fine for "click a button occasionally."
+
+**Design**: reused `app/generate/client.py`'s subprocess pattern
+(subscription OAuth, `ANTHROPIC_API_KEY` scrubbed from the child env,
+`--strict-mcp-config`/`--setting-sources ""` for isolation, never
+`--bare`) in a new `app/generate/summarize.py` — a distinct capability
+from `app/generate/`'s topic research (WebSearch/WebFetch, multi-minute
+jobs polled via a jobs table): summarization hands the model text already
+in hand, `--tools ""` (disables all tools — confirmed via `claude --help`,
+nothing to research), and runs synchronously through the existing
+`run_off_thread` helper (same one `articles.get_article` already uses for
+`hydrate_article`) rather than reintroducing the jobs/poll machinery,
+since a call takes ~5-20s, not minutes. Model is hardcoded to `"sonnet"`
+in `summarize.py`, decoupled from whatever `config.llm.model` is set to
+for topic generation. The model's returned `summary_html` is run through
+the same `textutil.sanitize_html` allowlist as every other piece of HTML
+this app renders via `dangerouslySetInnerHTML` — never trusted just
+because it came back from our own prompt. `plain_text_excerpt` gained an
+optional `limit=None` (skip truncation) so summarization sees the full
+article, not the 300/900-char excerpts used elsewhere in the app — needed
+both for an accurate word count and because sonnet's 1M-token context has
+no practical reason to truncate a personal RSS article.
+
+New `articles.summary_html`/`llm_summary_at` columns, persisted forever
+once generated (no regenerate path — nothing in the ask called for one).
+`app/db.py` has no migration framework (`CREATE TABLE IF NOT EXISTS`
+only) — added an idempotent `ALTER TABLE ... ADD COLUMN` guarded by
+`try/except sqlite3.OperationalError` (ignoring "duplicate column name")
+in `init_schema()`, so the already-deployed VM database picks the columns
+up on next restart with no manual migration step.
+
+Frontend: a ✨ button next to Star (visible only when `llm.enabled`, reusing
+the `topicsQuery` the sidebar's existing Topics feature already fetches —
+no new query); once a summary exists it becomes a Full/Summary segmented
+toggle, auto-switching to Summary the moment a fresh one lands via the
+mutation's query-cache patch (not on every render — tracked via a ref so
+opening an article that already had a cached summary doesn't force-switch
+away from Full). 20 new backend tests (injected-runner unit tests for the
+CLI wrapper, mirroring `test_generate_client.py`'s conventions, plus API
+tests for the cache/kill-switch/error paths) — 228 passing total. `tsc
+--noEmit` clean.
+
+**Deploying it surfaced two VM-side bugs neither existed before this
+session, because `claude` never ran on this VM until today** — so
+topic-generation (the pre-existing feature) had silently never actually
+worked here either:
+1. `openreader.service`'s `PATH` had neither `/opt/node/bin` nor
+   `~/.npm-global/bin` — `claude` wasn't found. Fixed by adding an
+   explicit `Environment=PATH=...` line to the unit.
+2. `MemoryMax=300M` — sized only for the FastAPI process itself — is
+   smaller than a single `claude -p` call's own ~300MB peak RSS *alone*,
+   before adding the service's own ~100MB baseline. The very first
+   summarize/generate call would have been OOM-killed by the cgroup.
+   Raised to `700M` (VM total ~985MB, non-OpenReader baseline ~350-400MB,
+   2GB swap as further cushion).
+3. (Related, caught while editing the unit) `ProtectHome=read-only` would
+   have blocked `claude`'s OAuth token-refresh writes to
+   `~/.claude/.credentials.json` — added `/home/openreader/.claude` to
+   `ReadWritePaths` alongside the existing data/config paths.
+
+Verified the memory fix properly, not just by assertion: `claude` doesn't
+report live `MemoryCurrent` under this VM's systemd 241 hybrid cgroup v1/v2
+setup (a pre-existing, already-documented gap in the unit file's own
+comments), so ad hoc SSH-spawned test calls don't actually run inside the
+service's cgroup and can't validate the cap that way. Instead used
+`systemd-run --user --scope -p MemoryMax=700M` to run the real
+`summarize_text` call inside a transient scope with the identical limit
+the live service uses — `Result=success`, no OOM-kill, real summary
+persisted to two real production articles (ids 180, 182) — before trusting
+the number.
+
+Both VM-unit changes and the Node/CLI provisioning steps are one-time,
+by-hand setup — not scripted by `scripts/deploy.sh` (the OAuth login step
+is inherently interactive), but documented in its header comment,
+alongside the existing `openreader` service-user prerequisite, so they're
+at least discoverable rather than tribal knowledge from this session.
+
+Deployed via `scripts/deploy.sh` (bumped its post-restart verification
+`sleep` from 1s to 3s after watching the existing value race a real
+restart and report a false 503). `config/feeds.yaml`'s `llm.enabled` was
+still `false` on the VM (config edits are SSH-only by this app's design,
+never touched by `deploy.sh`) — flipped to `true` by hand; `topics: []`
+was already empty, so this only activated Summarize, not the unrelated
+topic-generation feature.
+
+## 2026-08-14 (cont.) — Summarize button: spinner instead of a static "…"
+
+Feedback: the Summarize button just swapped to a static "…" while a call
+was in flight — no visual cue that it was actually working versus stuck.
+Replaced it with a small CSS-only spinning ring (`.spinner`, `@keyframes
+spin`, 0.7s linear) in the button's violet accent, and gave the button
+itself a `.icon-btn--busy` highlight (violet border/wash) while
+`summarizing` is true, so the whole control reads as "actively working,"
+not just disabled. No new dependency — pure CSS animation.

@@ -16,6 +16,30 @@
 # including the IMAP credential file — a secret this script never touches
 # or transfers; it's written once, by hand, directly on the VM.
 #
+# Second one-time prerequisite, added 2026-08-14 for LLM generation/
+# summarization (both spawn the `claude` CLI as a subprocess of the
+# openreader service): Node.js installed under /opt/node (prebuilt tarball
+# from nodejs.org, apt is unusable on this buster VM — see below), the
+# `claude` CLI installed for the openreader user via
+# `npm install -g @anthropic-ai/claude-code` with a user-local npm prefix
+# (~/.npm-global), and a one-time interactive `claude` login as the
+# openreader user to seed ~/.claude/.credentials.json against the
+# Pro/Max subscription (OAuth, not an API key — see
+# backend/app/generate/client.py's module docstring for why that must
+# never change). None of this is scripted here: the OAuth login step is
+# inherently interactive (opens a URL you approve from a browser), so
+# there's nothing for this script to automate. See docs/WORKLOG.md,
+# 2026-08-14, for the exact commands.
+#
+# The openreader.service unit itself also needed two changes for this to
+# work at all (also not managed by this script — hand-edited on the VM,
+# see docs/WORKLOG.md): its PATH didn't include /opt/node/bin or
+# ~/.npm-global/bin (so `claude` wasn't found), and MemoryMax=300M — sized
+# only for the FastAPI process — was smaller than a single `claude -p`
+# call's own ~300MB peak RSS, so the very first summarize/generate call
+# would've been OOM-killed by the cgroup. Now PATH includes both, and
+# MemoryMax=700M.
+#
 # Usage: ./scripts/deploy.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -77,7 +101,7 @@ gcloud compute ssh --zone "$ZONE" --project "$PROJECT" "$VM" --command "
 "
 
 echo "==> Verifying..."
-sleep 1
+sleep 3
 # /reader/ serves the SPA shell unauthenticated by design (2026-08-13 cont.
 # — app-layer login replaced Apache Basic Auth; the login screen itself has
 # to load before anyone's authenticated) — a bare request should get 200.

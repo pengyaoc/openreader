@@ -31,7 +31,7 @@ _BOILERPLATE_LINE = re.compile(
 )
 
 
-def plain_text_excerpt(html: str | None, limit: int = 300) -> str:
+def plain_text_excerpt(html: str | None, limit: int | None = 300) -> str:
     if not html:
         return ""
     tree = HTMLParser(html)
@@ -42,7 +42,7 @@ def plain_text_excerpt(html: str | None, limit: int = 300) -> str:
         if text and not _BOILERPLATE_LINE.match(text):
             kept.append(text)
     text = " ".join(kept).strip()
-    return text[:limit]
+    return text if limit is None else text[:limit]
 
 
 def sanitize_html(html: str | None) -> str:

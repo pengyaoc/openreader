@@ -31,6 +31,8 @@ export interface Article {
   is_read: boolean
   read_at: string | null
   is_starred: boolean
+  llm_summary_html: string | null
+  llm_summary_at: string | null
   source_title?: string
 }
 
@@ -186,6 +188,11 @@ export const api = {
   toggleStar: (id: number) =>
     apiFetch(`/api/articles/${id}/star`, { method: 'POST' }).then((r) =>
       json<{ is_starred: boolean }>(r),
+    ),
+
+  summarize: (id: number) =>
+    apiFetch(`/api/articles/${id}/summarize`, { method: 'POST' }).then((r) =>
+      json<{ summary_html: string; llm_summary_at: string }>(r),
     ),
 
   toggleRead: (id: number) =>

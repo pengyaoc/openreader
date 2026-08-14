@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { API_BASE, type Article } from '../api'
 
 interface Citation {
@@ -6,11 +6,16 @@ interface Citation {
   url: string
 }
 
+type ViewMode = 'full' | 'summary'
+
 interface Props {
   article: Article
   loading: boolean
   onClose: () => void
   onToggleStar: () => void
+  onSummarize: () => void
+  summarizing: boolean
+  llmEnabled: boolean
   onPrev: () => void
   onNext: () => void
   hasPrev: boolean
@@ -43,6 +48,9 @@ export function ArticleReader({
   loading,
   onClose,
   onToggleStar,
+  onSummarize,
+  summarizing,
+  llmEnabled,
   onPrev,
   onNext,
   hasPrev,
@@ -67,6 +75,32 @@ export function ArticleReader({
     scrollRef.current?.scrollTo({ top: 0 })
   }, [article.id])
 
+  const [viewMode, setViewMode] = useState<ViewMode>('full')
+  // Tracks whether the *currently open* article already had a summary the
+  // last time we checked — lets the effect below tell "freshly generated
+  // while this article is open" (auto-switch to Summary) apart from "this
+  // article already had a cached summary when it was opened" (stay on
+  // Full, matching the reset below, until the user toggles manually).
+  const hadSummaryRef = useRef(false)
+
+  // Always land on the full view when switching articles — a summary
+  // toggled on for the previous article shouldn't carry over — and reset
+  // the "had a summary" baseline to match the newly opened article.
+  useEffect(() => {
+    setViewMode('full')
+    hadSummaryRef.current = Boolean(article.llm_summary_html)
+  }, [article.id])
+
+  // Auto-switch to the summary the moment it first appears for the article
+  // currently open (freshly generated, arriving via the query-cache patch
+  // in App.tsx) rather than requiring a second click.
+  useEffect(() => {
+    if (article.llm_summary_html && !hadSummaryRef.current) {
+      setViewMode('summary')
+    }
+    hadSummaryRef.current = Boolean(article.llm_summary_html)
+  }, [article.llm_summary_html])
+
   const citations: Citation[] = article.citations_json ? JSON.parse(article.citations_json) : []
 
   return (
@@ -79,6 +113,33 @@ export function ArticleReader({
           <span className="reader-source">{article.source_title}</span>
         </div>
         <div className="reader-bar__right">
+          {llmEnabled && article.llm_summary_html ? (
+            <div className="view-toggle" role="group" aria-label="View mode">
+              <button
+                className={`view-toggle__btn ${viewMode === 'full' ? 'active' : ''}`}
+                onClick={() => setViewMode('full')}
+              >
+                Full
+              </button>
+              <button
+                className={`view-toggle__btn ${viewMode === 'summary' ? 'active' : ''}`}
+                onClick={() => setViewMode('summary')}
+              >
+                Summary
+              </button>
+            </div>
+          ) : (
+            llmEnabled && (
+              <button
+                className={`icon-btn ${summarizing ? 'icon-btn--busy' : ''}`}
+                onClick={onSummarize}
+                disabled={summarizing}
+                title={summarizing ? 'Summarizing…' : 'Summarize'}
+              >
+                {summarizing ? <span className="spinner" /> : '✨'}
+              </button>
+            )
+          )}
           <button
             className={`icon-btn ${article.is_starred ? 'active' : ''}`}
             onClick={onToggleStar}
@@ -154,6 +215,11 @@ export function ArticleReader({
               <div className="reader-skeleton__line" style={{ width: '92%' }} />
               <div className="reader-skeleton__line" style={{ width: '60%' }} />
             </div>
+          ) : viewMode === 'summary' && article.llm_summary_html ? (
+            <div
+              className="reader-body reader-body--summary"
+              dangerouslySetInnerHTML={{ __html: article.llm_summary_html }}
+            />
           ) : (
             <div
               className="reader-body"

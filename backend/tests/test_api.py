@@ -164,6 +164,122 @@ def test_toggle_read_flips_state(client):
     assert resp.json()["is_read"] is False
 
 
+def test_summarize_returns_404_when_llm_disabled(client):
+    # The default `client` fixture's Config has llm.enabled=False (the
+    # default) — summarization must be unreachable while the kill switch
+    # is off, same posture as topic generation.
+    article_id = client.get("/api/articles").json()[0]["id"]
+    resp = client.post(f"/api/articles/{article_id}/summarize")
+    assert resp.status_code == 404
+
+
+def _client_with_llm_enabled(tmp_path):
+    from app.config import Config, LLMSettings, Source, to_yaml
+    from app.db import connect, init_schema
+    from app.main import create_app
+
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES (?, ?, ?, ?, ?)",
+        ("s1", "rss", "Source One", "Test", "https://x/feed"),
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    conn.execute(
+        """INSERT INTO articles
+           (source_id, guid, url, title, excerpt, content_html, published_at, origin)
+           VALUES (?, 'g1', 'https://x/1', 'Hello World', 'An excerpt',
+                   '<p>Some real article body text here.</p>',
+                   '2026-08-01T00:00:00Z', 'feed')""",
+        (source_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    config = Config(
+        llm=LLMSettings(enabled=True, model="sonnet"),
+        sources=[Source(key="s1", type="rss", title="Source One", folder="Test", url="https://x/feed")],
+    )
+    config_path = tmp_path / "feeds.yaml"
+    config_path.write_text(to_yaml(config))
+    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=False)
+    return TestClient(app)
+
+
+def test_summarize_404_for_unknown_article(monkeypatch, tmp_path):
+    from app.api import articles
+
+    monkeypatch.setattr(articles, "summarize_text", lambda *a, **k: "<p>should not be called</p>")
+    test_client = _client_with_llm_enabled(tmp_path)
+
+    resp = test_client.post("/api/articles/9999/summarize")
+    assert resp.status_code == 404
+
+
+def test_summarize_generates_and_persists_summary(monkeypatch, tmp_path):
+    from app.api import articles
+
+    calls = []
+
+    def fake_summarize_text(text, word_count, **kwargs):
+        calls.append((text, word_count))
+        return "<ul><li>Key point</li></ul>"
+
+    monkeypatch.setattr(articles, "summarize_text", fake_summarize_text)
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    resp = test_client.post(f"/api/articles/{article_id}/summarize")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["summary_html"] == "<ul><li>Key point</li></ul>"
+    assert data["llm_summary_at"]
+    assert len(calls) == 1
+    assert calls[0][0] == "Some real article body text here."
+
+    detail = test_client.get(f"/api/articles/{article_id}").json()
+    assert detail["llm_summary_html"] == "<ul><li>Key point</li></ul>"
+    assert detail["llm_summary_at"] == data["llm_summary_at"]
+
+
+def test_summarize_returns_cached_summary_without_calling_runner_again(monkeypatch, tmp_path):
+    from app.api import articles
+
+    calls = []
+    monkeypatch.setattr(
+        articles, "summarize_text", lambda text, word_count, **k: calls.append(1) or "<p>fresh</p>"
+    )
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    first = test_client.post(f"/api/articles/{article_id}/summarize")
+    assert first.json()["summary_html"] == "<p>fresh</p>"
+    assert len(calls) == 1
+
+    second = test_client.post(f"/api/articles/{article_id}/summarize")
+    assert second.json()["summary_html"] == "<p>fresh</p>"
+    assert len(calls) == 1  # not invoked again — cached path
+
+
+def test_summarize_returns_503_on_claude_error_and_persists_nothing(monkeypatch, tmp_path):
+    from app.api import articles
+    from app.generate.client import ClaudeError
+
+    def failing_summarize_text(text, word_count, **kwargs):
+        raise ClaudeError("claude exited 1: boom")
+
+    monkeypatch.setattr(articles, "summarize_text", failing_summarize_text)
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    resp = test_client.post(f"/api/articles/{article_id}/summarize")
+    assert resp.status_code == 503
+
+    detail = test_client.get(f"/api/articles/{article_id}").json()
+    assert detail["llm_summary_html"] is None
+
+
 def test_image_proxy_rejects_missing_url(client):
     resp = client.get("/api/img")
     assert resp.status_code == 400

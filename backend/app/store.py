@@ -67,6 +67,7 @@ _ARTICLE_COLUMNS = (
     "published_at", "fetched_at", "excerpt", "content_html", "top_image_path",
     "matched_rule", "origin", "job_id", "citations_json",
     "hydrated_at", "hydrate_failed_at", "is_read", "read_at", "is_starred",
+    "llm_summary_html", "llm_summary_at",
 )
 
 
@@ -172,6 +173,16 @@ def mark_all_read_global(conn: sqlite3.Connection) -> int:
     )
     conn.commit()
     return cur.rowcount
+
+
+def save_summary(conn: sqlite3.Connection, article_id: int, summary_html: str) -> str:
+    now = datetime.now(UTC).isoformat()
+    conn.execute(
+        "UPDATE articles SET llm_summary_html = ?, llm_summary_at = ? WHERE id = ?",
+        (summary_html, now, article_id),
+    )
+    conn.commit()
+    return now
 
 
 def toggle_star(conn: sqlite3.Connection, article_id: int) -> dict | None:
