@@ -1452,3 +1452,38 @@ Two pieces of feedback on the same session:
    on first generation are unchanged, only the button markup and its click
    handler changed (branches on whether `article.llm_summary_html` is set:
    generate vs. toggle).
+
+## 2026-08-14 (cont.) — Consolidated the VM's env vars into one file
+
+Feedback, after walking through every non-git config on the VM field by
+field (no values shown, just names, to build confidence config wasn't
+scattered): `openreader.service` had `READER_CONFIG`/`READER_DB`/
+`READER_MEDIA`/`PATH` as inline `Environment=` lines, split from the
+actual secrets (`READER_IMAP_*`, `READER_AUTH_PASSWORD_HASH`,
+`READER_SESSION_SECRET`) sitting in `/opt/openreader/openreader.env` —
+two files for the same category of thing (service env vars), for no real
+reason.
+
+Moved the four non-secret lines into `openreader.env` too, and stripped
+them from the unit file, which now carries a single `EnvironmentFile=`
+line and nothing else env-related. Verified via `/proc/<pid>/environ` on
+the restarted service that `PATH`/`READER_CONFIG`/`READER_DB`/
+`READER_MEDIA` all still resolved correctly (systemd's own
+`systemctl show -p Environment` only reflects inline `Environment=`
+lines, not `EnvironmentFile=` contents, so that alone wouldn't have
+proven anything), then confirmed `https://pengyaochen.com/reader/` still
+200'd.
+
+This didn't reduce the total number of separate config locations on the
+VM (still four: this env file, `feeds.yaml`, and the `claude` CLI's own
+`~/.claude/.credentials.json` + `~/.claude.json`) — those serve genuinely
+different purposes and shouldn't be merged (in particular,
+`.credentials.json` is written/refreshed by the `claude` CLI itself, not
+something this app should own). It just removed a pointless split within
+one of those four.
+
+Documented as a reproducible recipe in README.md's new "Production
+deployment: one env file, not two" section — the full `openreader.env`
+template and unit file, not just the narrative of what changed, so
+someone standing up their own systemd deployment from the GitHub repo
+doesn't have to reconstruct this from WORKLOG archaeology.
