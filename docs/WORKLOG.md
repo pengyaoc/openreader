@@ -1291,5 +1291,14 @@ Deployed via `scripts/deploy.sh`, then backfilled already-stored
 their already-sanitized `content_html` and writing the result back in
 place — a refresh alone wouldn't have touched them, since dedup on
 `(source_id, guid)` means an already-ingested message is never
-re-fetched/re-processed. See the backfill run's own note for the exact
-count and verification.
+re-fetched/re-processed.
+
+Backfill also had to cover `origin='gmail'` rows, not just `origin='email'`
+— found live: only 2 of 6 stored email-type articles had the new `'email'`
+label; the other 4 predated this session's origin rename (`'gmail'` →
+`'email'`, when the Gmail OAuth connector was removed) and were still
+sitting on the old value. 4 of 6 articles actually changed (2 needed no
+change — already had no spacer rows). Verified article 178 (the one
+actually reported) directly through the live authenticated API afterward:
+`content_html` now 23,794 bytes with 98 `<tr>` — exactly matching the
+local dry-run's prediction (179 → 98) before anything was touched live.
