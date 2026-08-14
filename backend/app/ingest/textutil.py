@@ -72,25 +72,38 @@ def tighten_newsletter_whitespace(html: str | None) -> str:
     <br> tags, runs of consecutive &nbsp; (email builders pad inbox
     preview-snippet length with dozens of them, usually inside a hidden
     element — the hiding mechanism is CSS we strip, so left uncollapsed it
-    surfaces as a wall of visible spaces mid-paragraph), and empty spacer
-    <table> chains (email builders nest several table/tr/td levels — often
-    5-10 deep — around nothing but a stray &nbsp; purely to control layout
-    in old email clients; each becomes its own block box once the reader's
-    CSS makes tables scrollable, so left in place they stack into a wall of
-    blank vertical space). Applied only to email-sourced content — RSS feeds
-    don't share this markup pattern."""
+    surfaces as a wall of visible spaces mid-paragraph), empty spacer <tr>
+    rows, and empty spacer <table> chains.
+
+    Email builders lay out a newsletter as one (or a few) layout tables
+    with real content rows and empty `<tr><td> </td></tr>` spacer rows
+    interleaved in the *same* table — found live, 2026-08-13, on a WSJ
+    newsletter article: 81 of 179 <tr> elements were pure spacers, none of
+    which the table-level check below ever caught, since the enclosing
+    table wasn't empty overall (it had real content in its other rows).
+    Each <tr> renders as its own block box once the reader's CSS makes
+    tables scrollable, so left in place those spacer rows alone produced
+    a wall of blank lines — the dominant cause, not the fully-empty nested
+    spacer tables (5-10 levels deep, around nothing but a stray &nbsp;)
+    the table sweep below still also removes. Applied only to
+    email-sourced content — RSS feeds don't share this markup pattern."""
     if not html:
         return html or ""
     tree = HTMLParser(f"<body>{html}</body>")
     for p in tree.css("p"):
         if _is_visually_empty(p):
             p.decompose()
-    # Bottom-up, to a fixed point: removing an innermost empty spacer table
-    # can leave its parent table empty too (that's exactly the nested-spacer
-    # shape), so keep sweeping until a pass removes nothing.
+    # Bottom-up, to a fixed point: removing an innermost empty spacer row
+    # can leave its enclosing table empty too, and removing a table can
+    # leave an outer row (in a parent layout table) empty in turn — sweep
+    # both together until a pass removes nothing.
     removed = True
     while removed:
         removed = False
+        for tr in tree.css("tr"):
+            if _is_visually_empty(tr):
+                tr.decompose()
+                removed = True
         for table in tree.css("table"):
             if _is_visually_empty(table):
                 table.decompose()

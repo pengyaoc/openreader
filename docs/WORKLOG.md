@@ -1243,3 +1243,53 @@ password, 200 + correctly-flagged `Secure` cookie on success, 200 on a
 protected route with that cookie, `index.html` still reachable with no
 cookie at all (so the login screen itself can load). Decommissioned
 `.htpasswd-reader` and the config backup once confirmed working.
+
+## 2026-08-13 (cont.) — Fixed excessive blank lines in WSJ newsletter articles
+
+Feedback: *"Read into the WSJ What's News latest article. There are a
+lot of new lines when I read it... look into the email parsing code."*
+Pulled the live article's `content_html` from the VM DB (id 178) and
+counted tags: 45 `<table>`, 179 `<tr>`, only 25 `<p>` — a classic
+HTML-email layout table, one (or a few) big tables used purely for
+positioning, not tabular data.
+
+`tighten_newsletter_whitespace` (`ingest/textutil.py`) already stripped
+fully-empty `<p>` spacers and fully-empty `<table>` chains, but never
+looked at individual `<tr>` rows — and WSJ's markup interleaves empty
+`<tr><td> </td></tr>` spacer rows *between* real content rows in the
+*same* table, so the whole-table-emptiness check never caught them (the
+table has real content elsewhere). Counted directly: 81 of 179 `<tr>`
+elements (45%) were pure spacers. Each `<tr>` renders as its own block
+box once the reader's CSS makes tables scrollable — that's the actual
+source of the "lots of new lines," not the already-handled fully-empty
+nested spacer tables.
+
+Fix: added the same bottom-up empty-node sweep already used for
+`<table>` to `<tr>` too, in the same fixed-point loop (removing a
+row can leave its table empty, and removing a table can leave an outer
+row — in a parent layout table — empty in turn, so both need sweeping
+together until a pass removes nothing). No change to what counts as
+"visually empty" (`_is_visually_empty`, unchanged) or to the `<br>`/
+`&nbsp;` regex collapsing — only the sweep target list grew.
+
+Ran the actual WSJ article through the fixed function to confirm before
+touching anything live: 179 `<tr>` → 98 (removed exactly the 81 counted
+spacers), `<table>` count unchanged (45 → 45 — none of *this* article's
+tables happened to become fully empty as a side effect), real content
+(`"Luigi Mangione"` etc.) confirmed still present, ~1.5KB of pure spacer
+markup removed.
+
+`tighten_newsletter_whitespace` had zero direct unit tests before this —
+added seven to `test_textutil.py`: empty input, empty-paragraph removal,
+`<br>` collapsing, `&nbsp;` collapsing, fully-empty nested spacer tables
+(the pre-existing case), and two new ones for the actual bug — empty
+`<tr>` rows removed from within an otherwise-real table, and a table with
+only real rows left fully intact. 209 backend tests passing (202 → 209).
+
+Deployed via `scripts/deploy.sh`, then backfilled already-stored
+`origin='email'` articles on the VM by re-running the fixed function over
+their already-sanitized `content_html` and writing the result back in
+place — a refresh alone wouldn't have touched them, since dedup on
+`(source_id, guid)` means an already-ingested message is never
+re-fetched/re-processed. See the backfill run's own note for the exact
+count and verification.

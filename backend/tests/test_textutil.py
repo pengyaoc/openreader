@@ -1,5 +1,10 @@
 """Tests for HTML-to-plain-text excerpting and sanitization."""
-from app.ingest.textutil import plain_text_excerpt, proxy_image_urls, sanitize_html
+from app.ingest.textutil import (
+    plain_text_excerpt,
+    proxy_image_urls,
+    sanitize_html,
+    tighten_newsletter_whitespace,
+)
 
 
 def test_plain_text_excerpt_strips_tags():
@@ -110,3 +115,73 @@ def test_proxy_image_urls_ignores_images_with_no_src():
     html = "<img>"
     result = proxy_image_urls(html)
     assert "/api/img" not in result
+
+
+def test_tighten_newsletter_whitespace_handles_empty_input():
+    assert tighten_newsletter_whitespace("") == ""
+    assert tighten_newsletter_whitespace(None) == ""
+
+
+def test_tighten_newsletter_whitespace_removes_empty_spacer_paragraphs():
+    html = "<p>Real content.</p><p>&nbsp;</p><p> </p><p>More content.</p>"
+    result = tighten_newsletter_whitespace(html)
+    assert result.count("<p>") == 2
+    assert "Real content." in result
+    assert "More content." in result
+
+
+def test_tighten_newsletter_whitespace_collapses_consecutive_br_tags():
+    html = "<p>Line one.</p><br><br><br><br><p>Line two.</p>"
+    result = tighten_newsletter_whitespace(html)
+    assert result.count("<br") == 1
+
+
+def test_tighten_newsletter_whitespace_collapses_nbsp_runs():
+    html = "<p>Preview text" + "&nbsp;" * 20 + "hidden padding</p>"
+    result = tighten_newsletter_whitespace(html)
+    assert "&nbsp;&nbsp;&nbsp;" not in result
+
+
+def test_tighten_newsletter_whitespace_removes_fully_empty_spacer_tables():
+    # Email builders nest several table/tr/td levels deep around nothing
+    # but a stray &nbsp; purely to control vertical spacing in old email
+    # clients — each level becomes its own block box once the reader's
+    # CSS makes tables scrollable.
+    html = (
+        "<p>Before.</p>"
+        "<table><tbody><tr><td><table><tbody><tr><td>&nbsp;</td></tr>"
+        "</tbody></table></td></tr></tbody></table>"
+        "<p>After.</p>"
+    )
+    result = tighten_newsletter_whitespace(html)
+    assert "<table" not in result
+    assert "Before." in result
+    assert "After." in result
+
+
+def test_tighten_newsletter_whitespace_removes_empty_spacer_rows_within_a_real_table():
+    # Found live, 2026-08-13, on a WSJ newsletter article: 81 of 179 <tr>
+    # elements were pure `<tr><td> </td></tr>` spacer rows interleaved
+    # with real content rows in the *same* table — the whole-table-empty
+    # check alone never catches these, since the table has real content
+    # elsewhere. Each spacer <tr> rendered as its own blank line.
+    html = (
+        "<table><tbody>"
+        "<tr><td> </td></tr>"
+        "<tr><td><h4>Headline one.</h4></td></tr>"
+        "<tr><td> </td></tr>"
+        "<tr><td><p>Body paragraph.</p></td></tr>"
+        "<tr><td> </td></tr>"
+        "</tbody></table>"
+    )
+    result = tighten_newsletter_whitespace(html)
+    assert result.count("<tr>") == 2
+    assert "Headline one." in result
+    assert "Body paragraph." in result
+
+
+def test_tighten_newsletter_whitespace_keeps_a_table_with_only_real_rows_intact():
+    html = "<table><tbody><tr><td>A</td></tr><tr><td>B</td></tr></tbody></table>"
+    result = tighten_newsletter_whitespace(html)
+    assert result.count("<tr>") == 2
+    assert "<table" in result
