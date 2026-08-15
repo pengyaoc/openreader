@@ -208,22 +208,16 @@ export function ArticleReader({
 
           {(hasPrev || hasNext) && (
             <div className="reader-footer-nav">
-              {hasPrev && (
-                <button
-                  className="reader-footer-nav__btn reader-footer-nav__btn--prev"
-                  onClick={onPrev}
-                  title="Previous article (←)"
-                >
-                  ‹ Previous article
+              {hasPrev ? (
+                <button className="icon-btn" onClick={onPrev} title="Previous article (←)">
+                  ‹
                 </button>
+              ) : (
+                <span />
               )}
               {hasNext && (
-                <button
-                  className="reader-footer-nav__btn reader-footer-nav__btn--next"
-                  onClick={onNext}
-                  title="Next article (→)"
-                >
-                  Next article ›
+                <button className="icon-btn" onClick={onNext} title="Next article (→)">
+                  ›
                 </button>
               )}
             </div>

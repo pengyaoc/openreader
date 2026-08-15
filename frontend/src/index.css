@@ -655,32 +655,9 @@ kbd {
 .reader-footer-nav {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
   margin-top: 48px;
   padding-top: 24px;
   border-top: 1px solid var(--line);
-}
-
-.reader-footer-nav__btn {
-  flex: 1;
-  max-width: 300px;
-  padding: 14px 18px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--bg-raised);
-  color: var(--ink);
-  font-size: 14.5px;
-  font-weight: 500;
-  transition: all 0.15s ease;
-  box-shadow: var(--shadow-lift);
-}
-.reader-footer-nav__btn:hover {
-  color: var(--amber);
-  border-color: var(--amber-dim);
-}
-.reader-footer-nav__btn--next {
-  margin-left: auto;
-  text-align: right;
 }
 
 @keyframes reader-in {
@@ -1473,11 +1450,6 @@ kbd {
     font-size: 17px;
   }
 
-  .reader-footer-nav__btn {
-    max-width: none;
-    font-size: 14px;
-    padding: 12px 14px;
-  }
 
   .config-drawer {
     width: 100vw;
