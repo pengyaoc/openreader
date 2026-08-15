@@ -47,6 +47,49 @@ def test_refresh_persists_new_articles(tmp_path):
     assert len(rows) == 2
 
 
+def test_refresh_all_hydrates_eligible_sources_articles(tmp_path, monkeypatch):
+    # refresh_all should hydrate full text for sources with fetch_full_text
+    # enabled as its last phase, so GET /api/articles/:id is usually a pure
+    # DB read by the time a user opens an article rather than paying a live
+    # fetch inline on the read path (see app/ingest/hydrate.py).
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    eligible = Source(
+        key="s1", type="rss", title="S1", folder="Test", url="https://x/feed", fetch_full_text=True
+    )
+    ineligible = Source(key="s2", type="rss", title="S2", folder="Test", url="https://y/feed")
+    fetcher = make_fetcher(
+        {
+            "s1": (FIXTURES / "rss2.xml").read_bytes(),
+            "s2": (FIXTURES / "rss2.xml").read_bytes(),
+        }
+    )
+
+    import app.ingest.hydrate as hydrate_module
+
+    calls = []
+
+    def fake_fetch_and_extract(url, timeout, fetcher=None):
+        calls.append(url)
+        return "<p>" + ("hydrated word " * 100) + "</p>"
+
+    monkeypatch.setattr(hydrate_module, "fetch_and_extract", fake_fetch_and_extract)
+
+    refresh_all(conn, [eligible, ineligible], fetcher=fetcher)
+
+    s1_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    s2_id = conn.execute("SELECT id FROM sources WHERE key='s2'").fetchone()[0]
+    s1_hydrated = conn.execute(
+        "SELECT hydrated_at FROM articles WHERE source_id = ?", (s1_id,)
+    ).fetchall()
+    s2_hydrated = conn.execute(
+        "SELECT hydrated_at FROM articles WHERE source_id = ?", (s2_id,)
+    ).fetchall()
+    assert all(row[0] is not None for row in s1_hydrated)
+    assert all(row[0] is None for row in s2_hydrated)  # s2 never opted into fetch_full_text
+    assert len(calls) == len(s1_hydrated)
+
+
 def test_refresh_applies_exclude_rules(tmp_path):
     conn = connect(tmp_path / "reader.db")
     init_schema(conn)

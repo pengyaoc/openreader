@@ -15,19 +15,26 @@ def list_sources(conn: sqlite3.Connection, valid_keys: set[str] | None = None) -
     without this filter a removed source keeps showing in the sidebar
     forever. The API layer passes the live config's source keys; callers
     that omit it (tests, internal tooling) get the unfiltered DB list."""
+    # A pre-aggregated subquery (rather than LEFT JOIN articles + COUNT...FILTER)
+    # so this only ever touches unread rows — with idx_articles_src_unread on
+    # (source_id, is_read), the subquery is an index-only scan instead of a
+    # full scan of every article for every source on every sidebar load.
     query = """
         SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
                s.last_error,
-               COUNT(a.id) FILTER (WHERE a.is_read = 0) AS unread_count
+               COALESCE(u.unread_count, 0) AS unread_count
         FROM sources s
-        LEFT JOIN articles a ON a.source_id = s.id
+        LEFT JOIN (
+            SELECT source_id, COUNT(*) AS unread_count
+            FROM articles WHERE is_read = 0 GROUP BY source_id
+        ) u ON u.source_id = s.id
     """
     params: list = []
     if valid_keys is not None:
         placeholders = ", ".join("?" for _ in valid_keys)
         query += f" WHERE s.key IN ({placeholders})" if valid_keys else " WHERE 0"
         params.extend(valid_keys)
-    query += " GROUP BY s.id ORDER BY s.folder, s.title"
+    query += " ORDER BY s.folder, s.title"
 
     rows = conn.execute(query, params).fetchall()
     return [_source_row_to_dict(r) for r in rows]
@@ -39,11 +46,13 @@ def get_source(conn: sqlite3.Connection, source_id: int) -> dict | None:
     row = conn.execute(
         """SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
                   s.last_error,
-                  COUNT(a.id) FILTER (WHERE a.is_read = 0) AS unread_count
+                  COALESCE(u.unread_count, 0) AS unread_count
            FROM sources s
-           LEFT JOIN articles a ON a.source_id = s.id
-           WHERE s.id = ?
-           GROUP BY s.id""",
+           LEFT JOIN (
+               SELECT source_id, COUNT(*) AS unread_count
+               FROM articles WHERE is_read = 0 GROUP BY source_id
+           ) u ON u.source_id = s.id
+           WHERE s.id = ?""",
         (source_id,),
     ).fetchone()
     return _source_row_to_dict(row) if row else None
@@ -70,6 +79,14 @@ _ARTICLE_COLUMNS = (
     "llm_summary_html", "llm_summary_at",
 )
 
+# The list endpoint (list_articles) backs the sidebar's article rows, which
+# only ever render title/excerpt/meta fields — never the full article body.
+# content_html and llm_summary_html average tens of KB each; shipping them
+# on every row of every page made a 50-item page ~570KB of JSON the client
+# immediately discarded. Dropped from the list query below; get_article
+# (the single-article detail fetch) still selects the full _ARTICLE_COLUMNS.
+_LIST_COLUMNS = tuple(c for c in _ARTICLE_COLUMNS if c not in ("content_html", "llm_summary_html"))
+
 
 def _row_to_article(row) -> dict:
     d = dict(zip(_ARTICLE_COLUMNS, row))
@@ -86,9 +103,9 @@ def list_articles(
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
-    cols = ", ".join(f"a.{c}" for c in _ARTICLE_COLUMNS)
+    cols = ", ".join(f"a.{c}" for c in _LIST_COLUMNS)
     query = f"""
-        SELECT {cols}, s.title AS source_title
+        SELECT {cols}, (a.llm_summary_html IS NOT NULL) AS has_summary, s.title AS source_title
         FROM articles a
         JOIN sources s ON s.id = a.source_id
         WHERE 1=1
@@ -110,8 +127,12 @@ def list_articles(
     rows = conn.execute(query, params).fetchall()
     result = []
     for row in rows:
-        article = _row_to_article(row[: len(_ARTICLE_COLUMNS)])
-        article["source_title"] = row[-1]
+        n = len(_LIST_COLUMNS)
+        article = dict(zip(_LIST_COLUMNS, row[:n]))
+        article["is_read"] = bool(article["is_read"])
+        article["is_starred"] = bool(article["is_starred"])
+        article["has_summary"] = bool(row[n])
+        article["source_title"] = row[n + 1]
         result.append(article)
     return result
 

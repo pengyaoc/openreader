@@ -13,8 +13,6 @@ interface Props {
   onOpenConfig: () => void
   theme: 'dark' | 'light'
   onToggleTheme: () => void
-  onAddSource: () => void
-  onEditSource: (sourceId: number) => void
   mobileOpen: boolean
   onCloseMobile: () => void
   onMarkAllRead: (sourceId: number) => void
@@ -41,8 +39,6 @@ export function Sidebar({
   onOpenConfig,
   theme,
   onToggleTheme,
-  onAddSource,
-  onEditSource,
   mobileOpen,
   onCloseMobile,
   onMarkAllRead,
@@ -155,13 +151,6 @@ export function Sidebar({
                         ✓
                       </button>
                     )}
-                    <button
-                      className="source-row__edit"
-                      onClick={() => onEditSource(s.id)}
-                      title="Edit source"
-                    >
-                      ✎
-                    </button>
                   </div>
                 ))}
               </div>
@@ -175,12 +164,8 @@ export function Sidebar({
             {refreshing ? 'Refreshing…' : 'Refresh feeds'}
           </button>
           <div style={{ height: 8 }} />
-          <button className="refresh-btn" onClick={onAddSource}>
-            + Add source
-          </button>
-          <div style={{ height: 8 }} />
           <button className="refresh-btn" onClick={onOpenConfig}>
-            ⚙ Configure
+            ⚙ Settings
           </button>
           <div style={{ height: 8 }} />
           <button className="refresh-btn" onClick={onLogout}>

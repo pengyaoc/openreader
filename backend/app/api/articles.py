@@ -17,13 +17,28 @@ async def llm_status(request: Request) -> JSONResponse:
     return JSONResponse({"enabled": request.app.state.config.llm.enabled})
 
 
+def _parse_int(raw: str | None, default: int, *, minimum: int, maximum: int | None = None) -> int:
+    """Defensive int() for query params — a bare int() cast 500s on
+    ?limit=abc and happily honors ?limit=999999, letting a client force an
+    unbounded scan. Falls back to `default` on anything unparseable rather
+    than erroring, and clamps into [minimum, maximum]."""
+    try:
+        value = int(raw) if raw is not None else default
+    except ValueError:
+        value = default
+    value = max(value, minimum)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
+
+
 async def list_articles(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
     view = request.query_params.get("view", "all")
     source_id = request.query_params.get("source_id")
     folder = request.query_params.get("folder")
-    limit = int(request.query_params.get("limit", "50"))
-    offset = int(request.query_params.get("offset", "0"))
+    limit = _parse_int(request.query_params.get("limit"), 50, minimum=1, maximum=200)
+    offset = _parse_int(request.query_params.get("offset"), 0, minimum=0)
 
     articles = store.list_articles(
         conn,

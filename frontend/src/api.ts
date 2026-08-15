@@ -34,6 +34,17 @@ export interface Article {
   source_title?: string
 }
 
+// Shape of a row from GET /api/articles — deliberately missing
+// content_html/llm_summary_html (see app/store.py's _LIST_COLUMNS): the
+// list view never renders either field, and shipping them made a 50-item
+// page ~570KB of JSON the client immediately discarded. `has_summary`
+// stands in for llm_summary_html so the list can still show a summary
+// indicator without the body. GET /api/articles/:id (`api.article`) still
+// returns the full Article.
+export type ArticleListItem = Omit<Article, 'content_html' | 'llm_summary_html'> & {
+  has_summary: boolean
+}
+
 export type SourceType = 'rss' | 'imap'
 
 export interface Source {
@@ -152,7 +163,7 @@ export const api = {
     if (params.source_id) qs.set('source_id', String(params.source_id))
     if (params.folder) qs.set('folder', params.folder)
     if (params.offset) qs.set('offset', String(params.offset))
-    return apiFetch(`/api/articles?${qs}`).then((r) => json<Article[]>(r))
+    return apiFetch(`/api/articles?${qs}`).then((r) => json<ArticleListItem[]>(r))
   },
 
   article: (id: number) => apiFetch(`/api/articles/${id}`).then((r) => json<Article>(r)),

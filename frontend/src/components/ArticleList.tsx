@@ -1,4 +1,4 @@
-import type { Article } from '../api'
+import type { ArticleListItem } from '../api'
 
 function timeAgo(iso: string | null): string {
   if (!iso) return ''
@@ -14,9 +14,9 @@ function timeAgo(iso: string | null): string {
 }
 
 interface Props {
-  articles: Article[]
+  articles: ArticleListItem[]
   selectedId: number | null
-  onOpen: (article: Article) => void
+  onOpen: (article: ArticleListItem) => void
   hasMore?: boolean
   loadingMore?: boolean
   onLoadMore?: () => void

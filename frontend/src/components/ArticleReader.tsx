@@ -162,25 +162,6 @@ export function ArticleReader({
         </div>
       </div>
 
-      {hasPrev && (
-        <button
-          className="reader-nav reader-nav--prev"
-          onClick={onPrev}
-          title="Previous article (←)"
-        >
-          ‹
-        </button>
-      )}
-      {hasNext && (
-        <button
-          className="reader-nav reader-nav--next"
-          onClick={onNext}
-          title="Next article (→)"
-        >
-          ›
-        </button>
-      )}
-
       <div className="reader-scroll" ref={scrollRef}>
         <article className="reader-article">
           <h1 className="reader-article__title">{article.title}</h1>
@@ -223,6 +204,29 @@ export function ArticleReader({
                 __html: withApiBase(article.content_html || `<p>${article.excerpt}</p>`),
               }}
             />
+          )}
+
+          {(hasPrev || hasNext) && (
+            <div className="reader-footer-nav">
+              {hasPrev && (
+                <button
+                  className="reader-footer-nav__btn reader-footer-nav__btn--prev"
+                  onClick={onPrev}
+                  title="Previous article (←)"
+                >
+                  ‹ Previous article
+                </button>
+              )}
+              {hasNext && (
+                <button
+                  className="reader-footer-nav__btn reader-footer-nav__btn--next"
+                  onClick={onNext}
+                  title="Next article (→)"
+                >
+                  Next article ›
+                </button>
+              )}
+            </div>
           )}
         </article>
       </div>

@@ -24,6 +24,7 @@ from app.connectors.base import NormalizedEntry
 from app.connectors.http_fetch import FetchResult, conditional_get
 from app.connectors.rss import FeedParseError, parse_feed
 from app.ingest.dedup import canonicalize_url, content_hash
+from app.ingest.hydrate import hydrate_pending
 from app.ingest.rules import RawArticle, evaluate_rules
 from app.ingest.textutil import plain_text_excerpt, proxy_image_urls, tighten_newsletter_whitespace
 
@@ -525,6 +526,15 @@ def refresh_all(
 
     reports_by_key: dict[str, dict] = {**rss_reports, **imap_reports}
     reports = [reports_by_key[s.key] for s in to_refresh]
+
+    # Hydrate full text for eligible sources' newly (and not-so-newly)
+    # fetched articles right here, in the refresh, rather than leaving it to
+    # happen lazily and synchronously on the read path — see hydrate.py's
+    # module docstring. Scoped to `to_refresh` (not all `sources`) so a
+    # single-source refresh (?source=key) doesn't also hydrate backlog on
+    # every other source.
+    source_fetch_full_text = {s.key: s.fetch_full_text for s in to_refresh}
+    hydrate_pending(conn, source_fetch_full_text)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {"elapsed_ms": elapsed_ms, "sources": reports}

@@ -1,10 +1,18 @@
-"""Lazy, per-article full-text hydration (design doc Part 2). Triggered by
-GET /api/articles/:id, never by refresh. Fetches the article's own page at
-most once, ever — a stored hydrated_at or hydrate_failed_at short-circuits
-every call after the first, whether it succeeded or not.
+"""Full-text hydration (design doc Part 2).
+
+Two entry points:
+  hydrate_article  — synchronous, one article, backs GET /api/articles/:id's
+                      passive on-open hydration and POST .../hydrate's
+                      explicit pull. Fetches at most once ever — a stored
+                      hydrated_at or hydrate_failed_at short-circuits every
+                      call after the first, whether it succeeded or not.
+  hydrate_pending   — batch, called from refresh_all so most articles are
+                      already hydrated by the time a user opens them,
+                      instead of paying a live ~5s fetch inline on GET.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import sqlite3
 from datetime import UTC, datetime
 from typing import Callable
@@ -18,11 +26,34 @@ from app.ingest.textutil import proxy_image_urls
 _SUBSTANTIAL_LEN = 600
 Fetcher = Callable[[str, float], str]
 
+# Same reasoning as refresh.py's _RSS_FETCH_CONCURRENCY: bounded overlap of
+# per-host network latency for a single-user process, not an unbounded fan-out.
+_HYDRATE_CONCURRENCY = 6
+
+# Cap per refresh so a first refresh against a large backlog (e.g. importing
+# an OPML with years of unread articles) doesn't turn one refresh into an
+# unbounded batch of HTTP fetches. Anything left over gets picked up by the
+# next refresh, or lazily on open same as before this change.
+_HYDRATE_BATCH_LIMIT = 100
+
 
 def _default_fetcher(url: str, timeout: float) -> str:
     resp = httpx.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout, follow_redirects=True)
     resp.raise_for_status()
     return resp.text
+
+
+def fetch_and_extract(url: str, timeout: float, fetcher: Fetcher | None = None) -> str:
+    """Pure network + parsing step, no DB — the part of hydration that's
+    safe to run concurrently across a thread pool. Returns "" (never
+    raises) on any failure, mirroring hydrate_article's existing
+    any-exception-falls-back-to-excerpt behavior."""
+    fetcher = fetcher or _default_fetcher
+    try:
+        page_html = fetcher(url, timeout)
+        return proxy_image_urls(extract_readable(page_html, base_url=url))
+    except Exception:  # noqa: BLE001 — any failure falls back to the excerpt
+        return ""
 
 
 def hydrate_article(
@@ -34,8 +65,6 @@ def hydrate_article(
 ) -> dict:
     """Returns {"content_html": str} — either the existing/hydrated content,
     or "" to signal the caller should fall back to the stored excerpt."""
-    fetcher = fetcher or _default_fetcher
-
     row = conn.execute(
         "SELECT url, content_html, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?",
         (article_id,),
@@ -55,15 +84,7 @@ def hydrate_article(
         return {"content_html": content_html or ""}
 
     now = datetime.now(UTC).isoformat()
-    try:
-        page_html = fetcher(url, timeout)
-        extracted = proxy_image_urls(extract_readable(page_html, base_url=url))
-    except Exception:  # noqa: BLE001 — any failure falls back to the excerpt
-        conn.execute(
-            "UPDATE articles SET hydrate_failed_at = ? WHERE id = ?", (now, article_id)
-        )
-        conn.commit()
-        return {"content_html": ""}
+    extracted = fetch_and_extract(url, timeout, fetcher)
 
     if not extracted:
         conn.execute(
@@ -78,3 +99,76 @@ def hydrate_article(
     )
     conn.commit()
     return {"content_html": extracted}
+
+
+def hydrate_pending(
+    conn: sqlite3.Connection,
+    source_fetch_full_text: dict[str, bool],
+    limit: int = _HYDRATE_BATCH_LIMIT,
+    timeout: float = 5.0,
+    fetcher: Fetcher | None = None,
+) -> int:
+    """Batch counterpart to hydrate_article, called at the end of a refresh
+    so article bodies are usually already in SQLite by the time a user
+    opens them — GET /api/articles/:id's hydrate_article call then just
+    short-circuits on hydrated_at (an indexed row read) instead of doing a
+    live fetch inline on the read path.
+
+    source_fetch_full_text maps source key -> whether that source wants
+    full-text hydration (same fetch_full_text resolution GET .../:id uses:
+    per-source config falling back to config.defaults.fetch_full_text).
+    Sources not in the map, or mapped to False, are skipped entirely.
+
+    Returns the number of articles successfully hydrated (failures and
+    skips aren't counted).
+    """
+    eligible_keys = [k for k, v in source_fetch_full_text.items() if v]
+    if not eligible_keys:
+        return 0
+
+    placeholders = ", ".join("?" for _ in eligible_keys)
+    rows = conn.execute(
+        f"""
+        SELECT a.id, a.url
+        FROM articles a
+        JOIN sources s ON s.id = a.source_id
+        WHERE a.origin = 'feed'
+          AND a.hydrated_at IS NULL
+          AND a.hydrate_failed_at IS NULL
+          AND (a.content_html IS NULL OR length(a.content_html) < ?)
+          AND s.key IN ({placeholders})
+        ORDER BY a.published_at DESC
+        LIMIT ?
+        """,
+        [_SUBSTANTIAL_LEN, *eligible_keys, limit],
+    ).fetchall()
+    if not rows:
+        return 0
+
+    # Network+parse fan-out happens off the calling connection entirely —
+    # fetch_and_extract is pure, so results are collected here and written
+    # back on the calling thread in one pass, avoiding any cross-thread
+    # sqlite3 connection use.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_HYDRATE_CONCURRENCY) as pool:
+        futures = {
+            article_id: pool.submit(fetch_and_extract, url, timeout, fetcher)
+            for article_id, url in rows
+            if url
+        }
+        results = {article_id: fut.result() for article_id, fut in futures.items()}
+
+    now = datetime.now(UTC).isoformat()
+    hydrated = 0
+    for article_id, extracted in results.items():
+        if extracted:
+            conn.execute(
+                "UPDATE articles SET content_html = ?, hydrated_at = ? WHERE id = ?",
+                (extracted, now, article_id),
+            )
+            hydrated += 1
+        else:
+            conn.execute(
+                "UPDATE articles SET hydrate_failed_at = ? WHERE id = ?", (now, article_id)
+            )
+    conn.commit()
+    return hydrated

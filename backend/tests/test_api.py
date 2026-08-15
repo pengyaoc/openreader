@@ -100,6 +100,32 @@ def test_list_articles_returns_the_seeded_article(client):
     assert data[0]["is_read"] is False
 
 
+def test_list_articles_omits_body_fields_but_flags_has_summary(client):
+    # The list view only ever renders title/excerpt/meta (see
+    # ArticleList.tsx) — content_html and llm_summary_html are dropped from
+    # this response (app/store.py's _LIST_COLUMNS) so a page of articles
+    # doesn't ship tens of KB of unused HTML per row. has_summary stands in
+    # for llm_summary_html so the UI can still show a summary indicator.
+    resp = client.get("/api/articles")
+    row = resp.json()[0]
+    assert "content_html" not in row
+    assert "llm_summary_html" not in row
+    assert row["has_summary"] is False
+
+    article_id = row["id"]
+    detail = client.get(f"/api/articles/{article_id}").json()
+    assert detail["content_html"] == "<p>Body</p>"  # detail endpoint keeps the full body
+
+
+def test_list_articles_limit_and_offset_are_defensively_parsed(client):
+    # A bare int() cast on these query params previously 500'd on
+    # non-numeric input and honored any limit, however large.
+    resp = client.get("/api/articles?limit=not-a-number&offset=-5")
+    assert resp.status_code == 200
+    resp = client.get("/api/articles?limit=999999")
+    assert resp.status_code == 200
+
+
 def test_get_article_detail(client):
     resp = client.get("/api/articles")
     article_id = resp.json()[0]["id"]

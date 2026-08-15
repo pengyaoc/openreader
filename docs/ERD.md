@@ -72,7 +72,9 @@ backend/app/
 │   ├── textutil.py            # excerpt extraction, sanitize, image-proxy
 │   │                          # rewrite, newsletter-HTML whitespace tightening
 │   ├── extract.py             # readability heuristic + relative->absolute URLs
-│   ├── hydrate.py              # lazy per-article full-text fetch (once, ever)
+│   ├── hydrate.py              # per-article full-text fetch (once, ever);
+│   │                            # hydrate_article (on-open) + hydrate_pending
+│   │                            # (batch, called from refresh)
 │   └── refresh.py               # orchestrates one sync refresh pass;
 │                                 # also reconcile_read_state() (§5)
 ├── summarize.py         # `claude` CLI subprocess wrapper for on-demand
@@ -180,7 +182,7 @@ cookie required) otherwise, matching this app's local/LAN default.
 | `PUT /api/sources/:id` | Edit a source's fields in place; `key`/`type` locked to the existing entry regardless of what's sent (§5) | No |
 | `DELETE /api/sources/:id` | Remove from config only — DB rows/articles untouched, same behavior as a raw-YAML removal (§5) | No |
 | `POST /api/sources/:id/mark-all-read` | Bulk-mark every unread article on one source | No |
-| `GET /api/articles` | List articles (`view=all\|unread\|starred`, `source_id`, `folder`, `limit`=50 default, `offset`) | No |
+| `GET /api/articles` | List articles (`view=all\|unread\|starred`, `source_id`, `folder`, `limit`=50 default max 200, `offset`); rows omit `content_html`/`llm_summary_html` (never rendered by the list view) in favor of a computed `has_summary` bool — `GET /api/articles/:id` still returns the full row | No |
 | `GET /api/articles/:id` | Article detail; triggers lazy full-text hydration if applicable | One-time per article, but off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests |
 | `POST /api/articles/mark-all-read` | Bulk-mark every unread article across every source (registered ahead of `:id` in the route table, or it'd be swallowed by that pattern) | No |
 | `POST /api/articles/:id/read` | Mark read (idempotent, one-directional) | No |
@@ -233,11 +235,18 @@ refresh — fewer logins, indistinguishable from a normal mail client. As of
 those sources, not one per source — see the "one shared SEARCH/FETCH pass"
 entry below. See docs/WORKLOG.md, 2026-08-13 and 2026-08-14.
 
-**Lazy, per-article full-text extraction, not a background hydration
-pass.** Bandwidth and CPU are spent only on the ~10% of articles actually
-opened. `hydrated_at`/`hydrate_failed_at` make it a strict once-ever
-operation with a hard 5s timeout that falls back to the feed's own
-summary rather than erroring.
+**Full-text extraction is once-ever, and (as of 2026-08-14) mostly
+happens during refresh, not on open.** `hydrated_at`/`hydrate_failed_at`
+make it a strict once-ever operation with a hard 5s timeout that falls
+back to the feed's own summary rather than erroring. Originally purely
+lazy (fetched only on `GET /api/articles/:id`, paying a live ~5s cost on
+first open); `refresh_all` now also calls `hydrate_pending` at the end of
+each refresh, hydrating up to 100 eligible articles per source-scoped
+refresh across a bounded 6-way thread pool, so most opens hit an
+already-hydrated row instead of fetching live. `GET /api/articles/:id`
+keeps its own on-open call as the fallback for anything `hydrate_pending`
+hasn't gotten to yet (batch limit, or a source not covered by the
+triggering refresh). See docs/WORKLOG.md, 2026-08-14 (cont.).
 
 **Image proxy (`/api/img`) is mandatory, not optional.** Several real
 feeds (dapenti.com/xilei, discovered mid-build) hotlink-protect their
@@ -483,7 +492,7 @@ reconcile them — it won't.
 **Newsletter sources get a query *builder*, not a raw text field.** The
 whole point of this tool is not asking the user to hand-write
 `from:x subject:"y" newer_than:Nd` any more than they'd hand-edit YAML —
-`SourceModal.tsx`'s `decomposeQuery()`/`composeQuery()` mirror
+`SourceForm.tsx`'s `decomposeQuery()`/`composeQuery()` mirror
 `connectors/imap.py`'s `parse_query()` regexes closely enough that an
 existing source's query round-trips through the friendly from/subject/
 window fields on edit, not just compose cleanly on create.

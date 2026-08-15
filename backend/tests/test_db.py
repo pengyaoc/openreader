@@ -100,3 +100,29 @@ def test_db_journal_mode_is_wal(tmp_path):
     init_schema(conn)
     mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode.lower() == "wal"
+
+
+def test_connect_sets_read_performance_pragmas(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
+    assert conn.execute("PRAGMA temp_store").fetchone()[0] == 2  # MEMORY
+
+
+def test_init_schema_creates_read_path_indexes(tmp_path):
+    # These back the article-list and sidebar unread-count queries
+    # (app/store.py) — a missing one silently degrades to a full table scan
+    # rather than erroring, so assert their presence explicitly.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    indexes = {
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+    }
+    assert {
+        "idx_articles_unread",
+        "idx_articles_source_pub",
+        "idx_articles_pub",
+        "idx_articles_starred",
+        "idx_articles_src_unread",
+        "idx_sources_folder",
+    } <= indexes

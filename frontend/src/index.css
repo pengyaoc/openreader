@@ -341,11 +341,11 @@ a {
   min-width: 0;
 }
 
-.source-row__mark-read,
-.source-row__edit {
+.source-row__mark-read {
   flex-shrink: 0;
   width: 24px;
   height: 24px;
+  margin-right: 8px;
   border: none;
   background: none;
   color: var(--ink-faint);
@@ -358,16 +358,7 @@ a {
   transition: all 0.12s ease;
 }
 
-/* Edit is always rendered (unlike mark-read, conditional on unread_count),
-   so it — not mark-read — carries the trailing margin before the row's
-   right edge, keeping spacing consistent whether or not mark-read shows. */
-.source-row__edit {
-  margin-right: 8px;
-  font-size: 11px;
-}
-
-.source-row__mark-read:hover,
-.source-row__edit:hover {
+.source-row__mark-read:hover {
   color: var(--amber);
   background: var(--bg-hover);
 }
@@ -480,6 +471,7 @@ a {
 
 .article-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -583,7 +575,7 @@ a {
 }
 
 .article-row__excerpt {
-  font-size: 13.5px;
+  font-size: 15.5px;
   line-height: 1.55;
   color: var(--ink-faint);
   margin: 0;
@@ -660,35 +652,35 @@ kbd {
   animation: reader-in 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.reader-nav {
-  position: fixed;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 44px;
-  height: 64px;
-  border: 1px solid var(--line-strong);
-  background: var(--bg-raised);
-  color: var(--ink-dim);
-  font-size: 26px;
-  line-height: 1;
+.reader-footer-nav {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 51;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 48px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.reader-footer-nav__btn {
+  flex: 1;
+  max-width: 300px;
+  padding: 14px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  color: var(--ink);
+  font-size: 14.5px;
+  font-weight: 500;
   transition: all 0.15s ease;
   box-shadow: var(--shadow-lift);
 }
-.reader-nav:hover {
+.reader-footer-nav__btn:hover {
   color: var(--amber);
   border-color: var(--amber-dim);
 }
-.reader-nav--prev {
-  left: 18px;
-  border-radius: var(--radius);
-}
-.reader-nav--next {
-  right: 18px;
-  border-radius: var(--radius);
+.reader-footer-nav__btn--next {
+  margin-left: auto;
+  text-align: right;
 }
 
 @keyframes reader-in {
@@ -751,6 +743,7 @@ kbd {
 
 .reader-scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -1048,6 +1041,12 @@ kbd {
   justify-content: space-between;
 }
 
+.config-drawer__header-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .config-drawer__title {
   font-family: var(--font-display);
   font-weight: 700;
@@ -1082,8 +1081,119 @@ kbd {
   tab-size: 2;
 }
 
-.add-source-drawer {
+/* Wraps SourceForm's fields so they scroll independently of the fixed
+   config-drawer__footer below them (that footer holds Cancel/Save, which
+   must stay reachable without scrolling to the bottom of a long rule
+   list) — same role .feed-picker__list plays for the feed list. */
+.settings-pane {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+}
+
+/* ------------------------------ settings drawer ---------------------------- */
+
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-tabs__tab {
+  font-family: var(--font-ui);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-faint);
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.12s ease;
+}
+
+.settings-tabs__tab:hover {
+  color: var(--ink);
+}
+
+.settings-tabs__tab.active {
+  color: var(--ink);
+}
+
+.settings-tabs__tab.active::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--amber);
+  border-radius: 2px 2px 0 0;
+}
+
+.feed-picker {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.feed-picker__toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.feed-picker__toolbar .field__input {
+  flex: 1;
+}
+
+.feed-picker__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 10px;
+}
+
+.feed-picker__row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 20px;
+  border: none;
+  background: none;
+  color: var(--ink-dim);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.feed-picker__row:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.feed-picker__title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feed-picker__badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  background: var(--bg-hover);
+  padding: 2px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
 }
 
 .add-source-form {
@@ -1363,35 +1473,13 @@ kbd {
     font-size: 17px;
   }
 
-  /* Edge nav buttons on narrow screens: at this width the reader-article's
-     side padding is thin enough that a solid button card sits on top of
-     body text. Ghost them — no fill, no border, no shadow, just a faint
-     chevron — so they read as a discoverable affordance rather than a
-     panel blocking content. Also inset further to clear iOS's left-edge
-     back-swipe gesture zone. */
-  .reader-nav {
-    width: 32px;
-    height: 44px;
-    font-size: 20px;
-    background: transparent;
-    border: none;
-    box-shadow: none;
-    color: var(--ink-faint);
-    opacity: 0.55;
-  }
-  .reader-nav:active {
-    opacity: 1;
-    color: var(--amber);
-  }
-  .reader-nav--prev {
-    left: 4px;
-  }
-  .reader-nav--next {
-    right: 4px;
+  .reader-footer-nav__btn {
+    max-width: none;
+    font-size: 14px;
+    padding: 12px 14px;
   }
 
-  .config-drawer,
-  .add-source-drawer {
+  .config-drawer {
     width: 100vw;
     max-width: none;
   }

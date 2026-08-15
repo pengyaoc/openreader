@@ -1685,3 +1685,117 @@ Because the pulled text is written to `content_html` synchronously and
 patched into the query cache immediately, a later Summarize click reads
 the already-replaced full article for free — no special-casing needed to
 make summarization prefer full text over the truncated excerpt.
+
+## 2026-08-14 (cont.) — Settings drawer consolidation, list payload trim, batch hydration, reader footer nav
+
+**Settings drawer**: merged the sidebar's separate "+ Add source" button,
+per-row ✎ edit button, and "⚙ Configure" (raw YAML) panel into one entry
+point — a single "⚙ Settings" button opening `SettingsDrawer.tsx`, the
+only overlay/drawer in the app now. Two independent overlays used to
+compound their backdrops and slide-in animations when a source modal
+opened on top of the config panel, which read as a glitch (a second bar
+sliding in over the first, background going darker again). `SourceModal.tsx`
+renamed to `SourceForm.tsx` (`onClose` → `onCancel`) and `ConfigEditor.tsx`
+renamed to `YamlConfigPanel.tsx`, both stripped of their own overlay chrome
+to render as panes inside `SettingsDrawer`'s two tabs: **Feeds** (search-
+and-pick list, backed by `SourceForm` for add/edit) and **Advanced** (the
+raw `feeds.yaml` editor, kept as an escape hatch for config keys — `llm`
+settings, `defaults` — the structured form doesn't cover). `Sidebar.tsx`
+lost `onAddSource`/`onEditSource` entirely; `App.tsx`'s `sourceModal`/
+`configOpen` state collapsed into one `settings: 'list' | 'add' | null`
+(editing a specific source is `SettingsDrawer`'s own internal pane state,
+nothing to track above it).
+
+**List payload trim**: `GET /api/articles` was shipping every column
+(including `content_html`/`llm_summary_html`, tens of KB each) on every
+row, even though the list view only ever renders title/excerpt/meta — a
+50-item page was ~570KB of JSON the client immediately discarded.
+`store.py` gained `_LIST_COLUMNS` (all of `_ARTICLE_COLUMNS` minus those
+two) for `list_articles`, plus a computed `has_summary` boolean so the
+list can still show a summary indicator without the body.
+`GET /api/articles/:id` (`get_article`) is untouched — still the full
+row. Frontend: new `ArticleListItem` type (`api.ts`) drives `ArticleList`/
+`App.tsx`; `App.tsx`'s cache-patch helper (`patchArticleCaches`) gained
+`toListPatch` to translate an `Article` patch (e.g. a freshly generated
+`llm_summary_html`) into the list cache's `has_summary` flag instead of
+writing the (now absent) field. The reader's placeholder-while-loading
+data (built from the list item on prev/next nav) renders blank body
+fields for a beat now — covered by the existing loading skeleton via
+`openArticleQuery.isLoading`, not a regression in practice since the real
+query result swaps in immediately after. `openArticleQuery` also gained
+`staleTime: Infinity`/`gcTime: 30min` — an article body never changes
+after hydration (mutations patch the cache directly), so there was never
+a reason to refetch it on window refocus or evict it quickly.
+
+**Sidebar unread counts**: `list_sources`/`get_source` computed
+`unread_count` via `LEFT JOIN articles ... COUNT(...) FILTER (...) GROUP
+BY s.id` — a full scan of every article for every source, on every
+sidebar load. Replaced with a pre-aggregated subquery
+(`GROUP BY source_id` once, joined back to `sources`), which the new
+`idx_articles_src_unread (source_id, is_read)` index turns into an
+index-only scan.
+
+**Query param hardening**: `list_articles`' `?limit=`/`?offset=` did a
+bare `int(...)` — `?limit=abc` 500'd, and `?limit=999999` was honored
+outright, letting a client force an unbounded scan. New `_parse_int`
+helper (`articles.py`) falls back to the default on anything unparseable
+and clamps into `[minimum, maximum]` (`limit` capped at 200).
+
+**Batch full-text hydration**: previously, full-text extraction only ever
+happened lazily on `GET /api/articles/:id` — the first open of any article
+paid a live ~5s fetch inline on the read path. `hydrate.py` gained
+`hydrate_pending`, called at the end of `refresh_all` (`refresh.py`), which
+fetches+extracts up to 100 eligible not-yet-hydrated articles per refresh
+across a bounded 6-way thread pool (`fetch_and_extract`, the pure
+network+parse half of `hydrate_article`, split out so it's safe to run off
+the DB connection). `hydrate_article` now just calls the same
+`fetch_and_extract`, so the on-open path and the batch path share one
+implementation. Scoped to `to_refresh` (not every configured source) so a
+single-source refresh (`?source=key`) doesn't also hydrate backlog on
+every other source; sources not opted into `fetch_full_text` are skipped
+entirely. Most articles are now already hydrated by the time a user opens
+them — `GET /api/articles/:id` short-circuits on the indexed
+`hydrated_at` read instead of fetching live.
+
+**DB pragmas + indexes**: `connect()` now sets `foreign_keys=ON` (was
+never enforced before), `busy_timeout=5000` (retry internally instead of
+raising "database is locked" when a background hydrate/refresh thread
+briefly holds the write lock), `synchronous=NORMAL` (safe under WAL,
+cheaper than FULL), and `temp_store=MEMORY`/`cache_size=-16000` (keeps
+ORDER BY temp b-trees and a larger page cache in memory for this small,
+frequently-read DB). New indexes: `idx_articles_unread` gained a trailing
+`, id DESC` to match `list_articles`' tiebreaker (ties on `published_at`
+aren't rare across feeds/newsletters sharing a timestamp) so SQLite can
+satisfy the sort from the index instead of a temp b-tree; `idx_articles_pub`
+backs the unfiltered "all" view; `idx_articles_starred` backs the
+previously-unindexed starred view; `idx_sources_folder` backs the folder
+filter. Turning `foreign_keys` on surfaced a real ordering bug in
+`init_schema()`: it dropped the `jobs` table before dropping
+`articles.job_id` (the column that references it), which now fails with
+`IntegrityError: FOREIGN KEY constraint failed` instead of silently
+succeeding as it did with enforcement off. Fixed by dropping the
+referencing column first.
+
+**Reader footer nav**: replaced the always-visible floating `‹`/`›` side
+buttons in the fullscreen reader with a labeled "‹ Previous article" /
+"Next article ›" pair inline at the end of the article body — feedback
+was that the side arrows were a distraction while reading and only need
+to be seen once you've actually finished the article. Pure DOM
+placement (`ArticleReader.tsx`), no scroll-position JS: the buttons are
+only reachable by scrolling to the end, same as any other footer content.
+Keyboard ←/→ navigation is unchanged.
+
+**iOS scroll indicator missing**: `.reader-scroll`, `.article-list`, and
+`.feed-picker__list` were each a flex child (`flex: 1`) with
+`overflow-y: auto` but no `min-height: 0`. Desktop Chrome (Blink) is
+lenient and lets the item shrink to scroll anyway; iOS Safari/Chrome
+(WebKit) is spec-strict and won't constrain the item without it —
+scrolling itself still worked, but WebKit didn't draw its native overlay
+scroll indicator on the (incorrectly-sized) element either. This exact
+bug, and the same fix, already existed in this file for `.settings-pane`
+(see 2026-08-10's entry above) and was missed in these three spots.
+`.article-row__excerpt` also bumped from 13.5px to 15.5px for readability.
+
+221 backend tests passing (up from 212 — new coverage for
+`hydrate_pending`, the query-param clamping, and the `init_schema` drop
+ordering).

@@ -4,7 +4,7 @@ happens once, on demand, with a summary fallback on any failure.
 from pathlib import Path
 
 from app.db import connect, init_schema
-from app.ingest.hydrate import hydrate_article
+from app.ingest.hydrate import hydrate_article, hydrate_pending
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -145,3 +145,102 @@ def test_hydrate_does_not_retry_after_a_recorded_failure(tmp_path):
     hydrate_article(conn, article_id, fetch_full_text=True, fetcher=failing_fetcher)
 
     assert len(calls) == 1
+
+
+# ---------------------------- hydrate_pending -------------------------------
+# Batch counterpart, called from refresh_all so most articles are already
+# hydrated by the time GET /api/articles/:id's passive hydrate_article call
+# runs — see hydrate.py's module docstring.
+
+
+def seed_source(conn, key, url="https://x"):
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES (?, 'rss', ?, 'F', ?)",
+        (key, key, url),
+    )
+    conn.commit()
+    return conn.execute("SELECT id FROM sources WHERE key = ?", (key,)).fetchone()[0]
+
+
+def seed_pending_article(conn, source_id, guid, *, origin="feed", url="https://example.com/post"):
+    conn.execute(
+        """INSERT INTO articles (source_id, guid, url, title, excerpt, content_html, origin)
+           VALUES (?, ?, ?, 'Title', 'short excerpt', '', ?)""",
+        (source_id, guid, url, origin),
+    )
+    conn.commit()
+    return conn.execute("SELECT id FROM articles WHERE guid = ?", (guid,)).fetchone()[0]
+
+
+def test_hydrate_pending_hydrates_eligible_sources_only(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    eligible = seed_source(conn, "eligible")
+    ineligible = seed_source(conn, "ineligible")
+    a1 = seed_pending_article(conn, eligible, "g1")
+    a2 = seed_pending_article(conn, ineligible, "g2")
+    page_html = (FIXTURES / "article_page.html").read_text()
+
+    hydrated = hydrate_pending(
+        conn,
+        {"eligible": True, "ineligible": False},
+        fetcher=lambda url, timeout: page_html,
+    )
+
+    assert hydrated == 1
+    row1 = conn.execute("SELECT content_html, hydrated_at FROM articles WHERE id = ?", (a1,)).fetchone()
+    assert "first real paragraph" in row1[0]
+    assert row1[1] is not None
+    row2 = conn.execute(
+        "SELECT content_html, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (a2,)
+    ).fetchone()
+    assert row2 == ("", None, None)  # untouched — source not fetch_full_text
+
+
+def test_hydrate_pending_records_failures_and_is_idempotent(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source_id = seed_source(conn, "s1")
+    article_id = seed_pending_article(conn, source_id, "g1")
+    calls = []
+
+    def failing_fetcher(url, timeout):
+        calls.append(url)
+        raise ConnectionError("timed out")
+
+    hydrated = hydrate_pending(conn, {"s1": True}, fetcher=failing_fetcher)
+    assert hydrated == 0
+    row = conn.execute("SELECT hydrate_failed_at FROM articles WHERE id = ?", (article_id,)).fetchone()
+    assert row[0] is not None
+
+    # A second call must not re-fetch already-resolved (success or failure) articles.
+    hydrate_pending(conn, {"s1": True}, fetcher=failing_fetcher)
+    assert len(calls) == 1
+
+
+def test_hydrate_pending_skips_non_feed_origin_and_already_hydrated(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source_id = seed_source(conn, "s1")
+    seed_pending_article(conn, source_id, "email-1", origin="email")
+    calls = []
+
+    def fetcher(url, timeout):
+        calls.append(url)
+        return "<html></html>"
+
+    hydrated = hydrate_pending(conn, {"s1": True}, fetcher=fetcher)
+
+    assert hydrated == 0
+    assert len(calls) == 0  # email-origin articles are never hydrated
+
+
+def test_hydrate_pending_no_eligible_sources_is_a_cheap_noop(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source_id = seed_source(conn, "s1")
+    seed_pending_article(conn, source_id, "g1")
+
+    hydrated = hydrate_pending(conn, {"s1": False}, fetcher=lambda url, timeout: "<html></html>")
+
+    assert hydrated == 0

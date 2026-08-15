@@ -56,8 +56,20 @@ CREATE TABLE IF NOT EXISTS articles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_articles_content_hash ON articles(content_hash);
-CREATE INDEX IF NOT EXISTS idx_articles_unread ON articles(is_read, published_at DESC);
+-- Trailing `, id DESC` matches list_articles' ORDER BY tiebreaker (ties on
+-- published_at aren't rare — many feeds/newsletters share a timestamp) so
+-- SQLite can satisfy the sort straight from the index instead of falling
+-- back to a temp b-tree for the tiebreak.
+CREATE INDEX IF NOT EXISTS idx_articles_unread ON articles(is_read, published_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_articles_source_pub ON articles(source_id, published_at DESC);
+-- Backs the "all" view's ORDER BY published_at DESC, id DESC with no filter.
+CREATE INDEX IF NOT EXISTS idx_articles_pub ON articles(published_at DESC, id DESC);
+-- Backs the "starred" view, previously an unindexed full scan + sort.
+CREATE INDEX IF NOT EXISTS idx_articles_starred ON articles(is_starred, published_at DESC, id DESC);
+-- Backs list_sources'/get_source's per-source unread-count subquery.
+CREATE INDEX IF NOT EXISTS idx_articles_src_unread ON articles(source_id, is_read);
+-- Backs the folder filter in list_articles.
+CREATE INDEX IF NOT EXISTS idx_sources_folder ON sources(folder);
 """
 
 
@@ -65,6 +77,17 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # busy_timeout: retry internally instead of raising "database is locked"
+    # when a background hydrate/refresh thread holds the write lock briefly.
+    # synchronous=NORMAL: safe under WAL (only risks losing the last commit
+    # on an OS crash, not corruption) and meaningfully cheaper than FULL.
+    # temp_store/cache_size: keep the ORDER BY temp b-trees that do still
+    # happen (e.g. folder-filtered queries) in memory rather than on disk,
+    # with a larger page cache for this small, frequently-read DB.
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    conn.execute("PRAGMA cache_size=-16000")
     return conn
 
 
@@ -78,11 +101,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # before dropping, so this is a clean removal, not a lossy one. Both
     # idempotent: DROP TABLE IF EXISTS is naturally so, and the ADD COLUMN
     # helper's sibling below just catches "already gone" instead of
-    # "already there".
-    conn.execute("DROP TABLE IF EXISTS jobs")
-    conn.commit()
+    # "already there". articles.job_id must be dropped first — with
+    # foreign_keys=ON (see connect()), SQLite refuses to drop a table that a
+    # surviving column still references.
     _drop_column_if_present(conn, "articles", "job_id")
     _drop_column_if_present(conn, "articles", "citations_json")
+    conn.execute("DROP TABLE IF EXISTS jobs")
+    conn.commit()
 
 
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:

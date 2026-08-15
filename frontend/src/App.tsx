@@ -6,13 +6,19 @@ import {
   useQueryClient,
   type QueryClient,
 } from '@tanstack/react-query'
-import { api, UnauthorizedError, type Article, type RefreshReport, type Source } from './api'
+import {
+  api,
+  UnauthorizedError,
+  type Article,
+  type ArticleListItem,
+  type RefreshReport,
+  type Source,
+} from './api'
 import type { ViewSelection } from './types'
 import { Sidebar } from './components/Sidebar'
 import { ArticleList } from './components/ArticleList'
 import { ArticleReader } from './components/ArticleReader'
-import { ConfigEditor } from './components/ConfigEditor'
-import { SourceModal } from './components/SourceModal'
+import { SettingsDrawer } from './components/SettingsDrawer'
 import { RefreshToast } from './components/RefreshToast'
 import { LoginPage } from './components/LoginPage'
 
@@ -28,14 +34,28 @@ const VIEW_TITLES: Record<string, string> = {
 // with no way to see anything past it.
 const ARTICLES_PAGE_SIZE = 50
 
-type ArticlesPages = { pages: Article[][]; pageParams: number[] }
+type ArticlesPages = { pages: ArticleListItem[][]; pageParams: number[] }
+
+// Article detail fields the list cache doesn't carry (see api.ts's
+// ArticleListItem) — dropped from a list-cache patch, with llm_summary_html
+// collapsed to the has_summary flag the list *does* carry.
+function toListPatch(patch: Partial<Article>): Partial<ArticleListItem> {
+  const { content_html: _content_html, llm_summary_html, ...rest } = patch
+  const listPatch: Partial<ArticleListItem> = rest
+  if (llm_summary_html !== undefined) listPatch.has_summary = llm_summary_html !== null
+  return listPatch
+}
 
 // Patch cached article data in place rather than invalidating — marking an
 // article read should grey it out where it sits, not yank it out of the
 // "Unread" list or refetch/reflow the whole page underneath the reader.
 function patchArticleCaches(qc: QueryClient, id: number, patch: Partial<Article>) {
+  const listPatch = toListPatch(patch)
   qc.setQueriesData<ArticlesPages>({ queryKey: ['articles'] }, (old) =>
-    old && { ...old, pages: old.pages.map((page) => page.map((a) => (a.id === id ? { ...a, ...patch } : a))) },
+    old && {
+      ...old,
+      pages: old.pages.map((page) => page.map((a) => (a.id === id ? { ...a, ...listPatch } : a))),
+    },
   )
   qc.setQueryData<Article>(['article', id], (prev) => (prev ? { ...prev, ...patch } : prev))
 }
@@ -116,9 +136,11 @@ export default function App() {
     return readStoredViewState().articleId
   })
   const [cursorId, setCursorId] = useState<number | null>(null)
-  const [configOpen, setConfigOpen] = useState(false)
-  // 'closed' | 'add' | <source id being edited>
-  const [sourceModal, setSourceModal] = useState<'closed' | 'add' | number>('closed')
+  // null = closed. 'list' | 'add' pick which pane the Settings drawer opens
+  // on — editing a specific feed happens entirely inside the drawer itself
+  // (SettingsDrawer's own pane state), so there's nothing to track here for
+  // that case.
+  const [settings, setSettings] = useState<'list' | 'add' | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [refreshReport, setRefreshReport] = useState<RefreshReport | null>(null)
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -180,6 +202,11 @@ export default function App() {
     queryKey: ['article', openArticleId],
     queryFn: () => api.article(openArticleId!),
     enabled: openArticleId !== null,
+    // An article body never changes after hydration (read/star mutations
+    // patch the cache in place — see patchArticleCaches), so once fetched
+    // there's no reason to ever refetch or evict it just from time passing.
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
   })
 
   const refreshMutation = useMutation({
@@ -192,7 +219,7 @@ export default function App() {
   })
 
   const markReadMutation = useMutation({
-    mutationFn: (article: Article) => api.markRead(article.id),
+    mutationFn: (article: ArticleListItem) => api.markRead(article.id),
     onSuccess: (_data, article) => {
       patchArticleCaches(qc, article.id, { is_read: true })
       adjustSourceUnread(qc, article.source_id, -1)
@@ -200,7 +227,7 @@ export default function App() {
   })
 
   const toggleReadMutation = useMutation({
-    mutationFn: (article: Article) => api.toggleRead(article.id),
+    mutationFn: (article: ArticleListItem) => api.toggleRead(article.id),
     onSuccess: (data, article) => {
       patchArticleCaches(qc, article.id, { is_read: data.is_read })
       adjustSourceUnread(qc, article.source_id, data.is_read ? -1 : 1)
@@ -280,7 +307,7 @@ export default function App() {
   })
 
   const openArticle = useCallback(
-    (article: Article) => {
+    (article: ArticleListItem) => {
       setOpenArticleId(article.id)
       setCursorId(article.id)
       if (!article.is_read) markReadMutation.mutate(article)
@@ -295,11 +322,20 @@ export default function App() {
   // openArticleQuery.data is undefined for a beat whenever openArticleId
   // changes (React Query resets it while the new query loads) — without a
   // fallback, ArticleReader would unmount and flash the list underneath on
-  // every prev/next navigation. The list already has this article cached
-  // (that's how we got here), so use it as an instant placeholder; the
-  // query result (with lazily-hydrated full text) swaps in once it lands.
-  const openArticleDisplayData =
-    openArticleQuery.data ?? articles.find((a) => a.id === openArticleId)
+  // every prev/next navigation. The list item (ArticleListItem) no longer
+  // carries content_html/llm_summary_html (see api.ts), so the placeholder
+  // built from it renders blank body fields; ArticleReader's `loading` prop
+  // (driven by openArticleQuery.isLoading below) covers that gap with its
+  // skeleton rather than flashing empty content. The query result swaps in
+  // once it lands.
+  const openArticleListItem = articles.find((a) => a.id === openArticleId)
+  const openArticleDisplayData: Article | undefined =
+    openArticleQuery.data ??
+    (openArticleListItem && {
+      ...openArticleListItem,
+      content_html: '',
+      llm_summary_html: null,
+    })
 
   const openArticleIndex = articles.findIndex((a) => a.id === openArticleId)
   const hasPrev = openArticleIndex > 0
@@ -375,11 +411,9 @@ export default function App() {
         totalStarred={totalStarred}
         onRefresh={() => refreshMutation.mutate()}
         refreshing={refreshMutation.isPending}
-        onOpenConfig={() => setConfigOpen(true)}
+        onOpenConfig={() => setSettings('list')}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-        onAddSource={() => setSourceModal('add')}
-        onEditSource={(id) => setSourceModal(id)}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
         onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
@@ -434,20 +468,11 @@ export default function App() {
         />
       )}
 
-      {configOpen && (
-        <ConfigEditor
-          onClose={() => setConfigOpen(false)}
-          onSaved={() => {
-            qc.invalidateQueries({ queryKey: ['sources'] })
-            qc.invalidateQueries({ queryKey: ['articles'] })
-          }}
-        />
-      )}
-
-      {sourceModal !== 'closed' && (
-        <SourceModal
-          onClose={() => setSourceModal('closed')}
-          editingSourceId={typeof sourceModal === 'number' ? sourceModal : undefined}
+      {settings !== null && (
+        <SettingsDrawer
+          sources={sourcesQuery.data ?? []}
+          onClose={() => setSettings(null)}
+          initialPane={settings === 'add' ? { kind: 'add' } : { kind: 'list' }}
           onSaved={() => {
             qc.invalidateQueries({ queryKey: ['sources'] })
             qc.invalidateQueries({ queryKey: ['articles'] })

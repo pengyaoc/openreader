@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 import { api, type Rule, type RuleAction, type RuleField, type SourceFields } from '../api'
 
 interface Props {
-  onClose: () => void
+  /** Back to the Settings drawer's feed list — not a close, since this form
+   * now renders as a pane inside SettingsDrawer rather than its own overlay. */
+  onCancel: () => void
   onSaved: () => void
   /** undefined = add mode. A source id = edit mode; fields are fetched
    * and pre-filled from GET /api/sources/:id on mount. */
@@ -45,7 +47,7 @@ function composeQuery(from: string, subject: string, newerThanDays: string): str
 
 const FIELD_OPTIONS: RuleField[] = ['title', 'summary', 'content', 'author', 'url', 'any']
 
-export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
+export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
   const isEditing = editingSourceId !== undefined
 
   const [sourceType, setSourceType] = useState<'rss' | 'imap'>('rss')
@@ -137,7 +139,7 @@ export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
         await api.addSource({ key, ...buildFields() })
       }
       onSaved()
-      onClose()
+      onCancel()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -155,7 +157,7 @@ export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
     try {
       await api.removeSource(editingSourceId!)
       onSaved()
-      onClose()
+      onCancel()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setSaving(false)
@@ -164,15 +166,8 @@ export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
   }
 
   return (
-    <div className="config-overlay" onClick={onClose}>
-      <div className="config-drawer add-source-drawer" onClick={(e) => e.stopPropagation()}>
-        <div className="config-drawer__header">
-          <span className="config-drawer__title">{isEditing ? 'Edit source' : 'Add source'}</span>
-          <button className="icon-btn" onClick={onClose}>
-            ✕
-          </button>
-        </div>
-
+    <>
+      <div className="settings-pane">
         {loading ? (
           <div className="add-source-form">
             <p className="field__hint">Loading…</p>
@@ -348,35 +343,35 @@ export function SourceModal({ onClose, onSaved, editingSourceId }: Props) {
             </div>
           </div>
         )}
+      </div>
 
-        {error && <div className="config-drawer__error">{error}</div>}
+      {error && <div className="config-drawer__error">{error}</div>}
 
-        <div className="config-drawer__footer">
-          {isEditing ? (
-            <button
-              className={`btn btn--danger ${confirmingDelete ? 'btn--danger-confirm' : ''}`}
-              onClick={handleDelete}
-              disabled={saving || loading}
-            >
-              {confirmingDelete ? 'Click again to delete' : 'Delete'}
-            </button>
-          ) : (
-            <span />
-          )}
-          <div className="config-drawer__footer-right">
-            <button className="btn" onClick={onClose}>
-              Cancel
-            </button>
-            <button
-              className="btn btn--primary"
-              onClick={submit}
-              disabled={!canSubmit || saving || loading}
-            >
-              {saving ? 'Saving…' : isEditing ? 'Save changes' : 'Add source'}
-            </button>
-          </div>
+      <div className="config-drawer__footer">
+        {isEditing ? (
+          <button
+            className={`btn btn--danger ${confirmingDelete ? 'btn--danger-confirm' : ''}`}
+            onClick={handleDelete}
+            disabled={saving || loading}
+          >
+            {confirmingDelete ? 'Click again to delete' : 'Delete'}
+          </button>
+        ) : (
+          <span />
+        )}
+        <div className="config-drawer__footer-right">
+          <button className="btn" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="btn btn--primary"
+            onClick={submit}
+            disabled={!canSubmit || saving || loading}
+          >
+            {saving ? 'Saving…' : isEditing ? 'Save changes' : 'Add source'}
+          </button>
         </div>
       </div>
-    </div>
+    </>
   )
 }

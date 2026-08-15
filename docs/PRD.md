@@ -116,15 +116,18 @@ other devices (phone, tablet) on the same LAN.
   subtitle + thumbnail), fullscreen reader.
 - Opening an article in fullscreen is what marks it read (not hovering,
   not scrolling past it in the list).
-- Prev/next navigation inside the fullscreen reader (buttons + arrow
+- Prev/next navigation inside the fullscreen reader (labeled buttons at
+  the end of the article body, reachable by scrolling to it, + arrow
   keys), without ever flashing back to the list between articles.
 - Keyboard shortcuts: `j`/`k` move, `o`/`Enter` open, `Esc` close, `m`
   toggle read, `r` refresh.
-- Full-text extraction is **lazy and per-article**: the list shows the
-  feed's own summary; opening an article with `fetch_full_text` enabled
-  fetches and extracts the full page once, then caches it forever. No
-  background hydration sweep — bandwidth is spent only on what's actually
-  read.
+- Full-text extraction is **per-article, once ever**: the list shows the
+  feed's own summary until the full page is fetched and extracted, then
+  cached forever. As of 2026-08-14, most of that happens automatically at
+  the end of each refresh (bounded batch, eligible sources only) rather
+  than purely on open — opening an article usually hits an already-cached
+  row; the on-open fetch is still there as a fallback for anything the
+  batch hasn't reached yet.
 - A **Pull full article** button in the reader (left of Summarize) lets you
   force that same fetch-and-extract on demand, regardless of the source's
   `fetch_full_text` setting — for sources that leave it off, or whenever
@@ -152,10 +155,11 @@ other devices (phone, tablet) on the same LAN.
 
 - `config/feeds.yaml` is the single source of truth for sources, rules,
   and the summarization kill switch (`llm.enabled`).
-- Editable two ways: a raw YAML drawer in the app (validates before
-  writing — a bad regex or malformed YAML never reaches the file), or a
-  structured "Add source" form with a visual rule builder for the common
-  case.
+- Editable two ways inside one Settings drawer (⚙): a **Feeds** tab —
+  search-and-pick list backed by a structured add/edit form with a visual
+  rule builder for the common case — or an **Advanced** tab, the raw YAML
+  editor (validates before writing — a bad regex or malformed YAML never
+  reaches the file) for config keys the structured form doesn't cover.
 
 ## 5. Non-goals (v1)
 
