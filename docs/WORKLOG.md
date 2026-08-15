@@ -1799,3 +1799,23 @@ bug, and the same fix, already existed in this file for `.settings-pane`
 221 backend tests passing (up from 212 — new coverage for
 `hydrate_pending`, the query-param clamping, and the `init_schema` drop
 ordering).
+
+## 2026-08-14 (cont. 2) — Reader footer nav restyle, Load more width fix
+
+Feedback on the labeled footer-nav buttons from the entry above: *"the
+buttons look really bad. Just go with a low profile left and right arrow
+similar to style as the go-back button on top"* — the flex layout was
+also making one button read as centered and the other right-aligned
+instead of pinned to opposite edges. Replaced the `reader-footer-nav__btn`
+pair with plain `.icon-btn` chevrons (same class as the reader bar's ←
+back button), pinned left/right via `justify-content: space-between` on
+`.reader-footer-nav`, with a `<span />` spacer standing in for a hidden
+prev button so the next button doesn't drift to center.
+
+Separately: *"load more should be as wide as the feed tiles, not edge to
+edge"* — `.load-more-btn` used `width: calc(100% - 56px)` with fixed
+28px side margins, so on viewports wider than `.article-row`'s
+`max-width: 760px` centered box, the button stretched edge-to-edge past
+the tiles above it. Added the same `max-width: 760px` and switched to
+`margin: 8px auto 24px` so it centers and lines up with the tiles at any
+width, same as before on narrow viewports.
