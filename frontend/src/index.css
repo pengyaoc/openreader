@@ -477,8 +477,9 @@ a {
 
 .load-more-btn {
   display: block;
+  max-width: 760px;
   width: calc(100% - 56px);
-  margin: 8px 28px 24px;
+  margin: 8px auto 24px;
   padding: 12px;
   background: none;
   border: 1px solid var(--line-strong);
