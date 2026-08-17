@@ -1463,7 +1463,28 @@ kbd {
   }
 
   .reader-article {
-    padding: 28px 20px 80px;
+    /* In standalone (PWA/Add to Home Screen) mode there's no Safari chrome
+       to buffer the bottom edge, so content extends under the iOS home
+       indicator — which draws its own translucent scrim there, right over
+       whatever's rendered underneath. env() resolves to 0 on browsers/
+       devices without a safe area, so this is a no-op outside standalone
+       iOS. */
+    padding: 28px 20px calc(80px + env(safe-area-inset-bottom));
+  }
+
+  .article-list {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .settings-pane,
+  .feed-picker__list {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .config-drawer__footer {
+    /* Cancel/Save live here — Apple HIG requires interactive controls stay
+       clear of the home-indicator gesture area, not just legible. */
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
   }
 
   .reader-article__title {
