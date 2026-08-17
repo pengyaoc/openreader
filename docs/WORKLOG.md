@@ -1819,3 +1819,46 @@ edge"* — `.load-more-btn` used `width: calc(100% - 56px)` with fixed
 the tiles above it. Added the same `max-width: 760px` and switched to
 `margin: 8px auto 24px` so it centers and lines up with the tiles at any
 width, same as before on narrow viewports.
+
+## 2026-08-16 — Horizontal-pan/scrollbar bug fix, PWA installability
+
+**Bug report** (screenshot from iOS Chrome): one specific article allowed
+left-right dragging that interrupted top-to-bottom reading flow, and
+separately the scroll indicator was invisible on iOS Chrome. Root-caused
+both: `.reader-scroll` set `overflow-y: auto` but left `overflow-x`
+unset — per spec, an element with one overflow axis non-`visible` and the
+other unset gets that axis computed to `auto`, not `visible`. So any
+article with content a hair wider than the pane (an oversized embed
+image, a long unbroken URL used as visible link text) silently made the
+*whole reading pane* horizontally pannable instead of just clipping it.
+Fixed with an explicit `overflow-x: hidden` on `.reader-scroll`, paired
+with `overflow-wrap: anywhere` on `.reader-body` so an unbreakable long
+string wraps instead of getting silently clipped by the new
+`overflow-x: hidden`. Tables/`pre` already carry their own scoped
+`overflow-x: auto` and are unaffected. Separately, iOS Safari/Chrome
+(both WebKit) ignore `::-webkit-scrollbar` theming for their overlay
+scrollbar and fall back to a system default that read as invisible
+against the dark background — added the standard `scrollbar-color`
+property (which recent iOS WebKit honors) alongside the existing
+`::-webkit-scrollbar` rules for desktop.
+
+**PWA installability** (feature request, brainstormed → spec → plan →
+executed via `superpowers` skills; spec at
+`docs/superpowers/specs/2026-08-16-pwa-install-design.md`, plan at
+`docs/superpowers/plans/2026-08-16-pwa-install.md`). Scoped to
+installability only, no offline/service worker — the user's actual use
+case is iOS "Add to Home Screen", which reads the manifest directly and
+needs no service worker (unlike Chrome's desktop/Android omnibox install
+button, explicitly deferred). Icons reuse the existing `favicon.svg`
+brand mark rendered once to static PNGs (192/512/apple-touch-icon),
+committed rather than added as an ongoing build dependency. Manifest
+(`frontend/public/manifest.webmanifest`) uses relative `start_url`/
+`scope`/icon `src` values so it resolves correctly under both local dev
+(`/`) and the production `VITE_BASE=/reader/` path prefix with no
+build-time templating — verified by building with `VITE_BASE=/reader/`
+and confirming every path in `dist/index.html` picked up the `/reader/`
+prefix via Vite's existing `base` rewriting (same mechanism the prior
+`favicon.svg` link already relied on). Added the iOS-specific meta tags
+(`apple-mobile-web-app-capable`, `-status-bar-style`, `-title`) and a
+`theme-color` meta that now also updates live when the in-app dark/light
+toggle fires, via the existing theme `useEffect` in `App.tsx`.
