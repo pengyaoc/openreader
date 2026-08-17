@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import type { ArticleListItem } from '../api'
 
 function timeAgo(iso: string | null): string {
@@ -20,6 +21,11 @@ interface Props {
   hasMore?: boolean
   loadingMore?: boolean
   onLoadMore?: () => void
+  // Identifies which view/source/folder is currently showing (e.g.
+  // "view:unread", "source:12") — ArticleList stays mounted across
+  // switches between them, so without this the scroll container keeps
+  // whatever scrollTop the previous list was left at.
+  listKey: string
 }
 
 export function ArticleList({
@@ -29,7 +35,13 @@ export function ArticleList({
   hasMore,
   loadingMore,
   onLoadMore,
+  listKey,
 }: Props) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 })
+  }, [listKey])
+
   if (articles.length === 0) {
     return (
       <div className="empty-state">
@@ -44,7 +56,7 @@ export function ArticleList({
   }
 
   return (
-    <div className="article-list" id="article-list">
+    <div className="article-list" id="article-list" ref={scrollRef}>
       {articles.map((a) => (
         <div
           key={a.id}

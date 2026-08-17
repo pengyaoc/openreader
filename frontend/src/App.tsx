@@ -450,6 +450,7 @@ export default function App() {
           hasMore={articlesQuery.hasNextPage}
           loadingMore={articlesQuery.isFetchingNextPage}
           onLoadMore={() => articlesQuery.fetchNextPage()}
+          listKey={selectionToQueryValue(selection)}
         />
       </div>
 

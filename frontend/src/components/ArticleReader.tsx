@@ -66,15 +66,13 @@ export function ArticleReader({
   }, [onClose, onPrev, onNext, hasPrev, hasNext])
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  // ArticleReader stays mounted across prev/next — only `article` changes —
-  // so the scroll container otherwise keeps whatever scrollTop the previous
-  // article was left at. Reset on every article change, not just once on
-  // mount.
+  const [viewMode, setViewMode] = useState<ViewMode>('full')
+  // ArticleReader stays mounted across prev/next, and Full/Summary toggles
+  // within the same article, so the scroll container otherwise keeps
+  // whatever scrollTop it was left at. Reset on either changing.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
-  }, [article.id])
-
-  const [viewMode, setViewMode] = useState<ViewMode>('full')
+  }, [article.id, viewMode])
   // Tracks whether the *currently open* article already had a summary the
   // last time we checked — lets the effect below tell "freshly generated
   // while this article is open" (auto-switch to Summary) apart from "this
