@@ -111,6 +111,16 @@ body {
   background: var(--ink-faint);
 }
 
+/* iOS Safari/Chrome (both WebKit under the hood) ignore ::-webkit-scrollbar
+   theming for their overlay scrollbars and fall back to a system indicator
+   whose default color can end up nearly indistinguishable from our dark
+   background. The standard scrollbar-color property is what iOS WebKit
+   actually honors there, so set it explicitly rather than relying on the
+   -webkit- pseudo-elements alone. */
+* {
+  scrollbar-color: var(--line-strong) transparent;
+}
+
 button {
   font-family: inherit;
   cursor: pointer;
@@ -723,6 +733,15 @@ kbd {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* Explicit, not incidental: per spec, an element with overflow-y set to a
+     value other than visible and overflow-x left unset gets overflow-x
+     computed to auto (not visible) — so without this, any article whose
+     content is even a hair wider than the pane (an oversized embed image,
+     an unbroken long link/URL used as visible text, etc) silently makes the
+     whole reading pane horizontally pannable instead of just the top-to-
+     bottom scroll we want. Elements that legitimately need horizontal
+     scroll (tables, pre/code) already carry their own overflow-x: auto. */
+  overflow-x: hidden;
 }
 
 .reader-article {
@@ -763,6 +782,10 @@ kbd {
   font-size: 19px;
   line-height: 1.66;
   color: var(--ink);
+  /* Pairs with .reader-scroll's overflow-x: hidden — without this, an
+     unbroken long string (a raw URL used as visible link text, a run-on
+     word) would silently get clipped at the pane edge instead of wrapping. */
+  overflow-wrap: anywhere;
 }
 
 .icon-btn:disabled {
