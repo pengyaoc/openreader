@@ -150,6 +150,9 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme
     localStorage.setItem('reader-theme', theme)
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute('content', theme === 'light' ? '#faf6ee' : '#16140f')
   }, [theme])
 
   const sourcesQuery = useQuery({ queryKey: ['sources'], queryFn: api.sources })
