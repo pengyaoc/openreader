@@ -38,23 +38,8 @@ export function ArticleList({
   listKey,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  // Double rAF, not a synchronous reset: on iOS standalone/home-screen mode,
-  // an in-flight momentum-scroll from the swipe that triggered the switch,
-  // or layout for the newly-swapped list not being committed yet, can
-  // silently override an immediate scrollTo() there. Deferring two frames
-  // waits for both to settle first (see the matching comment in
-  // ArticleReader.tsx, which has the same pattern for the same reason).
   useEffect(() => {
-    let raf2 = 0
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ top: 0 })
-      })
-    })
-    return () => {
-      cancelAnimationFrame(raf1)
-      cancelAnimationFrame(raf2)
-    }
+    scrollRef.current?.scrollTo({ top: 0 })
   }, [listKey])
 
   if (articles.length === 0) {

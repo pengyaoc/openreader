@@ -70,24 +70,8 @@ export function ArticleReader({
   // ArticleReader stays mounted across prev/next, and Full/Summary toggles
   // within the same article, so the scroll container otherwise keeps
   // whatever scrollTop it was left at. Reset on either changing.
-  //
-  // The double rAF (rather than resetting synchronously in the effect) is
-  // for iOS standalone/home-screen mode specifically: an in-flight
-  // momentum-scroll from the swipe that triggered the switch, or layout for
-  // the newly-swapped content not being committed yet, can silently
-  // override an immediate scrollTo() there. Deferring two frames waits for
-  // both to settle first.
   useEffect(() => {
-    let raf2 = 0
-    const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        scrollRef.current?.scrollTo({ top: 0 })
-      })
-    })
-    return () => {
-      cancelAnimationFrame(raf1)
-      cancelAnimationFrame(raf2)
-    }
+    scrollRef.current?.scrollTo({ top: 0 })
   }, [article.id, viewMode])
   // Tracks whether the *currently open* article already had a summary the
   // last time we checked — lets the effect below tell "freshly generated
