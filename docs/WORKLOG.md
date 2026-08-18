@@ -1928,3 +1928,58 @@ first — each `git revert` (never a history rewrite, since origin/main
 had already moved) undid a deployed commit with its own deploy
 immediately after, so production tracked the same back-and-forth as this
 log.
+
+## 2026-08-18 — Standalone PWA: same bottom-edge saga, but from the top this time
+
+Continuation of the entry above, but this round was actually diagnosed
+before touching CSS (`superpowers:systematic-debugging`'s "3+ failed
+fixes means question the architecture, not the parameters" — five prior
+attempts had all tweaked `env(safe-area-inset-bottom)` padding and none
+stuck). Sent four fresh iPhone screenshots (installed PWA vs. Chrome
+iOS, list view and article view) and measured pixel colors down each one
+instead of eyeballing.
+
+**Root cause, this time confirmed by measurement, not guessing:** in
+standalone mode on a 393×853pt iPhone, real content reaches all the way
+to y=797.5pt — a **55.5pt band at the physical bottom edge is `body`'s
+background color**, painted by iOS entirely outside the layout viewport.
+`.sidebar` and `.reader-overlay` are both `position: fixed; inset: 0`,
+but neither can put a pixel in that band — it isn't part of the DOM's
+paintable area at all. That's why every previous `env(safe-area-inset-
+bottom)` padding attempt either did nothing (band still visible above
+the padding) or ate into content for no visual benefit (the "cuts off
+text" complaint) — the band was never reachable by any padding value.
+Corroborated by WebKit bug
+[#301994](https://bugs.webkit.org/show_bug.cgi?id=301994) (system-
+painted bands no DOM element can reach in standalone web apps),
+reopened 2026-08-04 against iOS 26.5.2/27 beta.
+
+**The fix:** stop trying to paint the band and make it invisible by
+color-matching instead. `html`/`body` now carry an explicit `background`
+(previously only `body` did — a transparent `html` is what produces
+stray white/black bands) that tracks which full-screen surface is
+currently open via a `document.documentElement.dataset.surface` write in
+`App.tsx` (`'reader'` when `openArticleId` is set, else `'list'`),
+switching between `--bg` and `--bg-overlay`. Also dropped the
+`env(safe-area-inset-bottom)` padding on `.reader-article`, `.article-
+list`, `.settings-pane`, and `.feed-picker__list` per the same
+reasoning — kept it only on `.config-drawer__footer` and `.toast`, which
+guard interactive tap targets rather than reading flow. `.login-page`
+picked up the same `100vh`/`100dvh` fallback pair `.shell` already had.
+
+**First pass also pushed the sidebar drawer and reader bar down by
+`env(safe-area-inset-top)` in a new `display-mode: standalone` media
+query**, reasoning from the original ask ("settings overlay color
+shouldn't bleed into the top bar"). Verified live via `scripts/serve.sh`
++ deploy, confirmed working. Immediate follow-up reversed that specific
+part: *"let's revert back to original state... when the drawer comes
+from the left, the background color of the drawer should blend onto the
+top status bar too."* Removed the new media query and the mobile
+`.sidebar` background override that had flattened the drawer's own
+`--bg-raised` down to page `--bg` — both were needed only to support the
+top-inset behavior that got reversed. Net: the bottom-edge fix stands
+as-is; the top status bar blends with whichever full-screen surface is
+open, same as before this round started.
+
+Both rounds deployed live via `scripts/deploy.sh` (typecheck + 221
+backend tests + build, gate before every push).

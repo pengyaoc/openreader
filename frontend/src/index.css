@@ -80,14 +80,29 @@ body,
   height: 100%;
 }
 
+html,
+body {
+  /* iOS standalone (Home Screen PWA) paints a strip below the layout
+     viewport — outside the reach of any position:fixed element — using
+     this background. Kept explicit (not left to inherit) so that strip
+     never falls back to browser-default white/black. Driven by
+     [data-surface] below so it matches whatever full-screen surface is
+     currently on top. */
+  background: var(--bg);
+}
+
 body {
   margin: 0;
-  background: var(--bg);
   color: var(--ink);
   font-family: var(--font-ui);
   font-size: 15px;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+}
+
+:root[data-surface='reader'],
+:root[data-surface='reader'] body {
+  background: var(--bg-overlay);
 }
 
 ::selection {
@@ -142,6 +157,7 @@ a {
 
 .login-page {
   height: 100vh;
+  height: 100dvh; /* dvh accounts for iOS Safari's collapsing address bar */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1463,22 +1479,18 @@ kbd {
   }
 
   .reader-article {
-    /* In standalone (PWA/Add to Home Screen) mode there's no Safari chrome
-       to buffer the bottom edge, so content extends under the iOS home
-       indicator — which draws its own translucent scrim there, right over
-       whatever's rendered underneath. env() resolves to 0 on browsers/
-       devices without a safe area, so this is a no-op outside standalone
-       iOS. */
-    padding: 28px 20px calc(80px + env(safe-area-inset-bottom));
-  }
-
-  .article-list {
-    padding-bottom: env(safe-area-inset-bottom);
+    /* No env(safe-area-inset-bottom) term here: in standalone the bottom
+       ~55pt strip sits below the layout viewport entirely — nothing the
+       DOM renders can ever reach it (see the html/body background rule
+       above, which handles that strip by color-matching it instead). A
+       safe-area bottom padding here just eats into the reading area for
+       no visual benefit. */
+    padding: 28px 20px 80px;
   }
 
   .settings-pane,
   .feed-picker__list {
-    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    padding-bottom: 10px;
   }
 
   .config-drawer__footer {

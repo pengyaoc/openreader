@@ -155,6 +155,13 @@ export default function App() {
       ?.setAttribute('content', theme === 'light' ? '#faf6ee' : '#16140f')
   }, [theme])
 
+  // iOS standalone paints the unreachable strip below the viewport from
+  // html/body's background (see index.css) — keep it in sync with whichever
+  // full-screen surface is on top so that strip never shows a color seam.
+  useEffect(() => {
+    document.documentElement.dataset.surface = openArticleId ? 'reader' : 'list'
+  }, [openArticleId])
+
   const sourcesQuery = useQuery({ queryKey: ['sources'], queryFn: api.sources })
   const llmStatusQuery = useQuery({ queryKey: ['llm-status'], queryFn: api.llmStatus })
 
