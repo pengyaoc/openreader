@@ -1862,3 +1862,69 @@ prefix via Vite's existing `base` rewriting (same mechanism the prior
 (`apple-mobile-web-app-capable`, `-status-bar-style`, `-title`) and a
 `theme-color` meta that now also updates live when the in-app dark/light
 toggle fires, via the existing theme `useEffect` in `App.tsx`.
+
+## 2026-08-17/18 — Scroll-reset bugs, and a multi-round chase on the iOS PWA bottom-edge issue
+
+**Scroll position not resetting**: two real bugs, reported together —
+switching between "All items"/"Unread"/"Starred"/a source or folder kept
+whatever scroll position the previous list was at, and toggling
+Full/Summary within the same open article did the same. Root cause in
+both cases: the scrolling DOM element (`.article-list`, `.reader-scroll`)
+stays mounted across these transitions — only its *content* changes — so
+nothing ever told the browser to move it back to the top.
+`ArticleReader.tsx` already had a per-article scroll-reset `useEffect`
+keyed on `article.id`; added `viewMode` to its dependency array so
+toggling Full/Summary resets scroll the same way switching articles
+already did. `ArticleList.tsx` had no equivalent at all — added a
+`listKey` prop (`App.tsx`'s existing `selectionToQueryValue(selection)`,
+already unique per view/source/folder) plus a ref + effect mirroring the
+reader's pattern. Verified live with the local dev server + real DB data
+(175 articles) via browser automation: scrolling the "All items" list,
+switching to "Unread", confirming `scrollTop` snapped back to 0.
+
+**Then a detour that turned out to be based on a misread report.** A
+screenshot of a DOOMBERG article in summary mode showed the title
+partially hidden under the reader bar at the top and text running into a
+darker strip at the bottom. Read as "scroll isn't resetting on the
+Full/Summary toggle, even after the fix above" — user later corrected
+this: *"I am not talking about the reset scroll state. That was working
+fine."* Applied a double-`requestAnimationFrame` defer to both scroll-reset
+effects anyway, reasoning from a real (but here misdiagnosed) class of
+iOS WebKit bug — in-flight momentum-scroll or uncommitted layout
+overriding a synchronous `scrollTo()`. Once corrected, reverted that
+commit outright (`git revert`, not a rewrite — both the double-rAF commit
+and this revert had already been pushed and deployed). **Lesson: when a
+report says "still happening," confirm which specific behavior before
+re-diagnosing** — the double-rAF change was harmless but solved a problem
+that didn't exist while the actual one went unaddressed for another round
+trip.
+
+**The actual bottom-of-screen issue**, once correctly scoped: in
+standalone (Add to Home Screen) mode on iOS specifically — not a regular
+Safari tab — content can render under the home indicator, which iOS
+draws its own translucent scrim over. Went through three iterations
+before landing on what the user wanted:
+1. First pass (this file's entry above, 2026-08-16): added
+   `env(safe-area-inset-bottom)` padding to `.reader-article`,
+   `.article-list`, `.settings-pane`, `.feed-picker__list`, and
+   `.config-drawer__footer`, reasoning that text should never sit under
+   the scrim.
+2. Feedback after seeing it live: *"it will cut off texts instead of
+   letting it go to the bottom edge"* — the buffer was too generous; it
+   stopped content well short of the true edge, which read as content
+   being truncated rather than reaching it. Reduced the four reading-
+   content spots back to their pre-safe-area-fix padding, keeping only
+   `.config-drawer__footer`'s (a distinct concern — Cancel/Save tap-target
+   safety under Apple HIG, not reading flow).
+3. Immediate feedback: *"This is worse. revert the change"* — reverted
+   step 2 (`git revert`), landing back on step 1's padding. Confirmed as
+   the right call afterward: *"the change is actually fine."*
+
+Net effect on `.reader-article`/`.article-list`/`.settings-pane`/
+`.feed-picker__list`: the `env(safe-area-inset-bottom)` padding from the
+2026-08-16 entry stands as originally shipped. Every step in this thread
+was pushed and deployed live via `scripts/deploy.sh` rather than staged
+first — each `git revert` (never a history rewrite, since origin/main
+had already moved) undid a deployed commit with its own deploy
+immediately after, so production tracked the same back-and-forth as this
+log.
