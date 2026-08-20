@@ -1983,3 +1983,190 @@ open, same as before this round started.
 
 Both rounds deployed live via `scripts/deploy.sh` (typecheck + 221
 backend tests + build, gate before every push).
+
+## 2026-08-19 — Standalone PWA bottom gap after resume: measured, six JS fixes failed, root cause NOT confirmed
+
+New symptom, easy to mistake for a repeat of the two entries above: kill-and-relaunch
+doesn't reproduce it, but after the installed PWA sits backgrounded for a while and you
+return to it, content stops short of the bottom edge by a blank strip — in *both* the feed
+list and the article reader. Rotating to landscape and back fixes it until the next
+occurrence.
+
+**Measured live via Safari Web Inspector attached to the installed PWA** (iPhone, 440×956pt,
+`__snap()` probe reading `window.innerHeight`, `visualViewport.height`, a
+`position:fixed;inset:0` probe div, `.shell`/`.reader-overlay`'s own rendered height, and
+`env(safe-area-inset-*)` exposed via a custom property so JS could read it):
+
+```
+buggy      innerH 894  vvH 894  fixedInsetH 894  surfaceH 893.98  screenH 956  safeTop 62px  safeBottom 34px
+after-rot  innerH 956  vvH 956  fixedInsetH 956  surfaceH 956     screenH 956  safeTop 62px  safeBottom 34px
+```
+
+**The arithmetic is exact: 956 − 62 = 894.** The layout viewport loses precisely
+`env(safe-area-inset-top)` — while still *reporting* that inset as 62px. That reads as a
+fingerprint (the web view's native frame computed once as if inset below the status bar,
+while its safe-area insets are kept as if it weren't), but **treat this as a hypothesis, not
+a confirmed mechanism** — it rests on a single occurrence on a single device. "Origin stays at
+y=0" in particular is an inference from screenshots, not something JS can read directly; if the
+origin actually sits at y=62 instead, the geometry is "content pushed down from the top"
+rather than "gap at the bottom," which is a different bug with a different fix shape. Not
+ruled out.
+
+Confirms this is a genuinely different bug from the one two entries up: that one (the
+always-present ~55.5pt unreachable band) is unaffected by resume/rotation and was fixed by
+color-matching. This one is resume-triggered and rotation-clearable — a stale **native**
+value, not a paint-reach problem.
+
+**Every position:fixed and every 100dvh surface failed together** — that's what rules out a
+CSS-unit bug (swap `dvh` for `fixed`, etc.) before wasting a round on it. `.reader-overlay`
+is already `position: fixed; inset: 0` and it was short too.
+
+**`screen.width`/`screen.height` stayed correct (956) through every single buggy capture.**
+Only `window.innerHeight` (and everything derived from it — `visualViewport`, `dvh`,
+`position:fixed` boxes) went stale. That's a fair diagnostic for "native frame is wrong," as
+opposed to "CSS unit is wrong" — screen dimensions come from a different, unaffected code
+path. (They're not usable as a fix, though — content can't paint outside the real layout
+viewport, so sizing `.shell` to 956px just gets the extra 62px silently clipped, invisible.
+Confirmed this the hard way by nearly proposing it before working the constraint through.)
+
+**Unresolved contradiction, flagged by a critical-review pass and not chased down live:** in
+the post-rotation "fixed" snapshot, `innerHeight` read 956 but
+`document.documentElement.clientHeight` stayed at **894** — never moved, in either state. Per
+CSSOM-View, `clientHeight` on the root element *is* the layout viewport height, same quantity
+`position:fixed;inset:0` sizes against. So the post-rotation snapshot has the layout viewport
+reading both 894 (`clientHeight`) and 956 (`innerHeight`, and the `fixed` probe) at once —
+which can't both be true. Two live possibilities, not distinguished:
+1. The measurement methodology has a bug (the `__snap()` probe was re-injected mid-session
+   over an existing page rather than defined from first load; a stale probe element or closure
+   surviving a reload could explain a value that never updates), or
+2. The layout viewport was 894 throughout and rotation only changed *painting*, not the
+   viewport itself — which would mean the "native frame caching" mechanism above is wrong.
+
+This was dismissed in the original draft of this entry as "a red herring — not what any of the
+app's layout depends on." That dismissal was itself a mistake: the value's job was as a
+consistency check on the stated model, and it failed the check. Recorded here so a future
+session re-runs the probe from first page load (not mid-session re-injection) before trusting
+this mechanism further.
+
+**Six independent JS-side attempts to force WebKit to recompute the native frame, all
+measured, all failed** (stayed at 894 after every one):
+
+1. `<meta name="viewport">` content toggle + double rAF
+2. `documentElement.style.zoom` nudge + double rAF — note `frontend/index.html`'s viewport tag
+   sets `maximum-scale=1.0`, which may have blunted this attempt specifically; not re-tested
+   without that constraint
+3. Waiting 1s / 3s / 8s — never self-corrected in that window
+4. Focus/blur a hidden `<input>` to trigger a keyboard show/hide cycle (different native
+   inset code path than anything else tried)
+5. Toggling `apple-mobile-web-app-status-bar-style` between `black-translucent` and `default`
+   — the exact setting governing under-status-bar extension, i.e. the exact 62pt being lost
+6. `display: none` → synchronous `offsetHeight` read → `display: ''` (forced sync reflow) on
+   `.shell`/`.reader-overlay` directly — a technique that *does* fix a superficially similar
+   bug (see below), but not this one
+
+All six probe the same lever — forcing WebKit to re-run CSS layout — which then re-reads
+whatever native size is cached. That's one experiment repeated six ways, not six independent
+lines of evidence; treat "no JS fix found" as provisional, not proven. Real gaps in how these
+were run, surfaced by a critical-review pass:
+- Every attempt ran **in sequence, in one already-broken session**, with no re-run to check
+  repeatability and no variation in order. Attempts #1 and #5 both mutate persistent
+  `<meta>` state; #2–#6 ran against whatever state those left behind, not a clean baseline.
+- **Safari Web Inspector was attached throughout.** Attaching devtools to a home-screen web
+  app requires foregrounding it and can alter suspend/throttle behavior — and the bug's
+  trigger is specifically backgrounding duration. The debugging tool sits on the causal path
+  and this was never controlled for.
+
+**Untried categories** (not just untried parameter values — genuinely different levers):
+`pageshow` with `event.persisted`, `pagehide`, `document.wasDiscarded`, the Page Lifecycle
+API's `freeze`/`resume`; logging `visualViewport`'s own `resize`/`scroll` events across a
+*real* backgrounding cycle instead of synthetic pokes after the fact (this alone would answer
+whether iOS ever fires a resize signal on resume — the single most diagnostic thing not yet
+checked); running the detection probe from **first page load** rather than re-injecting it
+mid-session (also fixes the stale-probe risk noted above); and two concrete candidate fixes
+found during research but never tried: `html { min-height: calc(100% + env(safe-area-inset-top)) }`
+(from an Apple Developer Forums thread, see below) and the dev.to heal function fired on
+`visibilitychange → visible` instead of on blur.
+
+**Only a physical device rotation cleared it** in what was tested. That's consistent with
+"rotation invalidates a cached native frame" but doesn't prove it — see the `clientHeight`
+contradiction above, which this same rotation test surfaced and left unresolved.
+
+**Web research citations — corrected after a critical-review pass fact-checked each source
+directly. The original version of this entry overstated the match on all but one:**
+
+- **WebKit [#301994](https://bugs.webkit.org/show_bug.cgi?id=301994) does NOT describe this
+  symptom** — checked directly against the actual bug report, not just the number carried
+  forward from the `4e1438f` entry above. Its actual title is "REGRESSION (iOS 26.1): Status
+  bar remains visible in fullscreen mode in Home Screen Web apps": the top status bar stays
+  *visible* and pushes content *down*, with `env(safe-area-inset-top)` dropping to **0**. This
+  session measured `safeTop: 62px` throughout — the opposite signature. No resume trigger and
+  no rotation-clears-it behavior is documented in that bug. `4e1438f`'s WORKLOG entry glossed
+  #301994 as "unreachable bands"; this entry originally glossed the same number as
+  "backgrounding/rotation layout loss." Neither matches the tracker. Lesson: a bug number
+  carried forward in repo context is not verification — re-read the actual report every time
+  before citing it, especially when the symptom differs from the round that first cited it.
+  (#301994 is real and reopened 2026-08-04 against iOS 27 beta — that date checks out — it's
+  just the wrong bug for this symptom.)
+- **The MacRumors thread** ("[iOS 26.1 PWA full screen broken](https://forums.macrumors.com/threads/ios-26-1-pwa-full-screen-broken.2470545/)")
+  is real and matches #301994's top-bar symptom, not this one — landscape renders full screen
+  correctly while portrait doesn't, the reverse shape from "rotation fixes it." Fixed in iOS
+  26.2. The original entry's claim that "reporters found no effective JS/CSS workaround" is
+  not supported by the thread content — that was an inference written as if it were a cited
+  finding. Retracted.
+- **The `openclaw/openclaw#76505` citation contained two factual errors, now retracted.** The
+  issue is filed against **iOS 18.x**; "2026.5.2" in that issue is the *OpenClaw application's
+  own version number*, not an iOS build — it was misread as matching `4e1438f`'s "iOS
+  26.5.2" note, manufacturing a version overlap that doesn't exist. The issue itself is an
+  unrelated, plain missing-`safe-area-inset-bottom` layout bug (toolbar behind the home
+  indicator), not resume- or rotation-related. The claimed quote — "their landed conclusion
+  was the same as ours: use Safari instead of the installed PWA until Apple ships one" — does
+  not appear in that issue and should not have been attributed to it.
+- **The dev.to writeup was accurately characterized.** Keyboard-driven, permanent shrink until
+  force-quit, `display` toggle forcing a sync reflow genuinely fixes *that* bug. Correctly
+  distinguished from this one (that mechanism is obscured-insets residue that reflow clears;
+  ours didn't respond to the identical trick, attempt #6 above). Worth noting the article
+  reports a 59pt drop on a Pro Max — also exactly that device's top inset — which is a second
+  data point for the "shortfall == top inset" pattern that wasn't used as such.
+- **A closer match, found only during the critical-review pass and missed in the original
+  research:** [Apple Developer Forums #744327, "iOS17 PWA `position: fixed` element breaks
+  after a while"](https://developer.apple.com/forums/thread/744327) — backgrounding-triggered
+  (~1hr backgrounded plus active use), `position: fixed` elements misplaced as if an invisible
+  bar is pushing the viewport, aggravated by repeatedly opening/closing overlays (this app
+  opens/closes `.reader-overlay` constantly), unresolved as of Dec 2024, independently
+  confirmed by a second developer. This is on **iOS 17** — two major versions before the
+  iOS-26.1 regression cited above — which is the strongest reason to doubt "this is a fresh
+  iOS 26 regression Apple is already fixing." If the same bug family predates iOS 26 this
+  much, it's more likely a longstanding WKWebView standalone-mode issue than something with a
+  point-release fix already in flight.
+
+**Net effect of the correction:** the "some real native-frame-related iOS/WebKit bug" framing
+is still plausible, but nothing found actually confirms which known bug this is, whether it's
+version-specific, or whether it's currently being fixed by Apple. The original "confirmed
+Apple bug, just wait for the update" framing was not earned by the evidence.
+
+**Decision: no fix implemented.** A padding-reduction mitigation (shrink the reader's own
+bottom padding when the bug fingerprint is detected, so the app's own spacing doesn't stack
+on top of iOS's unavoidable dead strip) was built, typechecked, and built successfully, then
+explicitly reverted at the user's request — the gap isn't severe enough to carry permanent
+detection code and a CSS branch, independent of how the root cause shakes out.
+
+**If this resurfaces, in priority order:**
+1. **Don't re-cite #301994 for this symptom** — it's the wrong bug (see above). Check Apple
+   Developer Forums #744327 for updates instead; it's the closer match and still unresolved as
+   of this writing.
+2. **Get a real fingerprint before trying anything else.** Ship a temporary, dev-only passive
+   logger from **first page load** (not mid-session re-injection) that records to
+   `localStorage` on `visibilitychange`, `pageshow` (with `event.persisted`), `resize`, and
+   `visualViewport.resize` — capturing `innerHeight`, `visualViewport.height/offsetTop`,
+   `documentElement.clientHeight`, `screen.height`, both safe-area insets, and a timestamp.
+   One background/resume cycle from the user closes the `clientHeight` contradiction above,
+   turns n=1 into a real sample, and answers whether *any* event fires on resume at all —
+   without a Web Inspector attached to muddy the backgrounding behavior.
+3. Only then try the two untried candidates: `html { min-height: calc(100% + env(safe-area-inset-top)) }`
+   (from Apple Forums #744327) and the dev.to heal function fired on `visibilitychange →
+   visible` rather than on blur.
+4. The padding-mitigation approach (not implemented, reasoning preserved above) or a native
+   wrapper (Capacitor/Swift `WKWebView` shell, to hook `viewSafeAreaInsetsDidChange`/
+   `viewWillTransition` directly) remain fallback options if 1–3 don't produce a real fix —
+   the wrapper is untested and not obviously better, since it still delegates web view sizing
+   to the same WebKit code.
