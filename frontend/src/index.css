@@ -1513,10 +1513,57 @@ kbd {
     max-width: none;
   }
 
+  .config-drawer__header {
+    /* Same top-inset treatment as .main__header/.reader-bar above — without
+       it the header (and any controls in it, like the settings pane's own
+       top row) sits under the status bar, both visually clipped and
+       untappable there. */
+    padding-top: calc(env(safe-area-inset-top) + 16px);
+  }
+
   .toast {
     left: 16px;
     right: 16px;
     bottom: calc(env(safe-area-inset-bottom) + 16px);
     max-width: none;
+  }
+}
+
+/* -------------------------- standalone-PWA viewport-height fix --------- */
+
+/* Root-cause fix for the resume/cold-launch bottom-gap bug (docs/WORKLOG.md,
+   2026-08-19, corrected 2026-08-20): window.innerHeight — and therefore
+   every 100dvh surface and every position:fixed;inset:0 box, since both are
+   sized against it — can permanently land short by exactly
+   env(safe-area-inset-top) in a WebKit-internal race that nothing
+   triggerable from JS was able to correct (three independent forced-reflow
+   attempts at three different timings all measurably failed; see
+   index.html). screen.width/screen.height were correct in every capture
+   across both sessions, so --app-height (set from those, not from
+   innerHeight — see index.html's setAppHeight) is used instead of dvh here.
+   Scoped to display-mode:standalone only: this app has no address bar to
+   collapse in standalone mode, so dvh's dynamic-viewport tracking was never
+   buying anything here, but a normal mobile-Safari-tab visit still needs
+   it, so this must not apply there. */
+@media (display-mode: standalone) {
+  .shell,
+  .login-page {
+    height: var(--app-height, 100dvh);
+  }
+
+  .reader-overlay {
+    top: 0;
+    right: 0;
+    left: 0;
+    bottom: auto;
+    height: var(--app-height, 100dvh);
+  }
+}
+
+@media (max-width: 760px) and (display-mode: standalone) {
+  .sidebar {
+    top: 0;
+    bottom: auto;
+    height: var(--app-height, 100dvh);
   }
 }

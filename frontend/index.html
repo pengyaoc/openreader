@@ -26,6 +26,169 @@
         document.documentElement.dataset.theme = t === 'light' ? 'light' : 'dark'
       })()
     </script>
+    <!-- TEMPORARY — standalone-PWA bottom-gap-after-resume investigation
+         (docs/WORKLOG.md, 2026-08-19). Passive viewport logger, no fix, no
+         layout change. Must run from first page load (not injected
+         mid-session) so it can't go stale across a suspend/resume cycle —
+         that's the whole point: last round's probe was re-injected over a
+         live page and produced a clientHeight/innerHeight contradiction
+         that couldn't be trusted. Remove this whole block, and the
+         SettingsDrawer "Viewport log" row, once root cause is confirmed
+         and a fix ships (see the plan). -->
+    <script>
+      ;(function () {
+        var KEY = '__vplog'
+        var MAX = 200
+        var probe = null
+
+        // Root-cause fix — standalone-PWA gap after resume/cold-launch
+        // (docs/WORKLOG.md, 2026-08-19), corrected 2026-08-20. Confirmed by
+        // three real captured occurrences on 2026-08-20: window.innerHeight
+        // (and everything derived from it — visualViewport, dvh units,
+        // position:fixed;inset:0 boxes) can permanently land short by
+        // exactly env(safe-area-inset-top) at launch, in a WebKit-internal
+        // race, and NOTHING triggerable from JS corrects it — a forced
+        // synchronous reflow (display:none -> read offsetHeight -> restore)
+        // was tried at three different timings across two sessions
+        // (mid-session manually, at `load`, via a delayed safety-net) and
+        // measurably failed every single time (heal-before/heal-after
+        // captures were identical). Only a real device rotation was ever
+        // observed to fix it, which isn't synthesizable from script. So:
+        // stop trying to correct the broken native measurement, and stop
+        // depending on it. screen.width/screen.height were correct in every
+        // single capture across both sessions, in every state, including
+        // this device's quirk of not swapping them on rotation. This app is
+        // standalone-only here (no address bar to collapse), so there's no
+        // legitimate reason its surfaces need dvh's *dynamic* viewport
+        // tracking at all — size them directly off screen.width/height via
+        // this custom property instead (see index.css's `display-mode:
+        // standalone` rules for where it's consumed).
+        function setAppHeight() {
+          var portrait = window.innerWidth < window.innerHeight
+          var h = portrait ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height)
+          document.documentElement.style.setProperty('--app-height', h + 'px')
+        }
+        setAppHeight()
+
+        function readBuf() {
+          try {
+            return JSON.parse(localStorage.getItem(KEY) || '[]')
+          } catch {
+            return []
+          }
+        }
+
+        function writeBuf(buf) {
+          try {
+            localStorage.setItem(KEY, JSON.stringify(buf.slice(-MAX)))
+          } catch {
+            /* storage full/unavailable — nothing to do, this is best-effort */
+          }
+        }
+
+        function snap(label) {
+          var vv = window.visualViewport
+          var cs = probe ? getComputedStyle(probe) : null
+          var entry = {
+            label: label,
+            t: Date.now(),
+            innerHeight: window.innerHeight,
+            vvHeight: vv ? vv.height : null,
+            vvOffsetTop: vv ? vv.offsetTop : null,
+            vvScale: vv ? vv.scale : null,
+            clientHeight: document.documentElement.clientHeight,
+            screenHeight: screen.height,
+            screenWidth: screen.width,
+            probeOffsetHeight: probe ? probe.offsetHeight : null,
+            safeTop: cs ? cs.paddingTop : null,
+            safeBottom: cs ? cs.paddingBottom : null,
+            visibilityState: document.visibilityState,
+            wasDiscarded: !!document.wasDiscarded,
+          }
+          writeBuf(readBuf().concat([entry]))
+        }
+
+        function snapSeries(label) {
+          snap(label + ':0')
+          requestAnimationFrame(function () {
+            requestAnimationFrame(function () {
+              snap(label + ':raf2')
+            })
+          })
+          setTimeout(function () {
+            snap(label + ':+300')
+          }, 300)
+          setTimeout(function () {
+            snap(label + ':+1000')
+          }, 1000)
+          setTimeout(function () {
+            snap(label + ':+3000')
+          }, 3000)
+        }
+
+        window.__vplogSnap = snap
+        window.__vplogDump = function () {
+          snap('dump')
+          return readBuf()
+        }
+
+        snap('script-start')
+
+        function init() {
+          probe = document.createElement('div')
+          probe.style.cssText =
+            'position:fixed;inset:0;visibility:hidden;pointer-events:none;' +
+            'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);'
+          document.body.appendChild(probe)
+          snap('probe-attached')
+
+          document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') {
+              snapSeries('visible')
+            } else {
+              snap('hidden')
+            }
+          })
+          window.addEventListener('pageshow', function (e) {
+            snap('pageshow:persisted=' + e.persisted)
+          })
+          window.addEventListener('pagehide', function (e) {
+            snap('pagehide:persisted=' + e.persisted)
+          })
+          document.addEventListener('freeze', function () {
+            snap('freeze')
+          })
+          document.addEventListener('resume', function () {
+            snapSeries('resume')
+          })
+          window.addEventListener('orientationchange', function () {
+            setAppHeight()
+            snapSeries('orientationchange')
+          })
+          window.addEventListener('resize', function () {
+            setAppHeight()
+            snap('window-resize')
+          })
+          if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', function () {
+              snap('vv-resize')
+            })
+            window.visualViewport.addEventListener('scroll', function () {
+              snap('vv-scroll')
+            })
+          }
+        }
+
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', init)
+        } else {
+          init()
+        }
+        window.addEventListener('load', function () {
+          snap('load')
+        })
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
