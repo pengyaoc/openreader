@@ -458,6 +458,8 @@ export default function App() {
           loadingMore={articlesQuery.isFetchingNextPage}
           onLoadMore={() => articlesQuery.fetchNextPage()}
           listKey={selectionToQueryValue(selection)}
+          onRefresh={() => refreshMutation.mutate()}
+          refreshing={refreshMutation.isPending}
         />
       </div>
 

@@ -501,6 +501,34 @@ a {
   overflow-y: auto;
 }
 
+.pull-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  transition: height 0.18s ease;
+}
+
+.pull-indicator__icon {
+  display: inline-block;
+  font-size: 15px;
+  transition: transform 0.1s ease;
+}
+.pull-indicator__icon.ready {
+  color: var(--amber);
+}
+.pull-indicator__icon.spinning {
+  color: var(--amber);
+  animation: spin 0.9s linear infinite;
+}
+
+.pull-indicator__label.ready {
+  color: var(--amber);
+}
+
 .load-more-btn {
   display: block;
   max-width: 760px;

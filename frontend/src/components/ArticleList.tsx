@@ -1,5 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ArticleListItem } from '../api'
+
+// Pull-to-refresh tuning — see docs/superpowers/specs/2026-08-21-pull-to-refresh-design.md.
+const PULL_RESISTANCE = 0.5
+const PULL_MAX = 96
+const PULL_THRESHOLD = 64
 
 function timeAgo(iso: string | null): string {
   if (!iso) return ''
@@ -14,6 +19,100 @@ function timeAgo(iso: string | null): string {
   return new Date(iso).toLocaleDateString()
 }
 
+// Touch-driven pull-to-refresh on a scroll container. Raw DOM listeners
+// (not React's synthetic touch handlers) because touchmove needs
+// { passive: false } to preventDefault() the native rubber-band bounce
+// while a pull is in progress — otherwise the custom indicator visually
+// fights the browser's own overscroll.
+function usePullToRefresh(
+  scrollRef: React.RefObject<HTMLDivElement | null>,
+  onRefresh: () => void,
+  refreshing: boolean,
+) {
+  const [pullDistance, setPullDistance] = useState(0)
+  const startYRef = useRef<number | null>(null)
+  const refreshingRef = useRef(refreshing)
+  refreshingRef.current = refreshing
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+
+    function onTouchStart(e: TouchEvent) {
+      if (refreshingRef.current || el!.scrollTop !== 0) {
+        startYRef.current = null
+        return
+      }
+      startYRef.current = e.touches[0].clientY
+    }
+
+    function onTouchMove(e: TouchEvent) {
+      if (startYRef.current === null) return
+      const rawDelta = e.touches[0].clientY - startYRef.current
+      if (rawDelta <= 0) {
+        setPullDistance(0)
+        return
+      }
+      e.preventDefault()
+      setPullDistance(Math.min(rawDelta * PULL_RESISTANCE, PULL_MAX))
+    }
+
+    function onTouchEnd() {
+      if (startYRef.current === null) return
+      startYRef.current = null
+      setPullDistance((distance) => {
+        if (distance >= PULL_THRESHOLD) {
+          onRefresh()
+          // Held at the threshold (not the raw drag distance) so the
+          // indicator doesn't jump/snap once the finger lifts — it settles
+          // to the "refreshing" resting height instead.
+          return PULL_THRESHOLD
+        }
+        return 0
+      })
+    }
+
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: false })
+    el.addEventListener('touchend', onTouchEnd, { passive: true })
+    el.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
+    }
+  }, [scrollRef, onRefresh])
+
+  // Refresh finished — animate the indicator back to resting.
+  useEffect(() => {
+    if (!refreshing) setPullDistance(0)
+  }, [refreshing])
+
+  return pullDistance
+}
+
+function PullIndicator({ pullDistance, refreshing }: { pullDistance: number; refreshing: boolean }) {
+  if (pullDistance === 0 && !refreshing) return null
+  const ready = pullDistance >= PULL_THRESHOLD
+  const label = refreshing ? 'Refreshing…' : ready ? 'Release to refresh' : 'Pull to refresh'
+  const rotation = refreshing ? 0 : Math.min((pullDistance / PULL_THRESHOLD) * 180, 180)
+  return (
+    <div
+      className="pull-indicator"
+      style={{ height: refreshing ? PULL_THRESHOLD : pullDistance }}
+    >
+      <span
+        className={`pull-indicator__icon ${refreshing ? 'spinning' : ''} ${ready ? 'ready' : ''}`}
+        style={refreshing ? undefined : { transform: `rotate(${rotation}deg)` }}
+      >
+        ⟳
+      </span>
+      <span className={`pull-indicator__label ${ready || refreshing ? 'ready' : ''}`}>{label}</span>
+    </div>
+  )
+}
+
 interface Props {
   articles: ArticleListItem[]
   selectedId: number | null
@@ -26,6 +125,8 @@ interface Props {
   // switches between them, so without this the scroll container keeps
   // whatever scrollTop the previous list was left at.
   listKey: string
+  onRefresh: () => void
+  refreshing: boolean
 }
 
 export function ArticleList({
@@ -36,20 +137,26 @@ export function ArticleList({
   loadingMore,
   onLoadMore,
   listKey,
+  onRefresh,
+  refreshing,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
   }, [listKey])
+  const pullDistance = usePullToRefresh(scrollRef, onRefresh, refreshing)
 
   if (articles.length === 0) {
     return (
-      <div className="empty-state">
-        <div className="empty-state__icon">◧</div>
-        <div className="empty-state__title">Nothing here yet</div>
-        <div className="empty-state__hint">
-          Press <kbd>r</kbd> or hit Refresh to pull the latest items, or adjust your filters in
-          Configure.
+      <div className="article-list" id="article-list" ref={scrollRef}>
+        <PullIndicator pullDistance={pullDistance} refreshing={refreshing} />
+        <div className="empty-state">
+          <div className="empty-state__icon">◧</div>
+          <div className="empty-state__title">Nothing here yet</div>
+          <div className="empty-state__hint">
+            Press <kbd>r</kbd> or hit Refresh to pull the latest items, or adjust your filters in
+            Configure.
+          </div>
         </div>
       </div>
     )
@@ -57,6 +164,7 @@ export function ArticleList({
 
   return (
     <div className="article-list" id="article-list" ref={scrollRef}>
+      <PullIndicator pullDistance={pullDistance} refreshing={refreshing} />
       {articles.map((a) => (
         <div
           key={a.id}
