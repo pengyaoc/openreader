@@ -82,6 +82,14 @@ def test_rdf_rss1_feed_parses_one_item():
     assert item.summary == "An RDF/RSS 1.0 item description."
 
 
+def test_rss2_title_with_double_encoded_entity_is_decoded():
+    # Some feeds emit `&amp;#8217;` where they meant `&#8217;`. The XML
+    # parser only resolves the outer &amp;, leaving a literal `&#8217;` in
+    # the title text — it must still end up decoded to a real apostrophe.
+    entries = parse_feed(load("rss2_double_encoded_title.xml"))
+    assert entries[0].title == "Debian won’t ban AI code from its Linux distribution"
+
+
 def test_malformed_xml_raises_feed_parse_error():
     with pytest.raises(FeedParseError):
         parse_feed(load("malformed.xml"))

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Feed With Double-Encoded Entities</title>
+    <item>
+      <title>Debian won&amp;#8217;t ban AI code from its Linux distribution</title>
+      <link>https://example.com/rss/double-encoded</link>
+      <guid isPermaLink="false">rss-guid-double-encoded</guid>
+      <pubDate>Sat, 01 Aug 2026 12:00:00 GMT</pubDate>
+      <description>A teaser.</description>
+    </item>
+  </channel>
+</rss>

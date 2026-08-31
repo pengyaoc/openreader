@@ -7,6 +7,7 @@ content:encoded), and RSS 1.0/RDF.
 """
 from __future__ import annotations
 
+import html
 import xml.etree.ElementTree as ET
 
 import defusedxml.ElementTree as DET
@@ -30,7 +31,17 @@ class FeedParseError(Exception):
 
 
 def _text(el: ET.Element | None) -> str:
-    return (el.text or "").strip() if el is not None else ""
+    """XML-decodes &amp;/&lt;/etc. automatically (that's part of parsing the
+    document), but feeds that double-encode — e.g. emitting `&amp;#8217;`
+    where they meant `&#8217;` — leave a literal `&#8217;` in the parsed
+    text, since the ET parser only ever sees (and resolves) the outer
+    `&amp;`. title/author are rendered as plain text with no further HTML
+    parsing downstream, so nothing else would decode that leftover
+    reference — unescape it here. (summary/content_html don't need this:
+    they're parsed as HTML in textutil.py, which resolves entities anyway.)"""
+    if el is None or el.text is None:
+        return ""
+    return html.unescape(el.text.strip())
 
 
 def _parse_atom(root: ET.Element) -> list[NormalizedEntry]:
