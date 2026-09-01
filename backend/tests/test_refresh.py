@@ -14,6 +14,7 @@ from app.ingest.refresh import (
     refresh_imap_source,
     refresh_imap_sources,
 )
+from tests.conftest import read_state, seed_user
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -393,42 +394,59 @@ def test_refresh_dedupes_via_content_hash_when_a_feeds_guid_format_drifts(tmp_pa
     assert rows == 1
 
 
-def _seed_article(conn, source_id, guid, title, is_read=0):
-    conn.execute(
+def _seed_article(conn, source_id, guid, title, read_by=()):
+    cur = conn.execute(
         """INSERT INTO articles
-           (source_id, guid, url, title, excerpt, content_html, published_at, origin, is_read)
-           VALUES (?, ?, ?, ?, '', '', '2026-08-01T00:00:00Z', 'feed', ?)""",
-        (source_id, guid, f"https://x/{guid}", title, is_read),
+           (source_id, guid, url, title, excerpt, content_html, published_at, origin)
+           VALUES (?, ?, ?, ?, '', '', '2026-08-01T00:00:00Z', 'feed')""",
+        (source_id, guid, f"https://x/{guid}", title),
     )
+    # read_by is a list of user ids; read state is per-account now, so
+    # "already read" is a fact about a person, not about the article.
+    for user_id in read_by:
+        conn.execute(
+            """INSERT INTO article_states (user_id, article_id, is_read, read_at)
+               VALUES (?, ?, 1, '2026-08-01T12:00:00+00:00')""",
+            (user_id, cur.lastrowid),
+        )
+
+
+def _two_user_db(tmp_path, source_key):
+    """A DB with a source and two accounts (ids 1 and 2). Reconcile is a
+    config-driven sweep, so every one of these tests wants to know it
+    applied to both accounts, not just the one that happens to be first."""
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    seed_user(conn, "bob")  # user 1 already exists from init_schema
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) "
+        "VALUES (?, 'rss', 'S', 'F', 'https://x')",
+        (source_key,),
+    )
+    return conn, conn.execute(
+        "SELECT id FROM sources WHERE key=?", (source_key,)
+    ).fetchone()[0]
 
 
 def test_reconcile_marks_articles_read_when_source_removed_from_config(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    conn.execute(
-        "INSERT INTO sources (key, type, title, folder, url) VALUES ('uber-eng', 'rss', 'Uber Eng', 'Eng', 'https://x')"
-    )
-    source_id = conn.execute("SELECT id FROM sources WHERE key='uber-eng'").fetchone()[0]
+    conn, source_id = _two_user_db(tmp_path, "uber-eng")
     _seed_article(conn, source_id, "g1", "Post A")
     _seed_article(conn, source_id, "g2", "Post B")
     conn.commit()
 
     # New config no longer has uber-eng at all.
-    new_config = Config(sources=[])
-    marked = reconcile_read_state(conn, new_config)
+    marked = reconcile_read_state(conn, Config(sources=[]))
 
+    # Two articles, not four: the count is distinct articles, so it doesn't
+    # multiply with the number of accounts.
     assert marked == 2
-    rows = conn.execute("SELECT is_read FROM articles").fetchall()
-    assert all(r[0] == 1 for r in rows)
+    for user_id in (1, 2):
+        for guid in ("g1", "g2"):
+            assert read_state(conn, user_id, guid)[0] == 1
 
 
 def test_reconcile_marks_articles_read_when_they_no_longer_pass_tightened_rules(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    conn.execute(
-        "INSERT INTO sources (key, type, title, folder, url) VALUES ('xilei', 'rss', 'Xilei', 'Reading', 'https://x')"
-    )
-    source_id = conn.execute("SELECT id FROM sources WHERE key='xilei'").fetchone()[0]
+    conn, source_id = _two_user_db(tmp_path, "xilei")
     _seed_article(conn, source_id, "g1", "喷嚏图卦 today")  # matched old pattern only
     _seed_article(conn, source_id, "g2", "【喷嚏图卦 today")  # matches new pattern too
     conn.commit()
@@ -436,7 +454,7 @@ def test_reconcile_marks_articles_read_when_they_no_longer_pass_tightened_rules(
     new_config = Config(
         sources=[
             Source(
-                key="xilei", type="rss", title="Xilei", folder="Reading", url="https://x",
+                key="xilei", type="rss", title="S", folder="F", url="https://x",
                 rules=[Rule(action="include", field="title", pattern="【喷嚏图卦")],
             )
         ]
@@ -444,36 +462,36 @@ def test_reconcile_marks_articles_read_when_they_no_longer_pass_tightened_rules(
     marked = reconcile_read_state(conn, new_config)
 
     assert marked == 1
-    rows = {r[0]: r[1] for r in conn.execute("SELECT guid, is_read FROM articles")}
-    assert rows["g1"] == 1  # no longer matches -> marked read
-    assert rows["g2"] == 0  # still matches -> left alone
+    for user_id in (1, 2):
+        assert read_state(conn, user_id, "g1")[0] == 1  # no longer matches -> marked read
+        assert read_state(conn, user_id, "g2")[0] == 0  # still matches -> left alone
 
 
 def test_reconcile_never_touches_already_read_articles(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    conn.execute(
-        "INSERT INTO sources (key, type, title, folder, url) VALUES ('s1', 'rss', 'S', 'F', 'https://x')"
-    )
-    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
-    _seed_article(conn, source_id, "g1", "Anything", is_read=1)
+    conn, source_id = _two_user_db(tmp_path, "s1")
+    _seed_article(conn, source_id, "g1", "Anything", read_by=[1])
     conn.commit()
-    read_at_before = conn.execute("SELECT read_at FROM articles WHERE guid='g1'").fetchone()[0]
+    read_at_before = read_state(conn, 1, "g1")[1]
 
     marked = reconcile_read_state(conn, Config(sources=[]))  # source removed entirely
 
-    assert marked == 0  # already read, nothing to do
-    read_at_after = conn.execute("SELECT read_at FROM articles WHERE guid='g1'").fetchone()[0]
-    assert read_at_after == read_at_before  # untouched, not re-stamped
+    # Still 1: user 2 hasn't read it, so the article is genuinely swept —
+    # but user 1's own read_at must survive untouched, not be re-stamped.
+    assert marked == 1
+    assert read_state(conn, 1, "g1") == (1, read_at_before)
+    assert read_state(conn, 2, "g1")[0] == 1
+
+
+def test_reconcile_skips_articles_every_account_has_already_read(tmp_path):
+    conn, source_id = _two_user_db(tmp_path, "s1")
+    _seed_article(conn, source_id, "g1", "Anything", read_by=[1, 2])
+    conn.commit()
+
+    assert reconcile_read_state(conn, Config(sources=[])) == 0
 
 
 def test_reconcile_is_idempotent(tmp_path):
-    conn = connect(tmp_path / "reader.db")
-    init_schema(conn)
-    conn.execute(
-        "INSERT INTO sources (key, type, title, folder, url) VALUES ('s1', 'rss', 'S', 'F', 'https://x')"
-    )
-    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    conn, source_id = _two_user_db(tmp_path, "s1")
     _seed_article(conn, source_id, "g1", "Post")
     conn.commit()
 

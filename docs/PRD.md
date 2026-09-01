@@ -16,9 +16,13 @@ rather than a SaaS markup.
 
 ## 2. Users
 
-Single-user, self-hosted, local-network app. Built for one person (an
-engineering manager) running it on their own machine and reading from
-other devices (phone, tablet) on the same LAN.
+Self-hosted app, originally single-user, now a small fixed set of
+accounts (2026-08-31). Built for one person (an engineering manager)
+running it on their own machine and reading from other devices (phone,
+tablet) on the same LAN, plus anyone in the same household reading the
+same feeds — each with their own read and starred state over one shared,
+hand-curated feed list. Emphatically not a product with signups: accounts
+are created by whoever administers the box, from a CLI.
 
 ## 3. Product principles
 
@@ -170,7 +174,14 @@ other devices (phone, tablet) on the same LAN.
   LLM feature this app keeps is on-demand summarization of an article you
   already have, not sourcing new content. Filtering stays regex-only.
 - Any form of scheduling or background polling.
-- Multi-user auth, accounts, or sharing.
+- ~~Multi-user auth, accounts, or sharing.~~ **Partly shipped 2026-08-31**
+  (see docs/WORKLOG.md): multiple accounts, each with its own read and
+  starred state, signing in with their own username. Scoped to a
+  household, not to tenancy — the feed list, the articles, and the cached
+  summaries are all shared and global, accounts are created from a CLI
+  rather than a signup page, and there is no sharing, no per-account
+  config, and no notion of who added a feed. Still a non-goal: anything
+  that would make this multi-*tenant*.
 - OPML import/export.
 - Mobile app (the responsive web UI is the mobile story).
 
@@ -181,7 +192,8 @@ other devices (phone, tablet) on the same LAN.
 - The app idles at negligible CPU/memory on a personal machine and never
   makes an unattended network call.
 - Read/unread state survives restarts and refreshes exactly the articles
-  you've actually opened — no more, no less.
+  you've actually opened — no more, no less, and only for the account
+  that opened them.
 
 ## 7. Open questions / known gaps
 

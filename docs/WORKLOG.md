@@ -2170,3 +2170,98 @@ detection code and a CSS branch, independent of how the root cause shakes out.
    `viewWillTransition` directly) remain fallback options if 1–3 don't produce a real fix —
    the wrapper is untested and not obviously better, since it still delegates web view sizing
    to the same WebKit code.
+
+## 2026-08-31 — Multi-user: two accounts, per-account read/starred state
+
+Request: *"allow multiple people to use the openreader without affecting each other. Each
+person should be able to sign in with their own account and their own read state/star state
+tracking... the feed config is still one version that's shared (only me and my wife will read
+this). I should still keep existing account and progress. Create a separate account for my
+wife with the same password as me (you can copy the hash)."*
+
+So: two accounts (`pengyao`, `heng`), separate read and starred state, everything else shared.
+Existing production state — 209 articles, 48 unread, 0 starred — migrates onto `pengyao`;
+`heng` starts with the whole backlog unread.
+
+**Schema.** `users` (id, username, bcrypt hash, timestamps) and `article_states`
+(user_id, article_id, is_read, read_at, is_starred), the latter `WITHOUT ROWID` since the
+composite PK is the entire table. `articles.is_read/read_at/is_starred` are gone.
+
+The design decision everything else follows from: **a missing `article_states` row means
+unread and unstarred.** That's what makes "add an account and they see the existing backlog
+as unread" a zero-write operation rather than a 209-row backfill, and keeps the table
+proportional to what people touch rather than accounts × articles. The cost, named honestly:
+*unread is no longer indexable*, because it's partly the absence of a row. Three indexes
+(`idx_articles_unread`, `idx_articles_starred`, `idx_articles_src_unread`) had nothing left
+to index and were dropped; reads now drive from `articles` ordered by `idx_articles_pub` and
+probe state by primary key per row. At 209 articles that's free and stays fine into the tens
+of thousands. Escape hatch if that ever changes is documented in ERD §3 (denormalize
+`source_id` into `article_states`). The starred view is the one exception and inner-joins,
+driving off `idx_article_states_starred` over one account's handful of rows.
+
+**The migration gotcha, worth remembering.** `ALTER TABLE ... DROP COLUMN` fails if *any*
+index references the column — and it raises `error in index ... after drop column`, which is
+**not** the `no such column` string that `_drop_column_if_present` swallows. Dropping the
+three indexes first isn't tidiness; without it `init_schema` raises on startup against every
+existing deployment. The backfill is an `ON CONFLICT DO NOTHING` upsert and detection is "do
+the legacy columns still exist", so a crash anywhere in the middle just re-runs harmlessly on
+the next boot. Verified against a copy of the live DB before deploying: `pengyao`'s per-source
+unread counts came back identical to the pre-migration baseline
+(`[(1,26),(2,5),(4,1),(5,6),(6,3),(8,3),(12,1),(13,1),(14,1),(16,1)]`, 48 total), `heng` got
+209 unread / 0 starred.
+
+**Auth.** The session cookie payload became `"<user_id>:<expiry>"` with the HMAC over both, so
+a valid cookie can't be edited into another account's session. Old-format cookies
+(`"<expiry>"`, no identity) are **rejected** rather than mapped to account 1 — honoring them
+would make the only thing separating the accounts bypassable by holding a stale cookie. Cost
+is one extra login each, once.
+
+Passwords moved from `READER_AUTH_PASSWORD_HASH` into `users.password_hash`, which forced a
+real decision: **that env var can no longer be part of deciding whether login is required.**
+It's consumed once as a first-run seed and then dead, so gating on it would mean deleting the
+now-useless line from `openreader.env` silently unlocks an internet-facing deployment. Auth
+now keys off `READER_SESSION_SECRET` alone. That does delete the old "exactly one of the two
+set fails closed" safety net — replaced with a loud stderr warning in `build_production_app()`
+when a multi-account DB starts with no secret. Warn, not refuse: running a copy of the
+production DB locally with no secret is routine.
+
+Deliberately *not* built: an HTTP password-change endpoint (two accounts, SSH access, a
+CSRF-sensitive write path for something done roughly never — `app/useradm.py` handles it), and
+a `users.session_epoch` column to invalidate sessions on password change (puts a DB read on a
+deliberately stateless verification path, to defend a threat model a household reader doesn't
+have; rotating the session secret already nukes everything).
+
+**Account bootstrap.** The first draft seeded both accounts from a `READER_BOOTSTRAP_USERS`
+env var on first startup. Rejected before writing it: a forgotten env-file edit before the
+restart would migrate the entire production read history onto an account named `reader`,
+recoverable only by hand-editing the DB, and the failure is silent. Instead `init_schema`
+guarantees exactly one account exists (`reader`, fresh-DB only) and the real accounts are
+created explicitly with `python -m app.useradm`, where a typo is visible immediately.
+`useradm` lives in `backend/app/` rather than `scripts/` for an unglamorous reason: `deploy.sh`
+rsyncs only `backend/app`, so a `scripts/` file would be unrunnable exactly where accounts get
+created.
+
+**Frontend.** Username field on the login form (`autoComplete="username"` alongside
+`current-password` is what makes Chrome store credentials *per account* rather than one blob
+for the site), a `['me']` query whose 401 is now the single "show the login screen" signal, and
+an identity row in the sidebar footer. The subtle part is `resetForIdentityChange`, fired on
+both login and logout: `qc.clear()` rather than `invalidateQueries()`, because the cache holds
+the previous account's unread counts and read/starred flags and would render them before
+refetching — plus a reset of `selection`/`openArticleId`, which are plain React state that
+survives the login-screen swap and would otherwise land the next person on the previous one's
+open article. `sessionStorage['reader-view-state']` is wiped rather than namespaced per
+account: reaching a second identity in one tab must go through that reset anyway, and
+namespacing would force the restore-on-reload read (a `useState` initializer) to wait on an
+async `['me']` round trip and visibly flash the default view first. Theme stays global — that's
+a property of the device and the light you're reading in, not of who's signed in.
+
+**`reconcile_read_state`** now sweeps for every account (being out of config scope is a
+property of the config, not of a person) but still returns the count of distinct *articles*,
+not `(user, article)` rows, so the `reconciled` number in API responses doesn't double with
+the account count.
+
+247 backend tests (was 212), including a new `test_store.py` covering isolation in both
+directions, migration tests against a synthetic legacy DB (including the interrupted-migration
+resume path), and two-account end-to-end API tests running the real login flow. Verified live
+in a browser: signed in as `heng` (185 unread, config-filtered), logged out, signed in as
+`pengyao` (48 unread, per-source counts all different, no stale rows).

@@ -143,6 +143,8 @@ export default function App() {
   const [settings, setSettings] = useState<'list' | 'add' | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [refreshReport, setRefreshReport] = useState<RefreshReport | null>(null)
+  // Not namespaced per account, deliberately: dark/light is a property of
+  // the device and the light you're reading in, not of who's signed in.
   const [theme, setTheme] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('reader-theme') as 'dark' | 'light' | null) ?? 'dark',
   )
@@ -164,8 +166,48 @@ export default function App() {
 
   const sourcesQuery = useQuery({ queryKey: ['sources'], queryFn: api.sources })
   const llmStatusQuery = useQuery({ queryKey: ['llm-status'], queryFn: api.llmStatus })
+  // retry:false so a 401 shows the login screen immediately instead of
+  // after the default retry backoff; staleTime:Infinity because identity
+  // only changes by logging out, which clears the whole cache below.
+  const meQuery = useQuery({
+    queryKey: ['me'],
+    queryFn: api.me,
+    retry: false,
+    staleTime: Infinity,
+  })
 
-  const needsLogin = sourcesQuery.error instanceof UnauthorizedError
+  // /api/me is gated exactly like every data route, so its 401 is the
+  // authoritative answer. ['sources'] is still checked because it's the
+  // query that fires first on a cold load — without it the app would
+  // briefly render an empty shell before ['me'] resolved.
+  const needsLogin =
+    meQuery.error instanceof UnauthorizedError || sourcesQuery.error instanceof UnauthorizedError
+
+  // Everything that has to be thrown away when the signed-in account
+  // changes, in either direction. qc.clear() rather than
+  // invalidateQueries(): the cache holds the previous account's unread
+  // counts and read/starred flags, and article bodies sit in it for
+  // gcTime after that — invalidating refetches them eventually, but the
+  // stale rows render first. The React state reset matters just as much:
+  // `selection` and `openArticleId` survive the login-screen swap, so
+  // without it the next person lands on the previous one's open article.
+  // sessionStorage is wiped rather than namespaced per account for the
+  // same reason it can be: reaching a second identity in one tab must go
+  // through here, and namespacing would mean the restore-on-reload read
+  // (a useState initializer above) had to wait on an async ['me'] round
+  // trip and visibly flash the default view first.
+  const resetForIdentityChange = useCallback(() => {
+    try {
+      sessionStorage.removeItem(STORAGE_KEY)
+    } catch {
+      /* storage unavailable (private browsing etc) */
+    }
+    setOpenArticleId(null)
+    setCursorId(null)
+    setSelection({ kind: 'saved', view: 'unread' })
+    qc.clear()
+    qc.invalidateQueries()
+  }, [qc])
 
   // A source selection restored from the URL only has the id (see
   // parseSelectionFromQuery) — fill in its title once sources have loaded.
@@ -408,7 +450,7 @@ export default function App() {
         : selection.folder
 
   if (needsLogin) {
-    return <LoginPage onLoggedIn={() => qc.invalidateQueries()} />
+    return <LoginPage onLoggedIn={resetForIdentityChange} />
   }
 
   return (
@@ -428,7 +470,9 @@ export default function App() {
         onCloseMobile={() => setMobileSidebarOpen(false)}
         onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
         onMarkAllUnreadRead={() => markAllUnreadReadMutation.mutate()}
-        onLogout={() => api.logout().finally(() => qc.invalidateQueries())}
+        onLogout={() => api.logout().finally(resetForIdentityChange)}
+        username={meQuery.data?.username}
+        authEnabled={meQuery.data?.auth_enabled ?? false}
       />
 
       <div className="main">

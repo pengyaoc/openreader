@@ -1,10 +1,11 @@
 """Starlette app wiring: routes -> handlers, static frontend, app.state
 holding the config and a connection factory (fresh sqlite3 connection per
-request — WAL mode allows concurrent readers, and this app is single-user
-so there is no real concurrency to worry about).
+request — WAL mode allows concurrent readers, and with a household's worth
+of accounts there is no real write contention to worry about).
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -14,7 +15,7 @@ from starlette.routing import Route
 
 from app import settings
 from app.api import articles, auth_api, config_api, images, refresh_api, sources
-from app.auth import AuthMiddleware
+from app.auth import AuthMiddleware, auth_configured
 from app.config import Config, load_config
 from app.db import connect, init_schema
 
@@ -55,6 +56,7 @@ def create_app(
         Route("/api/img", images.proxy_image),
         Route("/api/login", auth_api.login, methods=["POST"]),
         Route("/api/logout", auth_api.logout, methods=["POST"]),
+        Route("/api/me", auth_api.me),
     ]
 
     middleware = [Middleware(AuthMiddleware)] if require_auth else []
@@ -72,7 +74,22 @@ def build_production_app() -> Starlette:
     settings.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(settings.DB_PATH)
     init_schema(conn)
+    accounts = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     conn.close()
+
+    # The old "exactly one auth env var set" fail-closed check is gone with
+    # the pair it checked (see app/auth.py). This is what replaces it: a DB
+    # with real accounts in it, served with no session secret, is serving
+    # everyone's reading as one unauthenticated account. Warn rather than
+    # refuse to boot — running a copy of the production DB locally with no
+    # secret is a routine, legitimate thing to do.
+    if accounts > 1 and not auth_configured():
+        print(
+            f"WARNING: {accounts} accounts exist but READER_SESSION_SECRET is unset — "
+            "no login is required and every request is served as the first account.",
+            file=sys.stderr,
+            flush=True,
+        )
 
     app = create_app()
 

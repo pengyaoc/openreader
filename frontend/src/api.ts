@@ -117,6 +117,16 @@ interface SourceFieldsImap {
 export type SourceFields = SourceFieldsRss | SourceFieldsImap
 export type NewSource = SourceFields & { key: string }
 
+// The signed-in account. `auth_enabled` is false on a no-login
+// deployment (local/LAN), where `username` is the default account rather
+// than anyone who actually signed in — the sidebar uses it to hide a Log
+// out button that would clear a cookie that was never gating anything.
+export interface Me {
+  id: number
+  username: string
+  auth_enabled: boolean
+}
+
 // Thrown instead of a generic Error on a 401, so callers (App.tsx's
 // top-level auth check) can tell "not logged in" apart from a normal
 // request failure and show the login screen instead of an error state.
@@ -146,14 +156,19 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  login: (password: string) =>
+  login: (username: string, password: string) =>
     apiFetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
-    }).then((r) => json<{ ok: boolean }>(r)),
+      body: JSON.stringify({ username, password }),
+    }).then((r) => json<{ ok: boolean; id: number; username: string }>(r)),
 
   logout: () => apiFetch('/api/logout', { method: 'POST' }).then((r) => json<{ ok: boolean }>(r)),
+
+  // Gated like every other /api route, so its 401 is the single
+  // authoritative "show the login screen" signal — App.tsx used to infer
+  // that from whichever data query happened to fail first.
+  me: () => apiFetch('/api/me').then((r) => json<Me>(r)),
 
   sources: () => apiFetch('/api/sources').then((r) => json<Source[]>(r)),
 

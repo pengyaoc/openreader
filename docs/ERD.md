@@ -54,10 +54,14 @@ backend/app/
 │                        # parse+validate+serialize (to_yaml),
 │                        # credential-key guard (see §5)
 ├── auth.py               # app-layer login: bcrypt password check,
-│                         # HMAC-signed session cookie, AuthMiddleware
-│                         # (see §5)
+│                         # HMAC-signed session cookie carrying the
+│                         # account id, AuthMiddleware (see §5)
+├── useradm.py            # account admin CLI (`python -m app.useradm`);
+│                         # lives here, not in scripts/, because
+│                         # deploy.sh only ships backend/app to the VM
 ├── db.py                # schema (see §3), WAL connection factory
-├── store.py             # read/write helpers used by the API layer
+├── store.py             # read/write helpers used by the API layer,
+│                        # every one scoped to an account (see §5)
 ├── connectors/
 │   ├── base.py           # NormalizedEntry — the shape every connector emits
 │   ├── rss.py             # Atom/RSS2.0/RDF parser (defusedxml)
@@ -89,13 +93,15 @@ Design rule followed throughout: **pure logic is separated from I/O** and
 every I/O boundary (HTTP fetch, IMAP socket, subprocess call) is injectable
 in tests via a `Fetcher`/`Runner`-style callable parameter, so the entire
 pipeline is unit-tested without a real network call or subprocess spawn.
-212 backend tests, zero of which touch the network.
+247 backend tests, zero of which touch the network.
 
 ## 3. Data model (ERD)
 
 ```mermaid
 erDiagram
     sources ||--o{ articles : "has many"
+    users ||--o{ article_states : "has many"
+    articles ||--o{ article_states : "has many"
 
     sources {
         int id PK
@@ -128,11 +134,24 @@ erDiagram
         text origin "feed | email"
         text hydrated_at "lazy full-text fetch completed"
         text hydrate_failed_at "lazy full-text fetch failed (suppresses retry)"
-        bool is_read
-        text read_at
-        bool is_starred
         text llm_summary_html "sanitized; cached forever once generated"
         text llm_summary_at
+    }
+
+    users {
+        int id PK
+        text username UK "COLLATE NOCASE"
+        text password_hash "bcrypt; managed via python -m app.useradm"
+        text created_at
+        text password_changed_at
+    }
+
+    article_states {
+        int user_id PK_FK
+        int article_id PK_FK
+        bool is_read "absent row == unread"
+        text read_at
+        bool is_starred "absent row == unstarred"
     }
 ```
 
@@ -149,6 +168,23 @@ Notes on choices that aren't obvious from the columns alone:
   `DROP TABLE`, not a lossy one. `db.py`'s `init_schema()` still has no
   general migration framework — this was a one-off, same idempotent-guard
   pattern as the `ADD COLUMN` helper it sits next to.
+- **Read and starred state is per-account, in `article_states`** (added
+  2026-08-31; these were columns on `articles` before). Feeds are shared —
+  one `feeds.yaml`, one `sources`/`articles` row per thing, one cached
+  summary — because the household reads the same feeds; only what a
+  *person* did to an article is private to them.
+- **A missing `article_states` row means unread and unstarred**, rather
+  than every account getting a row per article at ingest. That's what lets
+  a newly created account start with the whole existing backlog unread at
+  zero write cost, and keeps the table proportional to what people touch
+  instead of accounts × articles. The cost is that "unread" is no longer
+  indexable — it's partly the *absence* of a row — so read queries drive
+  from `articles` (ordered by `idx_articles_pub`) and probe state by
+  primary key per row. Fine at this size; the escape hatch if `articles`
+  ever gets large is to denormalize `source_id` into `article_states` and
+  compute unread as `count(articles) − count(read states)`. The starred
+  view is the exception and inner-joins, driving off
+  `idx_article_states_starred` over one account's handful of rows.
 - **`content_hash`** is *not* currently used for cross-source duplicate
   detection (e.g. the same story from two outlets) — it's indexed for a
   future dedup pass but the only active dedup key today is `(source_id,
@@ -164,7 +200,16 @@ Notes on choices that aren't obvious from the columns alone:
   ... ADD COLUMN` in `init_schema()` (guarded by catching "duplicate
   column name") so an already-deployed database picks up new columns on
   its next restart. Same approach whenever a column is added in the
-  future.
+  future. The 2026-08-31 multi-user migration is the largest thing that
+  pattern has carried: `_migrate_per_user_state()` detects "not yet
+  migrated" by the legacy columns still existing, copies every read-or-
+  starred row into `article_states` for account 1, then drops the columns.
+  Two things there are load-bearing — the three indexes referencing those
+  columns must be `DROP INDEX`ed *first* (SQLite refuses to drop an
+  indexed column, and the error it raises isn't the "no such column" the
+  drop helper tolerates, so it would crash startup), and the backfill is
+  an `ON CONFLICT DO NOTHING` upsert so a crash between backfill and drop
+  simply re-runs harmlessly on the next boot.
 
 ## 4. API surface
 
@@ -174,8 +219,9 @@ cookie required) otherwise, matching this app's local/LAN default.
 
 | Method & path | Purpose | Blocking I/O? |
 |---|---|---|
-| `POST /api/login` | Verify password against `READER_AUTH_PASSWORD_HASH`, set the session cookie (§5) — unauthenticated (has to be, nothing to authenticate with yet) | bcrypt check off the event loop (`asyncio.to_thread`) — deliberately ~100-300ms |
+| `POST /api/login` | `{username, password}` against `users.password_hash`, set the session cookie carrying that account's id (§5) — unauthenticated (has to be, nothing to authenticate with yet) | bcrypt check off the event loop (`asyncio.to_thread`) — deliberately ~100-300ms, and it runs against a dummy hash for unknown usernames too, so a bad username and a bad password cost the same |
 | `POST /api/logout` | Clear the session cookie — always 200, a no-op if there was nothing to clear; unauthenticated | No |
+| `GET /api/me` | `{id, username, auth_enabled}` for the current session. Gated like every data route on purpose: its 401 is the frontend's single "show the login screen" signal | No |
 | `GET /api/sources` | List sources with unread counts, filtered to keys present in the live config — a source removed from `feeds.yaml` stops appearing here immediately, even though its DB row and articles aren't deleted (§5) | No |
 | `POST /api/sources` | Structured add-source, any type (rss/imap) (validates, writes YAML, creates DB row) | No |
 | `GET /api/sources/:id` | Full detail for one source (url/query/mailbox_folder/fetch_full_text/rules) — `list_sources` deliberately omits these; backs the edit form's pre-fill | No |
@@ -403,12 +449,51 @@ an expiry timestamp. The password itself is a bcrypt hash
 the server, only ever arriving transiently in a login request body before
 `bcrypt.checkpw` (run via `asyncio.to_thread`, since it's deliberately
 ~100-300ms of blocking CPU — same off-event-loop pattern as this app's
-other blocking work) discards it. Both env vars unset (the default) means
-no login is required at all, matching every other optional credential in
-this app — only exactly one set fails closed, since that looks like a
-deploy mistake rather than an intentional choice. Apache's role shrank
-back to a pure reverse proxy (`ProxyPass` only, no `AuthType Basic`
-block) once this was live.
+other blocking work) discards it. `READER_SESSION_SECRET` unset (the
+default) means no login is required at all, matching every other optional
+credential in this app. Apache's role shrank back to a pure reverse proxy
+(`ProxyPass` only, no `AuthType Basic` block) once this was live.
+
+**Multiple accounts, one shared feed list (2026-08-31).** Two people
+reading one deployment need separate read and starred state and nothing
+else separate — so `users` and `article_states` were added (§3), every
+`store.py` helper takes an account id, and `config/feeds.yaml`,
+`sources`, `articles` and cached summaries all stay global. Consequences
+worth naming:
+
+- *The session cookie carries the account id* — payload is
+  `"<user_id>:<expiry>"` with the HMAC over both, so one account's cookie
+  can't be edited into another's. Pre-multi-user cookies (`"<expiry>"`,
+  no identity) are rejected rather than attributed to account 1; honoring
+  them would make account separation bypassable by holding a stale
+  cookie. Cost is one extra login each, once.
+- *Passwords moved into the DB.* `READER_AUTH_PASSWORD_HASH` is now a
+  first-run seed for the auto-created account and nothing more;
+  `app/useradm.py` manages passwords after that. Which means whether a
+  login is required now keys off `READER_SESSION_SECRET` **alone** — the
+  old "exactly one of the two set fails closed" rule is gone with the
+  pair it checked. Keeping the hash in that condition would have been
+  worse than losing the check: it's consumed once and then dead, so
+  tidying the stale line out of the env file would silently unlock an
+  internet-facing deployment. `build_production_app()` prints a loud
+  stderr warning instead when a multi-account DB starts with no secret.
+- *A password change does not end existing sessions*, since the cookie
+  holds only an id and an expiry. A `users.session_epoch` column checked
+  per request would fix that properly, and was rejected: it puts a DB
+  read on a deliberately stateless, zero-lookup verification path to
+  defend a threat model (revoking a stolen cookie without touching the
+  secret) that a two-person household reader doesn't have. Rotating
+  `READER_SESSION_SECRET` already invalidates everything.
+- *`reconcile_read_state` sweeps for every account.* Being out of config
+  scope is a property of the config, not of a person, so a removed source
+  marks read for everyone still holding it unread — but it returns the
+  count of distinct *articles*, not of `(user, article)` rows written, so
+  the `reconciled` number in API responses keeps its human meaning
+  instead of multiplying with the account count.
+- *Summaries stay shared and unattributed.* Either account can spend the
+  household's `claude` quota on a summary the other then reads for free,
+  and neither can regenerate the other's — consistent with the existing
+  "cached forever, no regenerate path" design.
 
 **`type: imap` is the only newsletter connector — a `type: gmail` OAuth
 connector existed early on and was fully removed 2026-08-13.** Discovered
@@ -592,8 +677,8 @@ Full history of the tradeoffs and what was found along the way is in
   tight fit on a 1GB box also running Apache/MySQL/PHP-FPM — workable only
   because usage is sparse/adhoc (personal, ~1 query/5min), not something
   to run at any real frequency. See docs/WORKLOG.md, 2026-08-14.
-- **App-layer login** (`READER_AUTH_PASSWORD_HASH`/`READER_SESSION_SECRET`
-  set in `/opt/openreader/openreader.env`, see §5) stands in front of the
+- **App-layer login** (`READER_SESSION_SECRET` set in
+  `/opt/openreader/openreader.env`, see §5) stands in front of the
   whole app — `READER_READONLY_CONFIG` is intentionally *not* set here as
   a result (see §5's entry on that flag): the config-write endpoint no
   longer needs its own lock once nothing unauthenticated can reach it at

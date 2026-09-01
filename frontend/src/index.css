@@ -394,6 +394,24 @@ a {
   padding: 10px 18px;
 }
 
+/* Who's signed in. Quiet on purpose — it answers a question you ask once
+   per session, above the actions rather than competing with them. */
+.sidebar__identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px 10px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ink-dim);
+}
+
+.sidebar__identity-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .refresh-btn {
   width: 100%;
   display: flex;

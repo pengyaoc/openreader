@@ -550,32 +550,69 @@ def reconcile_read_state(conn: sqlite3.Connection, config: Config) -> int:
     article (feedback 2026-08-13: "any feed items that don't meet the
     criteria should be marked as read... they can still stay in the DB").
 
-    Only inspects is_read=0 rows — already-read articles need no action
+    Only touches articles still unread — already-read ones need no action
     whether a person read them or this same function did on a previous
     config save, and read_at for a genuinely-user-read article is never
-    touched. Returns the number of articles marked.
+    re-stamped.
+
+    Multi-user (2026-08-31): being out of scope is a property of the
+    config, not of a person, so an affected article is marked read for
+    *every* account that still has it unread — one config save shouldn't
+    clear an item from one household member's Unread and leave it in the
+    other's. The return value stays the number of distinct *articles*
+    affected rather than the number of (user, article) states written, so
+    the "reconciled" count surfaced by the config endpoints keeps its
+    human-meaningful reading and doesn't multiply with the account count.
     """
     valid_keys = {s.key for s in config.sources}
     rules_by_key = {s.key: [compile_rule(r) for r in s.rules] for s in config.sources}
     now = datetime.now(UTC).isoformat()
     marked = 0
 
+    # One upsert covering every account at once: CROSS JOIN users generates
+    # the (user, article) pairs and the LEFT JOIN narrows them to the ones
+    # actually still unread. {scope} is always a literal-free fragment with
+    # its own bound parameter — never interpolated user input.
+    sweep_sql = """
+        INSERT INTO article_states (user_id, article_id, is_read, read_at)
+        SELECT u.id, a.id, 1, ?
+        FROM articles a
+        CROSS JOIN users u
+        LEFT JOIN article_states st ON st.article_id = a.id AND st.user_id = u.id
+        WHERE {scope} AND COALESCE(st.is_read, 0) = 0
+        ON CONFLICT(user_id, article_id) DO UPDATE SET
+            is_read = 1, read_at = excluded.read_at
+    """
+    # "Unread for at least one account" — the candidate filter for both
+    # branches below, and what keeps `marked` counting articles rather than
+    # state rows.
+    unread_for_anyone = """
+        EXISTS (SELECT 1 FROM users u
+                LEFT JOIN article_states st
+                       ON st.user_id = u.id AND st.article_id = a.id
+                WHERE COALESCE(st.is_read, 0) = 0)
+    """
+
     for source_id, key in conn.execute("SELECT id, key FROM sources").fetchall():
         if key not in valid_keys:
-            cur = conn.execute(
-                "UPDATE articles SET is_read = 1, read_at = ? WHERE source_id = ? AND is_read = 0",
-                (now, source_id),
-            )
-            marked += cur.rowcount
+            marked += conn.execute(
+                f"""SELECT COUNT(*) FROM articles a
+                    WHERE a.source_id = ? AND {unread_for_anyone}""",
+                (source_id,),
+            ).fetchone()[0]
+            conn.execute(sweep_sql.format(scope="a.source_id = ?"), (now, source_id))
             continue
 
         rules = rules_by_key[key]
         if not rules:
             continue  # no rules on this source -> nothing can fail to pass
 
+        # Rules are evaluated once per article regardless of how many
+        # accounts are behind on it.
         rows = conn.execute(
-            """SELECT id, title, excerpt, content_html, author, url
-               FROM articles WHERE source_id = ? AND is_read = 0""",
+            f"""SELECT a.id, a.title, a.excerpt, a.content_html, a.author, a.url
+                FROM articles a
+                WHERE a.source_id = ? AND {unread_for_anyone}""",
             (source_id,),
         ).fetchall()
         for article_id, title, excerpt, content_html, author, url in rows:
@@ -585,10 +622,7 @@ def reconcile_read_state(conn: sqlite3.Connection, config: Config) -> int:
             )
             passed, _ = evaluate_rules(raw, rules)
             if not passed:
-                conn.execute(
-                    "UPDATE articles SET is_read = 1, read_at = ? WHERE id = ?",
-                    (now, article_id),
-                )
+                conn.execute(sweep_sql.format(scope="a.id = ?"), (now, article_id))
                 marked += 1
 
     conn.commit()

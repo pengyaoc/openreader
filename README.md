@@ -24,10 +24,12 @@ subscription you're replacing.
 - **Your data never leaves your server.** No analytics, no tracking, no
   third party ever sees your reading list or your mailbox. It's a SQLite
   file on disk that you control end to end.
-- **Built for one person, properly.** Not a stripped-down multi-tenant
-  SaaS product — a fast, single-user reader with no scheduler, no
+- **Built for you and the people you live with.** Not a stripped-down
+  multi-tenant SaaS product — a fast reader with no scheduler, no
   background jobs, no "upgrade to unlock this" screens. Refresh is a
-  button. Summarize is a button. Nothing runs unless you ask it to.
+  button. Summarize is a button. Nothing runs unless you ask it to. Add
+  as many accounts as you like: each gets its own read and starred state
+  over one shared feed list, and nobody is billed per seat.
 - **Cheap to run.** Small enough to co-host with something else on the
   smallest VM your cloud provider sells.
 
@@ -133,7 +135,8 @@ Environment variables (all optional, sensible defaults):
 | `READER_MEDIA` | `data/media` |
 | `READER_IMAP_HOST` / `_USER` / `_PASSWORD` | unset — required together for `type: imap` sources |
 | `READER_READONLY_CONFIG` | unset — set to `1` to make `PUT /api/config` return 403 |
-| `READER_AUTH_PASSWORD_HASH` / `READER_SESSION_SECRET` | unset — no login required (see step 4); both must be set together |
+| `READER_SESSION_SECRET` | unset — no login required (see step 4); setting it is what turns login on |
+| `READER_AUTH_PASSWORD_HASH` | unset — bcrypt hash seeding the *first* account on a brand-new DB only (see step 4) |
 
 ### 3. (optional) Newsletters via IMAP
 
@@ -193,25 +196,57 @@ the only scenario it exists for.
 The app has its own login screen and a 90-day session cookie — no
 Apache/reverse-proxy config needed, and unlike Basic Auth (this app's
 approach until 2026-08-13), Chrome recognizes the real `<form>` login and
-offers to save the password, and the session doesn't get dropped every
+offers to save credentials, and the session doesn't get dropped every
 time a mobile browser reclaims a backgrounded tab.
 
-1. **Generate a bcrypt password hash, locally:**
-   ```bash
-   htpasswd -nbB reader 'your-password-here'
-   ```
-   Take just the hash portion after `reader:` (starts with `$2y$` or
-   `$2b$`). The plaintext password is never stored anywhere — see the
-   hashing step above and `app/auth.py`'s module docstring.
-2. **Generate a session secret, locally:**
+Accounts are rows in the DB's `users` table, each with its own read and
+starred state (see **Accounts** below). Feeds are shared: one
+`config/feeds.yaml`, one copy of every article, one set of summaries.
+
+1. **Generate a session secret, locally, and set it:**
    ```bash
    python3 -c "import secrets; print(secrets.token_hex(32))"
    ```
-3. **Set both env vars** before starting the backend:
-   `READER_AUTH_PASSWORD_HASH` (the hash from step 1) and
-   `READER_SESSION_SECRET` (from step 2). Both must be set together — one
-   without the other is treated as broken config and locks everything out
-   (401), not a silent fallback to no-auth.
+   `READER_SESSION_SECRET` is the single switch: set, a login is required
+   and it signs the session cookie; unset, no login is required and every
+   request is served as the first account. Nothing else turns auth on or
+   off — in particular `READER_AUTH_PASSWORD_HASH` does not, because it's
+   consumed once at first-run and then dead, so removing the stale line
+   must not silently unlock the deployment.
+2. **Create your accounts** with the admin CLI (see **Accounts** below).
+   On a brand-new DB, `READER_AUTH_PASSWORD_HASH` — a bcrypt hash from
+   `htpasswd -nbB reader 'your-password'`, hash portion only — seeds the
+   password of the one auto-created account, saving a step. It's ignored
+   on every startup after that; the password of record lives in the DB.
+
+### Accounts
+
+Managed entirely from the CLI — there's no signup page and no
+change-password endpoint. Run from `backend/` (or `/opt/openreader/backend`
+on the VM):
+
+```bash
+uv run python -m app.useradm list                     # accounts + their read/starred counts
+uv run python -m app.useradm add <username>           # prompts for a password
+uv run python -m app.useradm set-password <username>
+uv run python -m app.useradm rename <old> <new>
+uv run python -m app.useradm copy-password <from> <to>   # two people, one shared password
+```
+
+`add` and `set-password` also take `--hash '$2b$...'` if you already have
+a bcrypt hash. Every startup guarantees at least one account exists
+(created as `reader` if the table is empty), so `rename` is usually the
+first thing you run.
+
+Notes:
+- **Account 1 is special** in exactly two ways: pre-multi-user read state
+  was migrated onto it, and it's the identity used when no login is
+  configured. Otherwise accounts are peers.
+- **Changing a password doesn't end existing sessions.** The cookie
+  carries only an account id and an expiry. To invalidate every session
+  everywhere, rotate `READER_SESSION_SECRET`.
+- **There's no `delete-user`.** Deleting an account cascades away its
+  entire read/starred history, which shouldn't be one flag away.
 
 ### 5. (optional) Article summarization
 
@@ -255,8 +290,8 @@ below) means "don't error if the file is missing."
    READER_IMAP_HOST=imap.gmail.com
    READER_IMAP_USER=your-newsletter-inbox@example.com
    READER_IMAP_PASSWORD=your-app-password
-   READER_AUTH_PASSWORD_HASH=$2b$...        # from `htpasswd -nbB`, see step 4
    READER_SESSION_SECRET=...                # from `secrets.token_hex(32)`, see step 4
+   READER_AUTH_PASSWORD_HASH=$2b$...        # first-run seed only, see step 4
 
    # Non-secret process wiring — kept in the same file so there's exactly
    # one place to look, not because it's sensitive
@@ -321,7 +356,7 @@ in step 2 above.
 ## Development
 
 ```bash
-cd backend && uv run pytest -q      # 212+ tests, no network/subprocess
+cd backend && uv run pytest -q      # 247+ tests, no network/subprocess
 cd frontend && npx tsc --noEmit -p tsconfig.app.json && npm run build
 ```
 
@@ -339,6 +374,7 @@ backend/app/
 │                  # sanitize, the synchronous refresh loop (incl. IMAP's
 │                  # shared per-folder SEARCH/FETCH batching)
 ├── summarize.py   # claude CLI wrapper for on-demand article summarization
+├── useradm.py     # account admin CLI (`python -m app.useradm`)
 └── api/           # Starlette route handlers
 frontend/src/
 ├── components/    # Sidebar, ArticleList, ArticleReader, ConfigEditor, ...

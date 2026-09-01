@@ -1,17 +1,31 @@
 """SQLite storage. WAL mode, stdlib sqlite3 only — no ORM.
 
 Schema per the design doc:
-  sources   — one row per configured RSS/IMAP source
-  articles  — normalized items from any origin (feed | email)
+  sources         — one row per configured RSS/IMAP source
+  articles        — normalized items from any origin (feed | email)
+  users           — one row per account (2026-08-31, see docs/WORKLOG.md)
+  article_states  — per-user read/starred state for an article
+
+Feeds are shared: `sources` and `articles` are global, and so is
+config/feeds.yaml. Only what a *person* does to an article — reading it,
+starring it — is per-user, and that lives in article_states.
 """
 from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, TypeVar
 
 T = TypeVar("T")
+
+# The account that owns pre-multi-user read/starred state (the backfill in
+# _migrate_per_user_state targets it), and the identity every request is
+# attributed to when login is switched off entirely — see app/auth.py's
+# AuthMiddleware and api/_common.current_user_id. Insertion order in the
+# users table is id order, so this is simply "the first account created".
+DEFAULT_USER_ID = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -47,29 +61,59 @@ CREATE TABLE IF NOT EXISTS articles (
     origin TEXT NOT NULL DEFAULT 'feed',
     hydrated_at TEXT,
     hydrate_failed_at TEXT,
-    is_read INTEGER NOT NULL DEFAULT 0,
-    read_at TEXT,
-    is_starred INTEGER NOT NULL DEFAULT 0,
     llm_summary_html TEXT,
     llm_summary_at TEXT,
     UNIQUE(source_id, guid)
 );
 
 CREATE INDEX IF NOT EXISTS idx_articles_content_hash ON articles(content_hash);
+CREATE INDEX IF NOT EXISTS idx_articles_source_pub ON articles(source_id, published_at DESC);
 -- Trailing `, id DESC` matches list_articles' ORDER BY tiebreaker (ties on
 -- published_at aren't rare — many feeds/newsletters share a timestamp) so
 -- SQLite can satisfy the sort straight from the index instead of falling
--- back to a temp b-tree for the tiebreak.
-CREATE INDEX IF NOT EXISTS idx_articles_unread ON articles(is_read, published_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_articles_source_pub ON articles(source_id, published_at DESC);
--- Backs the "all" view's ORDER BY published_at DESC, id DESC with no filter.
+-- back to a temp b-tree for the tiebreak. Since read/starred moved out of
+-- this table (2026-08-31) this one index backs the ordering for *every*
+-- view, not just "all" — the read/starred predicate now lives in a joined
+-- table and can no longer be a prefix of the ordering index.
 CREATE INDEX IF NOT EXISTS idx_articles_pub ON articles(published_at DESC, id DESC);
--- Backs the "starred" view, previously an unindexed full scan + sort.
-CREATE INDEX IF NOT EXISTS idx_articles_starred ON articles(is_starred, published_at DESC, id DESC);
--- Backs list_sources'/get_source's per-source unread-count subquery.
-CREATE INDEX IF NOT EXISTS idx_articles_src_unread ON articles(source_id, is_read);
 -- Backs the folder filter in list_articles.
 CREATE INDEX IF NOT EXISTS idx_sources_folder ON sources(folder);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    password_changed_at TEXT
+);
+
+-- Per-user read/starred state. A *missing row means unread and unstarred*,
+-- which is the load-bearing property of this table: it's what lets a newly
+-- added account start with every existing article unread without writing a
+-- row per (user, article) pair, and what keeps this table proportional to
+-- what people actually touch rather than to users x articles.
+CREATE TABLE IF NOT EXISTS article_states (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    is_read INTEGER NOT NULL DEFAULT 0,
+    read_at TEXT,
+    is_starred INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, article_id)
+) WITHOUT ROWID;
+
+-- WITHOUT ROWID above: the primary key is the whole addressing story for
+-- this table, so the implicit rowid plus a separate PK index would be pure
+-- overhead on every read and write.
+
+-- Backs the starred view, which inner-joins article_states and drives off
+-- this index over one user's handful of starred rows (see
+-- store.list_articles) rather than scanning every article.
+CREATE INDEX IF NOT EXISTS idx_article_states_starred
+    ON article_states(user_id, is_starred);
+-- Reverse direction: reconcile_read_state's per-article fan-out across
+-- users, and the article_id foreign key's ON DELETE CASCADE.
+CREATE INDEX IF NOT EXISTS idx_article_states_article
+    ON article_states(article_id);
 """
 
 
@@ -107,6 +151,90 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _drop_column_if_present(conn, "articles", "job_id")
     _drop_column_if_present(conn, "articles", "citations_json")
     conn.execute("DROP TABLE IF EXISTS jobs")
+    conn.commit()
+    # Multi-user, 2026-08-31 (see docs/WORKLOG.md). Order is load-bearing:
+    # article_states rows reference users(id), so an owner must exist before
+    # anything can be backfilled onto it.
+    ensure_default_user(conn)
+    _migrate_per_user_state(conn)
+
+
+def ensure_default_user(conn: sqlite3.Connection) -> None:
+    """Fresh-DB safety net only: guarantees DEFAULT_USER_ID exists so the
+    per-user state model always has an owner, including on a brand-new DB
+    and in the test suite (which reaches every endpoint with auth off, and
+    would otherwise trip article_states' foreign key). Does nothing at all
+    once any account exists.
+
+    Deliberately *not* a place to seed the real accounts from config: an
+    env-var-driven bootstrap that ran on first startup after a deploy would
+    silently attribute an entire production read history to whatever name
+    happened to be configured — or defaulted to — at that moment, which is
+    only recoverable by hand-editing the DB. Real accounts are created
+    explicitly with `python -m app.useradm add`, where getting the name
+    wrong is visible immediately.
+    """
+    from app import settings
+
+    if conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+        return
+    conn.execute(
+        "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+        ("reader", settings.AUTH_PASSWORD_HASH or "", datetime.now(UTC).isoformat()),
+    )
+    conn.commit()
+
+
+_LEGACY_STATE_COLUMNS = ("is_read", "read_at", "is_starred")
+# Indexes that referenced those columns and therefore have to go with them.
+_LEGACY_STATE_INDEXES = (
+    "idx_articles_unread",
+    "idx_articles_starred",
+    "idx_articles_src_unread",
+)
+
+
+def _migrate_per_user_state(conn: sqlite3.Connection, owner_user_id: int = DEFAULT_USER_ID) -> None:
+    """Moves articles.is_read/read_at/is_starred — the single-user era's
+    state — into article_states rows owned by `owner_user_id`, then drops
+    the columns. "Not yet migrated" is detected by the columns still
+    existing, the same shape as the ADD/DROP COLUMN helpers below: no
+    migration framework, no schema-version table.
+
+    Only rows that are actually read or starred get a state row. Everything
+    else stays absent, which *is* the unread default — so every other
+    account starts with the full existing backlog unread, which is the
+    intent (a second reader hasn't read any of it).
+
+    Safe to interrupt: if the process dies between the backfill and the
+    drops, the columns are still present on the next startup, the backfill
+    re-runs, and every already-migrated row hits ON CONFLICT DO NOTHING.
+    Nothing is double-counted or lost.
+    """
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    if not set(_LEGACY_STATE_COLUMNS) & columns:
+        return
+
+    conn.execute(
+        """
+        INSERT INTO article_states (user_id, article_id, is_read, read_at, is_starred)
+        SELECT ?, id, is_read, read_at, is_starred
+        FROM articles
+        WHERE is_read = 1 OR is_starred = 1
+        ON CONFLICT(user_id, article_id) DO NOTHING
+        """,
+        (owner_user_id,),
+    )
+    conn.commit()
+
+    # DROP INDEX before DROP COLUMN, always: SQLite refuses to drop a column
+    # any index still references, and it raises "error in index ... after
+    # drop column" — which is *not* the "no such column" that
+    # _drop_column_if_present tolerates, so it would crash startup instead.
+    for index in _LEGACY_STATE_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {index}")
+    for column in _LEGACY_STATE_COLUMNS:
+        _drop_column_if_present(conn, "articles", column)
     conn.commit()
 
 

@@ -18,6 +18,8 @@ interface Props {
   onMarkAllRead: (sourceId: number) => void
   onMarkAllUnreadRead: () => void
   onLogout: () => void
+  username?: string
+  authEnabled: boolean
 }
 
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
@@ -44,6 +46,8 @@ export function Sidebar({
   onMarkAllRead,
   onMarkAllUnreadRead,
   onLogout,
+  username,
+  authEnabled,
 }: Props) {
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
@@ -159,6 +163,12 @@ export function Sidebar({
         </div>
 
         <div className="sidebar__footer">
+          {username && (
+            <div className="sidebar__identity">
+              <span aria-hidden="true">👤</span>
+              <span className="sidebar__identity-name">{username}</span>
+            </div>
+          )}
           <button className="refresh-btn" onClick={onRefresh} disabled={refreshing}>
             <span className={`refresh-icon ${refreshing ? 'spinning' : ''}`}>⟳</span>
             {refreshing ? 'Refreshing…' : 'Refresh feeds'}
@@ -167,10 +177,17 @@ export function Sidebar({
           <button className="refresh-btn" onClick={onOpenConfig}>
             ⚙ Settings
           </button>
-          <div style={{ height: 8 }} />
-          <button className="refresh-btn" onClick={onLogout}>
-            ⏻ Log out
-          </button>
+          {/* No Log out on a deployment with no login configured — the
+              button would clear a cookie that was never gating anything,
+              and land you straight back on the same screen. */}
+          {authEnabled && (
+            <>
+              <div style={{ height: 8 }} />
+              <button className="refresh-btn" onClick={onLogout}>
+                ⏻ Log out
+              </button>
+            </>
+          )}
         </div>
       </aside>
     </>

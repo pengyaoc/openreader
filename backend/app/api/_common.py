@@ -8,6 +8,19 @@ from starlette.responses import JSONResponse
 
 from app import settings
 from app.config import Config, to_yaml
+from app.db import DEFAULT_USER_ID
+
+
+def current_user_id(request: Request) -> int:
+    """The account this request belongs to, for every read/starred lookup.
+
+    AuthMiddleware puts it there (see app/auth.py). The fallback covers the
+    one case where that middleware isn't in the stack at all:
+    create_app(require_auth=False), which is how the test suite reaches
+    every endpoint — and it's the same answer the middleware itself gives
+    when login is switched off, so the two paths agree.
+    """
+    return getattr(request.state, "user_id", DEFAULT_USER_ID)
 
 
 def readonly_response() -> JSONResponse | None:

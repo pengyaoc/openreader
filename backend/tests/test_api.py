@@ -749,3 +749,102 @@ def test_get_source_returns_full_config_detail(client):
 def test_get_source_404_for_missing_id(client):
     resp = client.get("/api/sources/9999")
     assert resp.status_code == 404
+
+
+# --- Multi-account (2026-08-31) -------------------------------------------
+# Everything above runs with require_auth=False, i.e. as one implicit
+# account. These run the real login flow with two accounts against one app
+# and one DB, which is the only place the end-to-end isolation story —
+# middleware -> current_user_id -> store -> JSON — is actually exercised.
+
+
+@pytest.fixture()
+def two_account_clients(tmp_path, monkeypatch):
+    from app import settings
+    from tests.conftest import hash_password, seed_user
+
+    monkeypatch.setattr(settings, "SESSION_SECRET", "test-secret-not-for-production")
+    monkeypatch.setattr(settings, "AUTH_PASSWORD_HASH", hash_password("pw-alice"))
+
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    conn.execute("UPDATE users SET username = 'alice' WHERE id = 1")
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES (?, ?, ?, ?, ?)",
+        ("s1", "rss", "Source One", "Test", "https://x/feed"),
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    for n in (1, 2):
+        conn.execute(
+            """INSERT INTO articles
+               (source_id, guid, url, title, excerpt, content_html, published_at, origin)
+               VALUES (?, ?, ?, ?, '', '<p>Body</p>', ?, 'feed')""",
+            (source_id, f"g{n}", f"https://x/{n}", f"Post {n}", f"2026-08-0{n}T00:00:00Z"),
+        )
+    conn.commit()
+    seed_user(conn, "bob", "pw-bob")
+    conn.close()
+
+    from app.config import to_yaml
+
+    config = Config(
+        sources=[Source(key="s1", type="rss", title="Source One", folder="Test", url="https://x/feed")]
+    )
+    config_path = tmp_path / "feeds.yaml"
+    config_path.write_text(to_yaml(config))
+    app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=True)
+
+    def signed_in(username, password):
+        # https:// — the session cookie is Secure (see test_auth.py).
+        c = TestClient(app, base_url="https://testserver")
+        assert c.post(
+            "/api/login", json={"username": username, "password": password}
+        ).status_code == 200
+        return c
+
+    return signed_in("alice", "pw-alice"), signed_in("bob", "pw-bob")
+
+
+def test_two_accounts_track_read_and_starred_state_independently(two_account_clients):
+    alice, bob = two_account_clients
+
+    article_id = alice.get("/api/articles").json()[0]["id"]
+    assert alice.post(f"/api/articles/{article_id}/read").status_code == 200
+    assert alice.post(f"/api/articles/{article_id}/star").json() == {"is_starred": True}
+
+    def unread(client):
+        return {a["title"] for a in client.get("/api/articles?view=unread").json()}
+
+    assert unread(alice) == {"Post 1"}
+    assert unread(bob) == {"Post 1", "Post 2"}
+    assert [a["title"] for a in alice.get("/api/articles?view=starred").json()] == ["Post 2"]
+    assert bob.get("/api/articles?view=starred").json() == []
+    assert bob.get(f"/api/articles/{article_id}").json()["is_read"] is False
+
+    assert alice.get("/api/sources").json()[0]["unread_count"] == 1
+    assert bob.get("/api/sources").json()[0]["unread_count"] == 2
+
+
+def test_mark_all_read_only_empties_the_requesting_accounts_inbox(two_account_clients):
+    alice, bob = two_account_clients
+
+    assert alice.post("/api/articles/mark-all-read").json()["marked"] == 2
+
+    assert alice.get("/api/sources").json()[0]["unread_count"] == 0
+    assert bob.get("/api/sources").json()[0]["unread_count"] == 2
+    # And bob's own sweep still has everything to do.
+    source_id = bob.get("/api/sources").json()[0]["id"]
+    assert bob.post(f"/api/sources/{source_id}/mark-all-read").json()["marked"] == 2
+
+
+def test_toggle_read_is_per_account(two_account_clients):
+    alice, bob = two_account_clients
+    article_id = alice.get("/api/articles").json()[0]["id"]
+
+    assert alice.post(f"/api/articles/{article_id}/toggle-read").json() == {"is_read": True}
+    assert bob.post(f"/api/articles/{article_id}/toggle-read").json() == {"is_read": True}
+    assert alice.post(f"/api/articles/{article_id}/toggle-read").json() == {"is_read": False}
+
+    assert alice.get(f"/api/articles/{article_id}").json()["is_read"] is False
+    assert bob.get(f"/api/articles/{article_id}").json()["is_read"] is True

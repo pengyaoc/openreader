@@ -4,6 +4,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app import store
+from app.api._common import current_user_id
 from app.db import run_off_thread
 from app.ingest.hydrate import hydrate_article
 from app.ingest.textutil import plain_text_excerpt
@@ -42,6 +43,7 @@ async def list_articles(request: Request) -> JSONResponse:
 
     articles = store.list_articles(
         conn,
+        current_user_id(request),
         view=view,
         source_id=int(source_id) if source_id else None,
         folder=folder,
@@ -54,7 +56,7 @@ async def list_articles(request: Request) -> JSONResponse:
 async def get_article(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, article_id)
+    article = store.get_article(conn, current_user_id(request), article_id)
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -91,7 +93,7 @@ async def pull_full_article(request: Request) -> JSONResponse:
     same as the passive path."""
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, article_id)
+    article = store.get_article(conn, current_user_id(request), article_id)
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -134,7 +136,7 @@ async def summarize(request: Request) -> JSONResponse:
 
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, article_id)
+    article = store.get_article(conn, current_user_id(request), article_id)
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -165,14 +167,14 @@ async def mark_all_read(request: Request) -> JSONResponse:
     sources.mark_all_read. Registered ahead of /api/articles/{article_id}
     in main.py's route table so this literal path wins the match."""
     conn = request.app.state.get_conn()
-    marked = store.mark_all_read_global(conn)
+    marked = store.mark_all_read_global(conn, current_user_id(request))
     return JSONResponse({"ok": True, "marked": marked})
 
 
 async def mark_read(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    ok = store.mark_read(conn, article_id)
+    ok = store.mark_read(conn, current_user_id(request), article_id)
     if not ok:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True})
@@ -181,7 +183,7 @@ async def mark_read(request: Request) -> JSONResponse:
 async def toggle_star(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    result = store.toggle_star(conn, article_id)
+    result = store.toggle_star(conn, current_user_id(request), article_id)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(result)
@@ -190,7 +192,7 @@ async def toggle_star(request: Request) -> JSONResponse:
 async def toggle_read(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    result = store.toggle_read(conn, article_id)
+    result = store.toggle_read(conn, current_user_id(request), article_id)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(result)
