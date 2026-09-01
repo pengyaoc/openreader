@@ -17,6 +17,48 @@ def test_init_schema_creates_expected_tables(tmp_path):
     assert "jobs" not in tables
 
 
+def test_init_schema_decodes_leftover_html_entities_in_existing_titles(tmp_path):
+    # Simulates articles ingested before connectors/rss.py started decoding
+    # double-encoded entities (2026-08-31): the raw `&#8217;` baked into
+    # title/author at ingest time, since a later refetch never revisits an
+    # existing article's stored columns (dedup is by guid).
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder) VALUES ('s1', 'rss', 'S', 'F')"
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+    conn.execute(
+        """INSERT INTO articles (source_id, guid, url, title, author, origin)
+           VALUES (?, 'g1', 'https://x/1', 'Debian won&#8217;t ban AI code',
+                   'Jane &amp; John', 'feed')""",
+        (source_id,),
+    )
+    # A clean row alongside it must survive untouched.
+    conn.execute(
+        """INSERT INTO articles (source_id, guid, url, title, origin)
+           VALUES (?, 'g2', 'https://x/2', 'Already Clean', 'feed')""",
+        (source_id,),
+    )
+    conn.commit()
+
+    init_schema(conn)  # the pass that should fix it, same as a real restart
+
+    rows = {
+        guid: (title, author)
+        for guid, title, author in conn.execute("SELECT guid, title, author FROM articles")
+    }
+    assert rows["g1"] == ("Debian won’t ban AI code", "Jane & John")
+    assert rows["g2"] == ("Already Clean", None)
+
+    # Idempotent — a second pass changes nothing further.
+    init_schema(conn)
+    assert conn.execute("SELECT title, author FROM articles WHERE guid='g1'").fetchone() == (
+        "Debian won’t ban AI code",
+        "Jane & John",
+    )
+
+
 def test_init_schema_drops_jobs_table_and_generation_columns_from_an_older_db(tmp_path):
     # Simulates a pre-2026-08-14 database (topic-generation era schema) —
     # init_schema must clean these up on next startup, not just skip
@@ -84,6 +126,7 @@ def _legacy_single_user_db(path):
             guid TEXT NOT NULL,
             url TEXT NOT NULL,
             title TEXT NOT NULL,
+            author TEXT,
             published_at TEXT,
             content_hash TEXT,
             origin TEXT NOT NULL DEFAULT 'feed',

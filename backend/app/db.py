@@ -13,6 +13,7 @@ starring it — is per-user, and that lives in article_states.
 from __future__ import annotations
 
 import asyncio
+import html
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -157,6 +158,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # anything can be backfilled onto it.
     ensure_default_user(conn)
     _migrate_per_user_state(conn)
+    _backfill_decoded_entities(conn)
 
 
 def ensure_default_user(conn: sqlite3.Connection) -> None:
@@ -235,6 +237,36 @@ def _migrate_per_user_state(conn: sqlite3.Connection, owner_user_id: int = DEFAU
         conn.execute(f"DROP INDEX IF EXISTS {index}")
     for column in _LEGACY_STATE_COLUMNS:
         _drop_column_if_present(conn, "articles", column)
+    conn.commit()
+
+
+def _backfill_decoded_entities(conn: sqlite3.Connection) -> None:
+    """Fixes articles ingested before connectors/rss.py started decoding
+    double-encoded entities (`&amp;#8217;` where a feed meant `&#8217;`,
+    which the XML parser only half-resolves — see that file's `_text()`
+    docstring, 2026-08-31). The parser fix only applies going forward: an
+    article's title/author is written once at ingest and never revisited
+    on a later refetch (dedup is by guid), so anything already in the DB
+    with the old, half-decoded parser kept the raw `&#8217;` forever.
+
+    No "have we run this" flag needed — comparing each row against its own
+    unescaped form is the idempotence check. Once every row is decoded,
+    nothing differs and this is one full-table SELECT with zero writes.
+    Cheap at this data size (hundreds of rows); safe to run on every
+    startup, same spirit as the ADD/DROP COLUMN helpers' repeatability.
+    """
+    rows = conn.execute("SELECT id, title, author FROM articles").fetchall()
+    updates = []
+    for article_id, title, author in rows:
+        new_title = html.unescape(title) if title else title
+        new_author = html.unescape(author) if author else author
+        if new_title != title or new_author != author:
+            updates.append((new_title, new_author, article_id))
+    if not updates:
+        return
+    conn.executemany(
+        "UPDATE articles SET title = ?, author = ? WHERE id = ?", updates
+    )
     conn.commit()
 
 
