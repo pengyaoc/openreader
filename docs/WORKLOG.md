@@ -2179,9 +2179,9 @@ tracking... the feed config is still one version that's shared (only me and my w
 this). I should still keep existing account and progress. Create a separate account for my
 wife with the same password as me (you can copy the hash)."*
 
-So: two accounts (`pengyao`, `heng`), separate read and starred state, everything else shared.
-Existing production state — 209 articles, 48 unread, 0 starred — migrates onto `pengyao`;
-`heng` starts with the whole backlog unread.
+So: two accounts (the primary account, the second account), separate read and starred state, everything else shared.
+Existing production state — 209 articles, 48 unread, 0 starred — migrates onto the primary account;
+the second account starts with the whole backlog unread.
 
 **Schema.** `users` (id, username, bcrypt hash, timestamps) and `article_states`
 (user_id, article_id, is_read, read_at, is_starred), the latter `WITHOUT ROWID` since the
@@ -2205,9 +2205,9 @@ index references the column — and it raises `error in index ... after drop col
 three indexes first isn't tidiness; without it `init_schema` raises on startup against every
 existing deployment. The backfill is an `ON CONFLICT DO NOTHING` upsert and detection is "do
 the legacy columns still exist", so a crash anywhere in the middle just re-runs harmlessly on
-the next boot. Verified against a copy of the live DB before deploying: `pengyao`'s per-source
+the next boot. Verified against a copy of the live DB before deploying: the primary account's per-source
 unread counts came back identical to the pre-migration baseline
-(`[(1,26),(2,5),(4,1),(5,6),(6,3),(8,3),(12,1),(13,1),(14,1),(16,1)]`, 48 total), `heng` got
+(`[(1,26),(2,5),(4,1),(5,6),(6,3),(8,3),(12,1),(13,1),(14,1),(16,1)]`, 48 total), the second account got
 209 unread / 0 starred.
 
 **Auth.** The session cookie payload became `"<user_id>:<expiry>"` with the HMAC over both, so
@@ -2263,5 +2263,5 @@ the account count.
 247 backend tests (was 212), including a new `test_store.py` covering isolation in both
 directions, migration tests against a synthetic legacy DB (including the interrupted-migration
 resume path), and two-account end-to-end API tests running the real login flow. Verified live
-in a browser: signed in as `heng` (185 unread, config-filtered), logged out, signed in as
-`pengyao` (48 unread, per-source counts all different, no stale rows).
+in a browser: signed in as the second account (185 unread, config-filtered), logged out, signed in as
+the primary account (48 unread, per-source counts all different, no stale rows).

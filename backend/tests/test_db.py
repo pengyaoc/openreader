@@ -230,14 +230,14 @@ def test_ensure_default_user_never_overwrites_an_existing_account(tmp_path):
 
     conn = connect(tmp_path / "reader.db")
     init_schema(conn)
-    conn.execute("UPDATE users SET username = 'pengyao', password_hash = 'kept' WHERE id = 1")
+    conn.execute("UPDATE users SET username = 'alice', password_hash = 'kept' WHERE id = 1")
     conn.commit()
 
     ensure_default_user(conn)
     init_schema(conn)
 
     assert conn.execute("SELECT username, password_hash FROM users").fetchall() == [
-        ("pengyao", "kept")
+        ("alice", "kept")
     ]
 
 
