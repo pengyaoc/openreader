@@ -113,6 +113,19 @@ function PullIndicator({ pullDistance, refreshing }: { pullDistance: number; ref
   )
 }
 
+function ArticleRowSkeleton() {
+  return (
+    <div className="article-row article-row--skeleton" aria-hidden="true">
+      <span className="article-row__unread-dot is-read" />
+      <div className="article-row__main">
+        <div className="skeleton-line skeleton-line--meta" />
+        <div className="skeleton-line skeleton-line--title" />
+        <div className="skeleton-line skeleton-line--excerpt" />
+      </div>
+    </div>
+  )
+}
+
 interface Props {
   articles: ArticleListItem[]
   selectedId: number | null
@@ -127,6 +140,11 @@ interface Props {
   listKey: string
   onRefresh: () => void
   refreshing: boolean
+  // True while the initial fetch for the current view is still in flight —
+  // distinct from `refreshing` (a user-triggered re-fetch of an already
+  // loaded list). Without this the list rendered "Nothing here yet" for the
+  // whole first fetch, which reads as broken rather than loading.
+  loading?: boolean
 }
 
 export function ArticleList({
@@ -139,12 +157,24 @@ export function ArticleList({
   listKey,
   onRefresh,
   refreshing,
+  loading,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
   }, [listKey])
   const pullDistance = usePullToRefresh(scrollRef, onRefresh, refreshing)
+
+  if (articles.length === 0 && loading) {
+    return (
+      <div className="article-list" id="article-list" ref={scrollRef}>
+        <PullIndicator pullDistance={pullDistance} refreshing={refreshing} />
+        {Array.from({ length: 8 }, (_, i) => (
+          <ArticleRowSkeleton key={i} />
+        ))}
+      </div>
+    )
+  }
 
   if (articles.length === 0) {
     return (

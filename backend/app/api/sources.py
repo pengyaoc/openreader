@@ -5,15 +5,22 @@ from starlette.responses import JSONResponse
 from app import store
 from app.api._common import current_user_id, readonly_response, save_config
 from app.config import ConfigError, Rule, Source, validate_config
+from app.db import run_off_thread
 from app.ingest.refresh import get_or_create_source, reconcile_read_state
 
 
 async def list_sources(request: Request) -> JSONResponse:
-    conn = request.app.state.get_conn()
     valid_keys = {s.key for s in request.app.state.config.sources}
-    return JSONResponse(
-        store.list_sources(conn, current_user_id(request), valid_keys=valid_keys)
+    # Off the event loop — see the matching comment on list_articles in
+    # api/articles.py. This handler runs an aggregate over every article on
+    # every cold open, alongside the other 3 startup calls.
+    sources = await run_off_thread(
+        request.app.state.db_path,
+        store.list_sources,
+        current_user_id(request),
+        valid_keys=valid_keys,
     )
+    return JSONResponse(sources)
 
 
 async def add_source(request: Request) -> JSONResponse:

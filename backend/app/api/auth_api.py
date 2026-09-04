@@ -11,6 +11,7 @@ from app.auth import (
     set_session_cookie,
     verify_password,
 )
+from app.db import run_off_thread
 
 
 async def login(request: Request) -> JSONResponse:
@@ -44,6 +45,12 @@ async def logout(request: Request) -> JSONResponse:
     return response
 
 
+def _fetch_user(conn, user_id: int):
+    return conn.execute(
+        "SELECT id, username FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+
+
 async def me(request: Request) -> JSONResponse:
     """Who the current session belongs to. Gated by AuthMiddleware like
     every other /api route, which is the point: its 401 is the frontend's
@@ -55,10 +62,10 @@ async def me(request: Request) -> JSONResponse:
     uses it to hide a Log out button that would clear a cookie that was
     never gating anything.
     """
-    conn = request.app.state.get_conn()
-    row = conn.execute(
-        "SELECT id, username FROM users WHERE id = ?", (current_user_id(request),)
-    ).fetchone()
+    # Off the event loop — one of the 4 calls the frontend fires in
+    # parallel on every cold open; see the matching comment on
+    # list_articles in api/articles.py.
+    row = await run_off_thread(request.app.state.db_path, _fetch_user, current_user_id(request))
     if row is None:
         # A correctly signed cookie for an account that no longer exists.
         response = JSONResponse({"error": "not authenticated"}, status_code=401)

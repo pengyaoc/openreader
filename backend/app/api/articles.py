@@ -34,15 +34,20 @@ def _parse_int(raw: str | None, default: int, *, minimum: int, maximum: int | No
 
 
 async def list_articles(request: Request) -> JSONResponse:
-    conn = request.app.state.get_conn()
     view = request.query_params.get("view", "all")
     source_id = request.query_params.get("source_id")
     folder = request.query_params.get("folder")
     limit = _parse_int(request.query_params.get("limit"), 50, minimum=1, maximum=200)
     offset = _parse_int(request.query_params.get("offset"), 0, minimum=0)
 
-    articles = store.list_articles(
-        conn,
+    # Off the event loop: this is one of the handlers the frontend fires in
+    # parallel on every cold open (App.tsx), alongside /api/sources and
+    # /api/me. Called inline (as it was before), sqlite3's blocking calls
+    # serialize those four requests on uvicorn's single event loop even
+    # though the browser fired them concurrently — see docs/WORKLOG.md.
+    articles = await run_off_thread(
+        request.app.state.db_path,
+        store.list_articles,
         current_user_id(request),
         view=view,
         source_id=int(source_id) if source_id else None,

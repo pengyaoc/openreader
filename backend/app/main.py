@@ -18,6 +18,7 @@ from app.api import articles, auth_api, config_api, images, refresh_api, sources
 from app.auth import AuthMiddleware, auth_configured
 from app.config import Config, load_config
 from app.db import connect, init_schema
+from app.timing import TimingMiddleware
 
 
 def create_app(
@@ -59,7 +60,11 @@ def create_app(
         Route("/api/me", auth_api.me),
     ]
 
-    middleware = [Middleware(AuthMiddleware)] if require_auth else []
+    # TimingMiddleware wraps outermost so its clock covers auth too — see
+    # app/timing.py for why (chasing an intermittent cold-open slowdown).
+    middleware = [Middleware(TimingMiddleware)]
+    if require_auth:
+        middleware.append(Middleware(AuthMiddleware))
     app = Starlette(routes=routes, middleware=middleware)
     app.state.get_conn = get_conn
     app.state.config = config

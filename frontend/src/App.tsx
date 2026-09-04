@@ -11,7 +11,6 @@ import {
   UnauthorizedError,
   type Article,
   type ArticleListItem,
-  type RefreshReport,
   type Source,
 } from './api'
 import type { ViewSelection } from './types'
@@ -19,7 +18,6 @@ import { Sidebar } from './components/Sidebar'
 import { ArticleList } from './components/ArticleList'
 import { ArticleReader } from './components/ArticleReader'
 import { SettingsDrawer } from './components/SettingsDrawer'
-import { RefreshToast } from './components/RefreshToast'
 import { LoginPage } from './components/LoginPage'
 
 const VIEW_TITLES: Record<string, string> = {
@@ -142,7 +140,6 @@ export default function App() {
   // that case.
   const [settings, setSettings] = useState<'list' | 'add' | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-  const [refreshReport, setRefreshReport] = useState<RefreshReport | null>(null)
   // Not namespaced per account, deliberately: dark/light is a property of
   // the device and the light you're reading in, not of who's signed in.
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -263,8 +260,7 @@ export default function App() {
 
   const refreshMutation = useMutation({
     mutationFn: () => api.refresh(),
-    onSuccess: (report) => {
-      setRefreshReport(report)
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sources'] })
       qc.invalidateQueries({ queryKey: ['articles'] })
     },
@@ -504,6 +500,7 @@ export default function App() {
           listKey={selectionToQueryValue(selection)}
           onRefresh={() => refreshMutation.mutate()}
           refreshing={refreshMutation.isPending}
+          loading={articlesQuery.isPending}
         />
       </div>
 
@@ -535,10 +532,6 @@ export default function App() {
             qc.invalidateQueries({ queryKey: ['articles'] })
           }}
         />
-      )}
-
-      {refreshReport && (
-        <RefreshToast report={refreshReport} onClose={() => setRefreshReport(null)} />
       )}
     </div>
   )
