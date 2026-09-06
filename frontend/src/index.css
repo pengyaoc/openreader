@@ -687,6 +687,38 @@ a {
   font-size: 13px;
 }
 
+.article-row--skeleton {
+  cursor: default;
+}
+.article-row--skeleton:hover {
+  background: none;
+}
+.skeleton-line {
+  border-radius: 3px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-raised) 25%,
+    var(--bg-hover) 50%,
+    var(--bg-raised) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+.skeleton-line--meta {
+  width: 30%;
+  height: 10.5px;
+  margin-bottom: 8px;
+}
+.skeleton-line--title {
+  width: 70%;
+  height: 18.5px;
+  margin-bottom: 8px;
+}
+.skeleton-line--excerpt {
+  width: 95%;
+  height: 15.5px;
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -1018,22 +1050,6 @@ kbd {
   }
 }
 
-/* -------------------------- toast / refresh report -------------------------- */
-
-.toast {
-  position: fixed;
-  bottom: 22px;
-  right: 22px;
-  background: var(--bg-raised);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-lift);
-  padding: 14px 16px;
-  max-width: 320px;
-  z-index: 100;
-  animation: toast-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -1043,36 +1059,6 @@ kbd {
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-.toast__title {
-  font-size: 12.5px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: var(--ink);
-}
-
-.toast__row {
-  display: flex;
-  justify-content: space-between;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-dim);
-  padding: 2px 0;
-}
-
-.toast__row--error {
-  color: var(--red);
-}
-
-.toast__close {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  background: none;
-  border: none;
-  color: var(--ink-faint);
-  font-size: 13px;
 }
 
 /* -------------------------- config editor drawer -------------------------- */

@@ -3,6 +3,13 @@ from starlette.responses import JSONResponse
 
 from app.api._common import current_user_id
 from app.auth import auth_configured
+from app.db import run_off_thread
+
+
+def _fetch_user(conn, user_id: int):
+    return conn.execute(
+        "SELECT id, username FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
 
 
 async def me(request: Request) -> JSONResponse:
@@ -24,10 +31,10 @@ async def me(request: Request) -> JSONResponse:
     if user_id is None:
         return JSONResponse({"id": None, "username": None, "auth_enabled": auth_configured()})
 
-    conn = request.app.state.get_conn()
-    row = conn.execute(
-        "SELECT id, username FROM users WHERE id = ?", (user_id,)
-    ).fetchone()
+    # Off the event loop — one of the calls the frontend fires in parallel
+    # on every cold open; see the matching comment on list_articles in
+    # api/articles.py.
+    row = await run_off_thread(request.app.state.db_path, _fetch_user, user_id)
     if row is None:
         # A trusted identity for an account that no longer exists.
         return JSONResponse({"error": "not authenticated"}, status_code=401)

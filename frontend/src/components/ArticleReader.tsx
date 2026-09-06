@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { API_BASE, type Article } from '../api'
 
 type ViewMode = 'full' | 'summary'
@@ -66,6 +66,8 @@ export function ArticleReader({
   }, [onClose, onPrev, onNext, hasPrev, hasNext])
 
   const scrollRef = useRef<HTMLDivElement>(null)
+  const titleRef = useRef<HTMLHeadingElement>(null)
+  const titleId = useId()
   const [viewMode, setViewMode] = useState<ViewMode>('full')
   // ArticleReader stays mounted across prev/next, and Full/Summary toggles
   // within the same article, so the scroll container otherwise keeps
@@ -73,6 +75,17 @@ export function ArticleReader({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
   }, [article.id, viewMode])
+  // The background is made `inert` while this overlay is open (App.tsx), so
+  // without an explicit focus move here VO/keyboard focus is left stranded
+  // on the now-inert article row. Focus lands on the *title*, not the
+  // overlay container or the toolbar above it — a screen reader's forward
+  // navigation starts from wherever focus is and reads on from there, so
+  // focusing the container (whose first descendant in the DOM is the
+  // toolbar) meant Close/Pull-full/Summarize/Star were announced before the
+  // article itself. The toolbar is still reachable by swiping backward.
+  useEffect(() => {
+    titleRef.current?.focus()
+  }, [article.id])
   // Tracks whether the *currently open* article already had a summary the
   // last time we checked — lets the effect below tell "freshly generated
   // while this article is open" (auto-switch to Summary) apart from "this
@@ -99,7 +112,7 @@ export function ArticleReader({
   }, [article.llm_summary_html])
 
   return (
-    <div className="reader-overlay">
+    <div className="reader-overlay" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <div className="reader-bar">
         <div className="reader-bar__left">
           <button className="icon-btn" onClick={onClose} title="Close (Esc)">
@@ -162,7 +175,9 @@ export function ArticleReader({
 
       <div className="reader-scroll" ref={scrollRef}>
         <article className="reader-article">
-          <h1 className="reader-article__title">{article.title}</h1>
+          <h1 id={titleId} ref={titleRef} tabIndex={-1} className="reader-article__title">
+            {article.title}
+          </h1>
           <div className="reader-article__meta">
             {/* Not every source has a per-article author (feed-level bylines,
                 Twitter-sourced RSS, etc. often omit it) — falling back to the

@@ -19,6 +19,7 @@ from app.auth import auth_configured, load_auth_config, upsert_user
 from app.config import Config, load_config
 from app.db import connect, init_schema
 from app.pchauth.starlette_adapter import PchauthMiddleware
+from app.timing import TimingMiddleware
 
 
 def create_app(
@@ -58,17 +59,17 @@ def create_app(
         Route("/api/me", auth_api.me),
     ]
 
-    middleware = (
-        [
+    # TimingMiddleware wraps outermost so its clock covers auth too — see
+    # app/timing.py for why (chasing an intermittent cold-open slowdown).
+    middleware = [Middleware(TimingMiddleware)]
+    if require_auth:
+        middleware.append(
             Middleware(
                 PchauthMiddleware,
                 config=load_auth_config(),
                 upsert_user=lambda identity: upsert_user(identity, get_conn),
             )
-        ]
-        if require_auth
-        else []
-    )
+        )
     app = Starlette(routes=routes, middleware=middleware)
     app.state.get_conn = get_conn
     app.state.config = config
