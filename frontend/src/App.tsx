@@ -139,6 +139,16 @@ export default function App() {
   // that case.
   const [settings, setSettings] = useState<'list' | 'add' | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  // Brief friendly message shown when an anonymous visitor clicks an action
+  // that's turned off in the public read-only demo (Star/Summarize/Download
+  // — see the .toast rule in index.css). Auto-dismisses.
+  const [notice, setNotice] = useState<string | null>(null)
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showNotice = useCallback((message: string) => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+    setNotice(message)
+    noticeTimerRef.current = setTimeout(() => setNotice(null), 3200)
+  }, [])
   // Not namespaced per account, deliberately: dark/light is a property of
   // the device and the light you're reading in, not of who's signed in.
   const [theme, setTheme] = useState<'dark' | 'light'>(
@@ -349,9 +359,12 @@ export default function App() {
       savedSidebarScrollRef.current = document.getElementById('sidebar-scroll')?.scrollTop ?? 0
       setOpenArticleId(article.id)
       setCursorId(article.id)
-      if (!article.is_read) markReadMutation.mutate(article)
+      // Anonymous visitors browse read-only — read state can't persist for
+      // them server-side (require_user_id rejects the write), so skip the
+      // call entirely rather than firing a request that's just going to 401.
+      if (!article.is_read && !isAnonymous) markReadMutation.mutate(article)
     },
-    [markReadMutation],
+    [markReadMutation, isAnonymous],
   )
 
   // Closing unmounts the reader (which held VO/keyboard focus), so without
@@ -443,16 +456,16 @@ export default function App() {
       } else if (e.key === 'o' || e.key === 'Enter') {
         const current = articles.find((a) => a.id === cursorId)
         if (current) openArticle(current)
-      } else if (e.key === 'm') {
+      } else if (e.key === 'm' && !isAnonymous) {
         const current = articles.find((a) => a.id === cursorId)
         if (current) toggleReadMutation.mutate(current)
-      } else if (e.key === 'r') {
+      } else if (e.key === 'r' && !isAnonymous) {
         refreshMutation.mutate()
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [articles, cursorId, openArticleId, openArticle, toggleReadMutation, refreshMutation])
+  }, [articles, cursorId, openArticleId, openArticle, toggleReadMutation, refreshMutation, isAnonymous])
 
   const totalUnread = (sourcesQuery.data ?? []).reduce((n, s) => n + s.unread_count, 0)
   const totalStarred = articles.filter((a) => a.is_starred).length
@@ -496,11 +509,22 @@ export default function App() {
         onMarkAllUnreadRead={() => markAllUnreadReadMutation.mutate()}
         username={meQuery.data?.username ?? undefined}
         inert={readerOpen}
+        // Nothing in the sidebar mutates anything for an anonymous
+        // visitor — feeds and read state can't be changed without an
+        // account (see require_user_id server-side). Hiding these
+        // controls entirely (rather than showing them disabled with an
+        // error) is simpler and more honest than exposing buttons that
+        // would just 401.
+        readOnly={isAnonymous}
       />
 
       <div className="main" inert={readerOpen}>
         {isAnonymous && (
-          <div className="readonly-banner">👋 You're viewing a public demo of OpenReader — browse freely, sign-in isn't required</div>
+          <div className="readonly-banner">
+            👋 You're viewing a public demo of OpenReader — browse and read freely. This is a
+            read-only view, so marking articles read, starring, summarizing, and changing feeds
+            aren't available.
+          </div>
         )}
         {/* `inert` alone isn't a reliable guarantee on iOS: a documented
             Safari 26 VoiceOver regression lets the virtual cursor keep
@@ -545,7 +569,7 @@ export default function App() {
           loadingMore={articlesQuery.isFetchingNextPage}
           onLoadMore={() => articlesQuery.fetchNextPage()}
           listKey={selectionToQueryValue(selection)}
-          onRefresh={() => refreshMutation.mutate()}
+          onRefresh={isAnonymous ? () => {} : () => refreshMutation.mutate()}
           refreshing={refreshMutation.isPending}
           loading={articlesQuery.isPending}
           hidden={readerOpen}
@@ -557,10 +581,22 @@ export default function App() {
           article={openArticleDisplayData}
           loading={openArticleQuery.isLoading}
           onClose={closeArticle}
-          onToggleStar={() => toggleStarMutation.mutate(openArticleId)}
-          onPullFull={() => pullFullMutation.mutate(openArticleId)}
+          onToggleStar={() =>
+            isAnonymous
+              ? showNotice("Starring isn't available in this read-only demo — sign in to save articles.")
+              : toggleStarMutation.mutate(openArticleId)
+          }
+          onPullFull={() =>
+            isAnonymous
+              ? showNotice("Pulling the full article isn't available in this read-only demo.")
+              : pullFullMutation.mutate(openArticleId)
+          }
           pullingFull={pullFullMutation.isPending}
-          onSummarize={() => summarizeMutation.mutate(openArticleId)}
+          onSummarize={() =>
+            isAnonymous
+              ? showNotice('AI summaries are turned off in this read-only demo to avoid unexpected costs.')
+              : summarizeMutation.mutate(openArticleId)
+          }
           summarizing={summarizeMutation.isPending}
           llmEnabled={llmStatusQuery.data?.enabled ?? false}
           onPrev={goPrev}
@@ -581,6 +617,8 @@ export default function App() {
           }}
         />
       )}
+
+      {notice && <div className="toast">{notice}</div>}
     </div>
   )
 }

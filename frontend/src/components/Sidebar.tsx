@@ -22,6 +22,12 @@ interface Props {
   // sidebar from the accessibility tree so VoiceOver's swipe/rotor
   // navigation can't reach it (see App.tsx's `readerOpen`).
   inert?: boolean
+  // True for an anonymous visitor to the public read-only demo — hides
+  // every control that mutates something (mark-all-read, refresh, feed
+  // settings), since the backend rejects all of it anyway
+  // (require_user_id) and a visible-but-broken button is worse than no
+  // button.
+  readOnly?: boolean
 }
 
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
@@ -49,6 +55,7 @@ export function Sidebar({
   onMarkAllUnreadRead,
   username,
   inert,
+  readOnly,
 }: Props) {
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
@@ -132,7 +139,7 @@ export function Sidebar({
                     active={isSame(selection, { kind: 'saved', view: 'unread' })}
                     onClick={() => select({ kind: 'saved', view: 'unread' })}
                   />
-                  {totalUnread > 0 && (
+                  {totalUnread > 0 && !readOnly && (
                     <button
                       className="source-row__mark-read"
                       onClick={onMarkAllUnreadRead}
@@ -168,7 +175,7 @@ export function Sidebar({
                           })}
                           onClick={() => select({ kind: 'source', sourceId: s.id, title: s.title })}
                         />
-                        {s.unread_count > 0 && (
+                        {s.unread_count > 0 && !readOnly && (
                           <button
                             className="source-row__mark-read"
                             onClick={() => onMarkAllRead(s.id)}
@@ -194,14 +201,18 @@ export function Sidebar({
                 <span className="sidebar__identity-name">{username}</span>
               </div>
             )}
-            <button className="refresh-btn" onClick={onRefresh} disabled={refreshing}>
-              <span className={`refresh-icon ${refreshing ? 'spinning' : ''}`}>⟳</span>
-              {refreshing ? 'Refreshing…' : 'Refresh feeds'}
-            </button>
-            <div style={{ height: 8 }} />
-            <button className="refresh-btn" onClick={onOpenConfig}>
-              ⚙ Settings
-            </button>
+            {!readOnly && (
+              <>
+                <button className="refresh-btn" onClick={onRefresh} disabled={refreshing}>
+                  <span className={`refresh-icon ${refreshing ? 'spinning' : ''}`}>⟳</span>
+                  {refreshing ? 'Refreshing…' : 'Refresh feeds'}
+                </button>
+                <div style={{ height: 8 }} />
+                <button className="refresh-btn" onClick={onOpenConfig}>
+                  ⚙ Settings
+                </button>
+              </>
+            )}
           </div>
         )}
       </aside>

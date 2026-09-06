@@ -2463,3 +2463,39 @@ deleted link. 252 backend tests + frontend typecheck passed; deployed via `scrip
 See Summra's equivalent entry in its own `WORK_LOG.md` (same session, same root cause, same
 decision) — Summra's fix has no banner (its anonymous UX was already fine as read-only), just
 a plain in-modal explanation instead of a CTA.
+
+## 2026-09-06 (still later) — Actually lock down the read-only demo, not just remove the dead button
+
+Follow-up from the anonymous-banner work above: the banner said "browse freely" but nothing
+had actually been done to stop an anonymous visitor from *trying* mutating actions — the
+Star/Summarize/Pull-full-article icons, the sidebar's Refresh feeds and Settings buttons, and
+the two "mark all as read" checkmarks were all still live in the UI, even though the backend's
+`require_user_id` (see the multi-user work) already 401s every one of them for a signed-out
+request. That's not a security hole — nothing was actually mutable — but it's a bad UX: a
+recruiter clicking Star and having nothing visibly happen (or seeing a console error) reads as
+a broken app, not a demo.
+
+Fix, in `frontend/src/App.tsx`, `Sidebar.tsx`, and `index.css`:
+
+- **Sidebar** gets a new `readOnly` prop (`isAnonymous` from `App.tsx`). When true: the
+  "Refresh feeds" and "⚙ Settings" buttons, and the per-source/per-unread-count "✓ mark all
+  read" checkmarks, don't render at all — removed, not disabled, matching the instruction that
+  a non-working button is worse than no button.
+- **ArticleReader**'s Star/Pull-full/Summarize handlers, when anonymous, no longer call their
+  mutations at all (critically: `onSummarize` never reaches the LLM call in this path) —
+  instead they call a new `showNotice(message)` that renders a small `.toast` (index.css) with
+  a plain-language explanation ("Starring isn't available in this read-only demo — sign in to
+  save articles.", etc.), auto-dismissing after ~3s. The "Open original" arrow is untouched —
+  it's a plain external link, nothing to gate.
+- Automatic side effects that aren't a deliberate click — auto-mark-read on opening an article,
+  the `m`/`r` keyboard shortcuts — are silently skipped for an anonymous visitor rather than
+  firing a request that would just 401. No toast for these: there's no visible control to
+  explain, and a popup on every article open would be its own bad UX.
+- Pull-to-refresh (touch gesture, `ArticleList`'s `onRefresh`) becomes a no-op rather than
+  `undefined`, since the prop type is a required `() => void` — same reasoning as above, no
+  toast (a gesture has no label to attach one to).
+- Banner text rewritten to actually describe what's locked down, instead of the vaguer
+  "sign-in isn't required": "...This is a read-only view, so marking articles read, starring,
+  summarizing, and changing feeds aren't available."
+
+Verified: 252 backend tests + `tsc -b && vite build` clean. Deployed via `scripts/deploy.sh`.

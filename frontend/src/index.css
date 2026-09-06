@@ -460,12 +460,13 @@ a {
 }
 
 .readonly-banner {
-  padding: 8px 28px;
+  padding: 10px 28px;
   background: var(--violet-wash);
   border-bottom: 1px solid var(--line);
   font-family: var(--font-ui);
   font-size: 12.5px;
   font-weight: 500;
+  line-height: 1.5;
   color: var(--ink-dim);
   text-align: center;
   flex-shrink: 0;
@@ -1061,6 +1062,28 @@ kbd {
   }
 }
 
+/* Brief, friendly notice for an action that's turned off in the public
+   read-only demo (e.g. clicking Star/Summarize/Download while anonymous) —
+   see App.tsx's `notice` state. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 80;
+  max-width: 360px;
+  padding: 11px 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--ink);
+  text-align: center;
+  animation: toast-in 0.15s ease;
+}
+
 /* -------------------------- config editor drawer -------------------------- */
 
 .config-overlay {
@@ -1574,6 +1597,7 @@ kbd {
     right: 16px;
     bottom: calc(env(safe-area-inset-bottom) + 16px);
     max-width: none;
+    transform: none;
   }
 }
 
