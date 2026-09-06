@@ -2355,3 +2355,30 @@ unaffected by this fix.
 Full incident write-up: `01-projects/personal-brand/wordpress-vm-pages-setup.md`,
 "Consolidated login" sections (2026-09-06). This closes the item deferred in the previous
 entry — the deploy is now genuinely, completely verified, not just anonymous-path-verified.
+
+## 2026-09-06 (yet later) — Removed the dead "Sign in with Google" link; added a public-demo banner instead
+
+Separately from the SSO-plumbing fixes above: a user report that `/reader`'s sidebar
+"Sign in with Google" link just redirected to the pengyaochen.com homepage. Root cause:
+`frontend/src/components/Sidebar.tsx` rendered `<a href="/" className="sidebar__signin-link">`
+for the anonymous case — a plain anchor to ungated site root, not a link into any gated
+pengyaochen.com path that would actually trigger Apache's OIDC redirect. There was never any
+click handler or OAuth code behind it (confirmed nothing in the frontend bundle references
+Google/OAuth/client_id) — this wasn't a regression, the link was never finished.
+
+Product decision (not just a bug fix): OpenReader doesn't need its own sign-in UI at all.
+`optional` auth mode already gives silent cross-app SSO for allowed emails via the shared
+gateway (verified end-to-end in the entry above) when signed in at `/pages/`; there's no
+"local" sign-in this app could offer beyond that. So the fix removes the link entirely rather
+than pointing it at a working gated URL.
+
+For the anonymous case specifically, OpenReader's public deployment is meant to be browsed
+directly (e.g. by a recruiter looking at this project), so replaced the dead link with a
+friendly banner: "👋 You're viewing a public demo of OpenReader — browse freely, sign-in isn't
+required." (`.readonly-banner` in `index.css`, shown in `App.tsx` when `meQuery.data?.id ==
+null`). Removed the now-unused `isAnonymous` prop from `Sidebar` since its only use was the
+deleted link. 252 backend tests + frontend typecheck passed; deployed via `scripts/deploy.sh`.
+
+See Summra's equivalent entry in its own `WORK_LOG.md` (same session, same root cause, same
+decision) — Summra's fix has no banner (its anonymous UX was already fine as read-only), just
+a plain in-modal explanation instead of a CTA.
