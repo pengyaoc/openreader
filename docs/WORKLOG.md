@@ -2326,3 +2326,32 @@ Deferred to a later pass, now that the deploy is confirmed working: deleting the
 bcrypt/session-cookie rollback code in `app/auth.py` and `useradm`'s
 `add`/`set-password`/`copy-password` subcommands (Task C4 Step 4), and merging this branch
 to `main`.
+
+## 2026-09-06 (later still) — Real root cause found: Require all granted silently skipped auth
+
+The first real human login (via `/pages/`) exposed the actual bug behind "still shows
+signed out": Apache's `<Location /reader/>` used `Require all granted`, which is a
+documented Apache 2.4 core optimization — if authorization succeeds unconditionally
+regardless of identity, Apache's core skips invoking any authentication module at all,
+including `mod_auth_openidc`. So `X-Remote-Email` was never injected even for a
+genuinely signed-in session; nothing in this app was ever broken. Two earlier real bugs
+found along the way (the `/oidc/callback` 404, and the default shm session cache getting
+wiped on every Apache reload) were also real and are documented in the vault note, but
+neither was sufficient to explain the symptom on its own.
+
+Fix (Apache-side only, this repo's code needed no change): `Require valid-user` instead
+of `Require all granted`. `OIDCUnAuthAction pass` (vhost-wide) is what still lets an
+anonymous, no-session request through untouched — confirmed this is a separate mechanism
+from `Require`'s own evaluation.
+
+**Fully verified live, in a real browser, real Google account:** signed in once via
+`/pages/`, `/reader/api/me` correctly returned the real identity (`{"id":1,"username":
+"pengyao",...}`), personalized state rendered (192 unread, pengyao's actual read
+history) instead of the anonymous/default view, and — the actual point of this whole
+project — landed already-signed-in on `/summrabook/` too with zero further login
+prompts. Anonymous access, write-gating, and header-spoofing scrubbing all re-confirmed
+unaffected by this fix.
+
+Full incident write-up: `01-projects/personal-brand/wordpress-vm-pages-setup.md`,
+"Consolidated login" sections (2026-09-06). This closes the item deferred in the previous
+entry — the deploy is now genuinely, completely verified, not just anonymous-path-verified.
