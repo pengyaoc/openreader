@@ -569,8 +569,9 @@ export default function App() {
           loadingMore={articlesQuery.isFetchingNextPage}
           onLoadMore={() => articlesQuery.fetchNextPage()}
           listKey={selectionToQueryValue(selection)}
-          onRefresh={isAnonymous ? () => {} : () => refreshMutation.mutate()}
+          onRefresh={() => refreshMutation.mutate()}
           refreshing={refreshMutation.isPending}
+          refreshEnabled={!isAnonymous}
           loading={articlesQuery.isPending}
           hidden={readerOpen}
         />

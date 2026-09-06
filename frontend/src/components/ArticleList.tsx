@@ -28,6 +28,7 @@ function usePullToRefresh(
   scrollRef: React.RefObject<HTMLDivElement | null>,
   onRefresh: () => void,
   refreshing: boolean,
+  enabled: boolean,
 ) {
   const [pullDistance, setPullDistance] = useState(0)
   const startYRef = useRef<number | null>(null)
@@ -35,6 +36,12 @@ function usePullToRefresh(
   refreshingRef.current = refreshing
 
   useEffect(() => {
+    if (!enabled) {
+      startYRef.current = null
+      setPullDistance(0)
+      return
+    }
+
     const el = scrollRef.current
     if (!el) return
 
@@ -82,7 +89,7 @@ function usePullToRefresh(
       el.removeEventListener('touchend', onTouchEnd)
       el.removeEventListener('touchcancel', onTouchEnd)
     }
-  }, [scrollRef, onRefresh])
+  }, [scrollRef, onRefresh, enabled])
 
   // Refresh finished — animate the indicator back to resting.
   useEffect(() => {
@@ -140,6 +147,10 @@ interface Props {
   listKey: string
   onRefresh: () => void
   refreshing: boolean
+  // Anonymous read-only browsing cannot start a refresh. Disable the
+  // gesture itself as well as its callback so a pull cannot leave the list
+  // stuck at the "Release to refresh" resting height.
+  refreshEnabled?: boolean
   // True while the initial fetch for the current view is still in flight —
   // distinct from `refreshing` (a user-triggered re-fetch of an already
   // loaded list). Without this the list rendered "Nothing here yet" for the
@@ -163,6 +174,7 @@ export function ArticleList({
   listKey,
   onRefresh,
   refreshing,
+  refreshEnabled = true,
   loading,
   hidden,
 }: Props) {
@@ -170,7 +182,7 @@ export function ArticleList({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
   }, [listKey])
-  const pullDistance = usePullToRefresh(scrollRef, onRefresh, refreshing)
+  const pullDistance = usePullToRefresh(scrollRef, onRefresh, refreshing, refreshEnabled)
 
   // Checked first, ahead of the loading/empty states below — same
   // "article-list" id/ref every branch uses, so React keeps this as one
