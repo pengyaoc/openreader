@@ -2265,3 +2265,102 @@ directions, migration tests against a synthetic legacy DB (including the interru
 resume path), and two-account end-to-end API tests running the real login flow. Verified live
 in a browser: signed in as the second account (185 unread, config-filtered), logged out, signed in as
 the primary account (48 unread, per-source counts all different, no stale rows).
+
+## 2026-09-05 — Contain VoiceOver to the reader overlay
+
+Reported bug: opening an article in the installed iOS PWA and swiping with VoiceOver read
+content that wasn't visible on screen. Cause: `ArticleReader` renders a
+`position: fixed; inset: 0` overlay (`index.css`'s `.reader-overlay`) as a *sibling* of the
+sidebar and article list inside `.shell`, not a replacement for them — both stayed fully
+mounted and unmarked underneath it, so VO's swipe/rotor navigation walked straight past the
+overlay into the list and sidebar behind it. The codebase had essentially no accessibility
+attributes before this (three `aria-hidden`s, two `aria-label`s, zero `.focus()` calls).
+
+Fix, scoped deliberately to just the reader (not the off-canvas mobile sidebar, article-row
+semantics, icon-button labels, or live regions — separate work):
+
+- `App.tsx` sets `inert` on `.main` and passes it into `Sidebar` whenever the reader is open
+  (`readerOpen = openArticleId !== null`). React 19's boolean `inert` prop maps straight to
+  the DOM property — no string-attribute workaround needed — and it's what actually pulls
+  the background out of the accessibility tree (iOS Safari 15.5+).
+- `ArticleReader`'s root gets `role="dialog"`, `aria-modal="true"`, `aria-labelledby`
+  pointing at the article `<h1>` (via `useId`), and `tabIndex={-1}` so it's a legitimate
+  focus target — `inert` hides the background, this is what makes VO treat the overlay as
+  its own self-contained unit rather than just another chunk of page.
+- Focus moves onto the overlay itself on open and on every prev/next article change (same
+  effect that already reset scroll position on `article.id` change), and back onto the
+  specific article row on close (`ArticleList` rows take `tabIndex={-1}` only for the
+  currently-selected row, so there's a legitimate script-focusable target — not reachable by
+  Tab, since rows otherwise stay plain non-interactive divs per the reader-only scope).
+  Without this, both open and close left VO/keyboard focus stranded on a now-inert or
+  now-unmounted element.
+
+Verified: `tsc -b` + `vite build` clean, `oxlint` shows only the one pre-existing
+`exhaustive-deps` warning (confirmed present before this change too, unrelated to it — the
+llm-summary auto-switch effect). Checked in Chrome DevTools' full accessibility tree that the
+sidebar/article-list subtrees disappear while the reader is open and reappear on close, and
+that Tab-cycling can't reach a background control either.
+
+**Follow-up same day:** live device testing showed VoiceOver still started on the toolbar
+(Close, Pull full article, Summarize, Star, Open original) before the article — containing
+the *background* wasn't the whole problem. Root cause: initial focus targeted the overlay
+`<div>` itself, whose first descendant in the DOM is `.reader-bar`, so a screen reader's
+forward navigation (which reads on from wherever focus currently sits) hit the toolbar
+first. Fix: focus now lands on the article `<h1>` (`ref`+`tabIndex={-1}`, still the
+`aria-labelledby` target) instead of the overlay container, so forward reads start at the
+title and go straight into the meta line and body; the toolbar is still reachable by
+swiping backward. Removed the now-unused ref/`tabIndex={-1}` from the overlay div itself.
+Verified live against the real feed: `document.activeElement` after opening an article is
+the `<h1 class="reader-article__title">`, not the overlay or toolbar.
+
+**Second follow-up same day:** still reported reading feed-item titles with the reader open.
+Root cause this time: `inert` isn't a reliable guarantee on iOS at all — this is a
+documented Safari 26 regression
+([discussions.apple.com/thread/256161078](https://discussions.apple.com/thread/256161078)):
+VoiceOver's virtual cursor can keep navigating into `inert` content, and when focus is lost
+it falls back to whatever's nearest by screen position to where it last was — an
+inert-but-still-present article row is exactly that kind of candidate. `aria-hidden` has
+the same class of long-standing WebKit bugs
+([bugs.webkit.org/show_bug.cgi?id=201887](https://bugs.webkit.org/show_bug.cgi?id=201887)),
+so it's not a safe substitute either. The only guarantee that doesn't depend on WebKit
+computing an "ignored" AX flag correctly is not having the nodes in the DOM at all.
+
+Fix: `Sidebar` and `ArticleList` now take the reader-open state and render their actual
+content as nothing (`Sidebar`'s brand/nav-and-folders/footer sections; a new `hidden` prop
+on `ArticleList`) instead of just marking it `inert` — `inert` is kept alongside as
+defense-in-depth for browsers where it behaves correctly and to block pointer/keyboard
+interaction, but the content itself is gone, so there's nothing left for any AX-tree bug to
+expose. Verified: `document.querySelectorAll('[data-article-id]')` and `.nav-row` both
+return zero while the reader is open, and `#article-list`/`#sidebar-scroll`'s own children
+count is 0.
+
+That surfaced a real regression of its own: emptying a scroll container clamps its own
+`scrollTop` to 0 (there's nothing left to scroll to), and it does not restore on its own once
+content comes back — confirmed live (scrolled the list to 400, opened and closed an article,
+came back at 0). `App.tsx` now explicitly saves `#article-list` and `#sidebar-scroll`'s
+`scrollTop` in `openArticle` (the one place every "open an article" path funnels through —
+both a row click and the `j`/`k` + `o`/Enter keyboard shortcut) and writes it back in
+`closeArticle`'s existing focus-restoring `requestAnimationFrame`. Verified live via both
+paths: scrolled the list, opened via click, closed, back at the exact same `scrollTop`;
+repeated via `j` then `o`, same result. Also confirmed via the Network panel that closing
+never re-fetches `/api/articles` or `/api/sources` — the list is React Query cache in
+`App.tsx`, untouched by `ArticleList` unmounting its rows, so there's no data reload on close
+even before this scroll-position fix, only the (now-fixed) visual scroll reset.
+
+## 2026-09-05 — Consolidated Google login, planned (not yet implemented)
+
+Brainstormed a shared login design across OpenReader, Summra, and `/pages/` on
+`pengyaochen.com` — full design and reasoning lives in the `pchauth` repo
+(`~/Documents/dev/pchauth/docs/superpowers/specs/2026-09-05-consolidated-login-design.md`).
+For this app specifically: `backend/app/auth.py` will become a thin wrapper reading
+`X-Remote-Email`, set by a shared Apache `mod_auth_openidc` gateway once this box's vhost
+is updated — no OIDC protocol code in this repo for the cohosted deployment.
+
+**Deliberately out of scope for the current round: `self_oidc` mode** (this app running
+its own Google OIDC client directly, for a standalone deployment with no Apache gateway
+in front). There is no standalone deployment of OpenReader today, so building it now
+would be speculative. The design reserves the shape for it — `AUTH_SOURCE` env var,
+`subject`/`email`/`name` columns already added regardless — but the actual client
+(PKCE, token exchange, JWKS verification) is future work, to be built only when a real
+standalone need shows up. Don't assume it exists; check `AUTH_SOURCE` before relying on
+any `self_oidc`-only behavior.
