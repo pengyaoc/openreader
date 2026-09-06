@@ -99,6 +99,23 @@ def build_production_app() -> Starlette:
             flush=True,
         )
 
+    # trusted_header mode is safe only because Apache is the sole thing
+    # that can reach this process — the identity header is trusted with no
+    # verification of its own. uvicorn's bind address is a CLI flag
+    # (--host), invisible to this module, so this can't be a hard runtime
+    # check; it's a loud reminder instead. The deployed systemd unit binds
+    # 127.0.0.1 explicitly (see README.md's ExecStart) — never change that
+    # to 0.0.0.0 while auth_configured() is true.
+    if auth_configured():
+        print(
+            "NOTE: READER_AUTH_MODE requires a login — this process must be "
+            "reachable ONLY via the trusted Apache gateway (bound to "
+            "127.0.0.1, never 0.0.0.0). The identity header is trusted with "
+            "no verification of its own.",
+            file=sys.stderr,
+            flush=True,
+        )
+
     app = create_app()
 
     frontend_dist = settings.REPO_ROOT / "frontend" / "dist"

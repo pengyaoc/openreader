@@ -17,9 +17,8 @@ interface Props {
   onCloseMobile: () => void
   onMarkAllRead: (sourceId: number) => void
   onMarkAllUnreadRead: () => void
-  onLogout: () => void
   username?: string
-  authEnabled: boolean
+  isAnonymous: boolean
 }
 
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
@@ -45,9 +44,8 @@ export function Sidebar({
   onCloseMobile,
   onMarkAllRead,
   onMarkAllUnreadRead,
-  onLogout,
   username,
-  authEnabled,
+  isAnonymous,
 }: Props) {
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
@@ -169,6 +167,16 @@ export function Sidebar({
               <span className="sidebar__identity-name">{username}</span>
             </div>
           )}
+          {/* Anonymous under `optional` mode: there's no app-level login
+              to open — visiting any gated pengyaochen.com path triggers
+              Apache's Google redirect. Signing out is the shared
+              gateway's own logout, not something this app can do. */}
+          {isAnonymous && (
+            <a className="sidebar__identity sidebar__signin-link" href="/">
+              <span aria-hidden="true">👤</span>
+              <span className="sidebar__identity-name">Sign in with Google</span>
+            </a>
+          )}
           <button className="refresh-btn" onClick={onRefresh} disabled={refreshing}>
             <span className={`refresh-icon ${refreshing ? 'spinning' : ''}`}>⟳</span>
             {refreshing ? 'Refreshing…' : 'Refresh feeds'}
@@ -177,17 +185,6 @@ export function Sidebar({
           <button className="refresh-btn" onClick={onOpenConfig}>
             ⚙ Settings
           </button>
-          {/* No Log out on a deployment with no login configured — the
-              button would clear a cookie that was never gating anything,
-              and land you straight back on the same screen. */}
-          {authEnabled && (
-            <>
-              <div style={{ height: 8 }} />
-              <button className="refresh-btn" onClick={onLogout}>
-                ⏻ Log out
-              </button>
-            </>
-          )}
         </div>
       </aside>
     </>
