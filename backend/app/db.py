@@ -160,6 +160,13 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_per_user_state(conn)
     _backfill_decoded_entities(conn)
 
+    # Consolidated login, 2026-09-05 (see docs/WORKLOG.md and pchauth's
+    # spec). subject/name are reserved for the deferred self_oidc source
+    # and stay NULL under trusted_header, which only ever supplies email.
+    _add_column_if_missing(conn, "users", "email", "TEXT")
+    _add_column_if_missing(conn, "users", "subject", "TEXT")
+    _add_column_if_missing(conn, "users", "name", "TEXT")
+
 
 def ensure_default_user(conn: sqlite3.Connection) -> None:
     """Fresh-DB safety net only: guarantees DEFAULT_USER_ID exists so the
