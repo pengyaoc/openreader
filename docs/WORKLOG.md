@@ -2301,3 +2301,28 @@ login" section:
 `pychen007@gmail.com`/`cassyheng@gmail.com` via `useradm link` (need their current
 usernames from the live DB first — not yet looked up), so the first Google login attaches
 to the existing rows instead of creating new ones.
+
+## 2026-09-06 (later same day) — App code deployed, full stack verified
+
+Deployed via the usual `scripts/deploy.sh`. Set `READER_AUTH_MODE=optional` and
+`READER_ALLOWED_EMAILS=pychen007@gmail.com,cassyheng@gmail.com` in `openreader.env`
+alongside the deploy (backed up first, `openreader.env.bak-pre-oidc-20260906`) so there was
+no window where the app ran with neither the old bcrypt auth nor the new trusted_header
+auth active.
+
+Linked both real accounts immediately after: `useradm link pengyao pychen007@gmail.com`,
+`useradm link heng cassyheng@gmail.com`. `article_states` history confirmed intact via
+`useradm list` before/after (437 read / 1 starred for pengyao, 66 read for heng — unchanged
+except pengyao's own read count from verification traffic).
+
+Verified live: anonymous `GET /api/sources` and `/api/me` succeed (200, `id: null`);
+a forged `X-Remote-Email: attacker@evil.com` sent from outside still resolves to `id: null`
+— proof the Apache `RequestHeader unset` scrub actually works now that this app reads the
+header (the 2026-09-06 morning check only proved the *old* app's unrelated auth rejected a
+forged header, not the new scrubbing behavior); `POST /api/refresh` 401s anonymously as
+expected.
+
+Deferred to a later pass, now that the deploy is confirmed working: deleting the
+bcrypt/session-cookie rollback code in `app/auth.py` and `useradm`'s
+`add`/`set-password`/`copy-password` subcommands (Task C4 Step 4), and merging this branch
+to `main`.
