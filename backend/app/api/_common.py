@@ -10,17 +10,42 @@ from app import settings
 from app.config import Config, to_yaml
 from app.db import DEFAULT_USER_ID
 
+_MISSING = object()
 
-def current_user_id(request: Request) -> int:
-    """The account this request belongs to, for every read/starred lookup.
 
-    AuthMiddleware puts it there (see app/auth.py). The fallback covers the
-    one case where that middleware isn't in the stack at all:
-    create_app(require_auth=False), which is how the test suite reaches
-    every endpoint — and it's the same answer the middleware itself gives
-    when login is switched off, so the two paths agree.
+class AnonymousUserError(Exception):
+    """Raised by require_user_id() for a write attempted with no signed-in
+    user — callers catch this and return a 401, never let it propagate as
+    a 500."""
+
+
+def current_user_id(request: Request) -> int | None:
+    """The account this request reads as, or None for an anonymous request
+    under optional mode. Distinct from require_user_id(): this is safe to
+    call from any read path, including ones that should render fine for a
+    signed-out visitor.
+
+    AuthMiddleware puts user_id in request.state (see app/auth.py). The
+    _MISSING fallback covers the one case where that middleware isn't in
+    the stack at all: create_app(require_auth=False), which is how the
+    test suite reaches every endpoint — treated the same as `off` mode,
+    both attributing every request to DEFAULT_USER_ID.
     """
-    return getattr(request.state, "user_id", DEFAULT_USER_ID)
+    value = getattr(request.state, "user_id", _MISSING)
+    return DEFAULT_USER_ID if value is _MISSING else value
+
+
+def require_user_id(request: Request) -> int:
+    """The account this request must belong to for a write to proceed.
+    Raises AnonymousUserError — never returns None — so a route handler
+    that forgets to check the return value fails loudly (an exception the
+    app's error handler turns into a 500 during development) rather than
+    silently writing under None or DEFAULT_USER_ID.
+    """
+    user_id = current_user_id(request)
+    if user_id is None:
+        raise AnonymousUserError()
+    return user_id
 
 
 def readonly_response() -> JSONResponse | None:

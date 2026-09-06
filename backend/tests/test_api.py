@@ -753,23 +753,24 @@ def test_get_source_404_for_missing_id(client):
 
 # --- Multi-account (2026-08-31) -------------------------------------------
 # Everything above runs with require_auth=False, i.e. as one implicit
-# account. These run the real login flow with two accounts against one app
-# and one DB, which is the only place the end-to-end isolation story —
-# middleware -> current_user_id -> store -> JSON — is actually exercised.
+# account. These run trusted_header with two real accounts against one
+# app and one DB, which is the only place the end-to-end isolation story
+# — middleware -> current_user_id -> store -> JSON — is actually
+# exercised. (Consolidated login, 2026-09-05: identity now comes from an
+# X-Remote-Email header, not a session cookie — see docs/WORKLOG.md.)
 
 
 @pytest.fixture()
 def two_account_clients(tmp_path, monkeypatch):
-    from app import settings
-    from tests.conftest import hash_password, seed_user
+    from tests.conftest import seed_user
 
-    monkeypatch.setattr(settings, "SESSION_SECRET", "test-secret-not-for-production")
-    monkeypatch.setattr(settings, "AUTH_PASSWORD_HASH", hash_password("pw-alice"))
+    monkeypatch.setenv("READER_AUTH_MODE", "required")
+    monkeypatch.setenv("READER_ALLOWED_EMAILS", "alice@example.com,bob@example.com")
 
     db_path = tmp_path / "reader.db"
     conn = connect(db_path)
     init_schema(conn)
-    conn.execute("UPDATE users SET username = 'alice' WHERE id = 1")
+    conn.execute("UPDATE users SET username = 'alice', email = 'alice@example.com' WHERE id = 1")
     conn.execute(
         "INSERT INTO sources (key, type, title, folder, url) VALUES (?, ?, ?, ?, ?)",
         ("s1", "rss", "Source One", "Test", "https://x/feed"),
@@ -783,7 +784,9 @@ def two_account_clients(tmp_path, monkeypatch):
             (source_id, f"g{n}", f"https://x/{n}", f"Post {n}", f"2026-08-0{n}T00:00:00Z"),
         )
     conn.commit()
-    seed_user(conn, "bob", "pw-bob")
+    bob_id = seed_user(conn, "bob")
+    conn.execute("UPDATE users SET email = 'bob@example.com' WHERE id = ?", (bob_id,))
+    conn.commit()
     conn.close()
 
     from app.config import to_yaml
@@ -795,15 +798,10 @@ def two_account_clients(tmp_path, monkeypatch):
     config_path.write_text(to_yaml(config))
     app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=True)
 
-    def signed_in(username, password):
-        # https:// — the session cookie is Secure (see test_auth.py).
-        c = TestClient(app, base_url="https://testserver")
-        assert c.post(
-            "/api/login", json={"username": username, "password": password}
-        ).status_code == 200
-        return c
+    def signed_in(email):
+        return TestClient(app, headers={"X-Remote-Email": email})
 
-    return signed_in("alice", "pw-alice"), signed_in("bob", "pw-bob")
+    return signed_in("alice@example.com"), signed_in("bob@example.com")
 
 
 def test_two_accounts_track_read_and_starred_state_independently(two_account_clients):

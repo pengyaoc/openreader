@@ -15,9 +15,10 @@ from starlette.routing import Route
 
 from app import settings
 from app.api import articles, auth_api, config_api, images, refresh_api, sources
-from app.auth import AuthMiddleware, auth_configured
+from app.auth import auth_configured, load_auth_config, upsert_user
 from app.config import Config, load_config
 from app.db import connect, init_schema
+from app.pchauth.starlette_adapter import PchauthMiddleware
 
 
 def create_app(
@@ -54,12 +55,20 @@ def create_app(
         Route("/api/config", config_api.get_config, methods=["GET"]),
         Route("/api/config", config_api.put_config, methods=["PUT"]),
         Route("/api/img", images.proxy_image),
-        Route("/api/login", auth_api.login, methods=["POST"]),
-        Route("/api/logout", auth_api.logout, methods=["POST"]),
         Route("/api/me", auth_api.me),
     ]
 
-    middleware = [Middleware(AuthMiddleware)] if require_auth else []
+    middleware = (
+        [
+            Middleware(
+                PchauthMiddleware,
+                config=load_auth_config(),
+                upsert_user=lambda identity: upsert_user(identity, get_conn),
+            )
+        ]
+        if require_auth
+        else []
+    )
     app = Starlette(routes=routes, middleware=middleware)
     app.state.get_conn = get_conn
     app.state.config = config
@@ -77,15 +86,14 @@ def build_production_app() -> Starlette:
     accounts = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     conn.close()
 
-    # The old "exactly one auth env var set" fail-closed check is gone with
-    # the pair it checked (see app/auth.py). This is what replaces it: a DB
-    # with real accounts in it, served with no session secret, is serving
-    # everyone's reading as one unauthenticated account. Warn rather than
-    # refuse to boot — running a copy of the production DB locally with no
-    # secret is a routine, legitimate thing to do.
+    # A DB with real accounts in it, served with READER_AUTH_MODE unset
+    # (== 'off'), is serving everyone's reading as one unauthenticated
+    # account. Warn rather than refuse to boot — running a copy of the
+    # production DB locally with no mode set is a routine, legitimate
+    # thing to do.
     if accounts > 1 and not auth_configured():
         print(
-            f"WARNING: {accounts} accounts exist but READER_SESSION_SECRET is unset — "
+            f"WARNING: {accounts} accounts exist but READER_AUTH_MODE is unset (or 'off') — "
             "no login is required and every request is served as the first account.",
             file=sys.stderr,
             flush=True,
