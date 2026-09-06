@@ -1,6 +1,6 @@
 # OpenReader — Technical Design & ERD
 
-Status: reflects the app as built (2026-08-14). Companion to `docs/PRD.md`.
+Status: reflects the app as built (2026-09-06 — auth section rebuilt on trusted-header SSO; everything else last touched 2026-08-31). Companion to `docs/PRD.md`.
 
 ## 1. Architecture overview
 
@@ -48,20 +48,34 @@ backend/app/
 ├── main.py            # Starlette app factory, route table
 ├── asgi.py             # production entrypoint (uvicorn app.asgi:app)
 ├── settings.py         # env-driven paths (DB, config, media, IMAP
-│                        # host/user/password, readonly-config flag,
-│                        # auth password hash/session secret)
+│                        # host/user/password, readonly-config flag;
+│                        # AUTH_PASSWORD_HASH/SESSION_SECRET are the old
+│                        # app-layer login's config, unused since 2026-09-05
+│                        # (see auth.py, pchauth/) but not yet deleted)
 ├── config.py            # msgspec Config/Source/Rule structs, YAML
 │                        # parse+validate+serialize (to_yaml),
 │                        # credential-key guard (see §5)
-├── auth.py               # app-layer login: bcrypt password check,
-│                         # HMAC-signed session cookie carrying the
-│                         # account id, AuthMiddleware (see §5)
+├── auth.py               # READER_AUTH_MODE → pchauth AuthConfig
+│                         # (load_auth_config/auth_configured), plus the
+│                         # old bcrypt/session-cookie functions kept only
+│                         # as a documented rollback path — nothing calls
+│                         # them (see §5's trusted-header entry)
+├── pchauth/              # trusted-header identity package, shared in
+│                         # shape (not by import) with Summra's copy:
+│                         # core.py (Identity, is_allowed), config.py
+│                         # (AuthConfig, load_config), starlette_adapter.py
+│                         # (PchauthMiddleware) (see §5)
 ├── useradm.py            # account admin CLI (`python -m app.useradm`);
-│                         # lives here, not in scripts/, because
-│                         # deploy.sh only ships backend/app to the VM
+│                         # `link <username> <email>` attaches a trusted-
+│                         # header email to a pre-existing password-era
+│                         # account, so it's reachable via SSO too; lives
+│                         # here, not in scripts/, because deploy.sh only
+│                         # ships backend/app to the VM
 ├── db.py                # schema (see §3), WAL connection factory
 ├── store.py             # read/write helpers used by the API layer,
-│                        # every one scoped to an account (see §5)
+│                        # every one scoped to an account (see §5) —
+│                        # unaffected by the identity-source change, still
+│                        # takes a user_id regardless of where it came from
 ├── connectors/
 │   ├── base.py           # NormalizedEntry — the shape every connector emits
 │   ├── rss.py             # Atom/RSS2.0/RDF parser (defusedxml)
@@ -85,6 +99,10 @@ backend/app/
 │                        # article summarization — zero tools, no jobs/
 │                        # polling, a single synchronous call
 └── api/
+    ├── _common.py             # current_user_id() (read-path, None-safe
+    │                          # under `optional` mode) vs. require_user_id()
+    │                          # (write-path, raises for a 401 rather than
+    │                          # writing under None/a default) — see §5
     ├── sources.py, articles.py, refresh_api.py, config_api.py,
     │ images.py, auth_api.py   # thin Starlette handlers over the above
 ```
@@ -140,10 +158,13 @@ erDiagram
 
     users {
         int id PK
-        text username UK "COLLATE NOCASE"
-        text password_hash "bcrypt; managed via python -m app.useradm"
+        text username UK "COLLATE NOCASE; legacy, still NOT NULL"
+        text password_hash "bcrypt; legacy, unused since 2026-09-05"
         text created_at
         text password_changed_at
+        text email "added 2026-09-05; trusted-header identity"
+        text subject "added 2026-09-05; reserved, unused"
+        text name "added 2026-09-05; reserved, unused"
     }
 
     article_states {
@@ -168,6 +189,17 @@ Notes on choices that aren't obvious from the columns alone:
   `DROP TABLE`, not a lossy one. `db.py`'s `init_schema()` still has no
   general migration framework — this was a one-off, same idempotent-guard
   pattern as the `ADD COLUMN` helper it sits next to.
+- **`users.email`/`subject`/`name` were added additively 2026-09-05, not a
+  replacement of `username`/`password_hash`** — unlike Summra (which had 0
+  rows and could drop-and-recreate), this app had real household accounts
+  with real usernames already, so `_add_column_if_missing` just grows the
+  table. `password_hash` still exists and is still `NOT NULL DEFAULT ''`,
+  but nothing reads it any more (`auth.py`'s `verify_password` is unused —
+  see §5). `upsert_user_by_email()` creates a *new* row for a first-seen
+  email (using the email as `username` too, since that column is still
+  `NOT NULL UNIQUE`) rather than merging into an existing password-era
+  account — linking an existing account to an email is a deliberate,
+  manual step (`useradm link <username> <email>`), not automatic.
 - **Read and starred state is per-account, in `article_states`** (added
   2026-08-31; these were columns on `articles` before). Feeds are shared —
   one `feeds.yaml`, one `sources`/`articles` row per thing, one cached
@@ -213,15 +245,16 @@ Notes on choices that aren't obvious from the columns alone:
 
 ## 4. API surface
 
-Every route below except `/api/login`/`/api/logout` is gated by
-`AuthMiddleware` (§5) whenever login is configured — permissive (no
-cookie required) otherwise, matching this app's local/LAN default.
+There is no `/api/login`/`/api/logout` any more (§5) — `PchauthMiddleware`
+resolves identity from `X-Remote-Email` on every request instead. Every
+route is reachable anonymously under `optional` mode (this deployment's
+default); reads resolve to an anonymous/default view, writes 401 via
+`require_user_id` (`api/_common.py`). Under `required` mode, an anonymous
+request never reaches a handler at all — the middleware 401s it first.
 
 | Method & path | Purpose | Blocking I/O? |
 |---|---|---|
-| `POST /api/login` | `{username, password}` against `users.password_hash`, set the session cookie carrying that account's id (§5) — unauthenticated (has to be, nothing to authenticate with yet) | bcrypt check off the event loop (`asyncio.to_thread`) — deliberately ~100-300ms, and it runs against a dummy hash for unknown usernames too, so a bad username and a bad password cost the same |
-| `POST /api/logout` | Clear the session cookie — always 200, a no-op if there was nothing to clear; unauthenticated | No |
-| `GET /api/me` | `{id, username, auth_enabled}` for the current session. Gated like every data route on purpose: its 401 is the frontend's single "show the login screen" signal | No |
+| `GET /api/me` | `{id, username, auth_enabled}` — `id: null` for an anonymous request under `optional` mode (not an error; the frontend renders a signed-out browsing state, not a forced login screen). Under `required` mode this is unreachable anonymously. `auth_enabled` reflects whether this deployment configures login at all (`READER_AUTH_MODE != 'off'`), regardless of whether *this* request is signed in | User-row fetch runs off the event loop (`asyncio.to_thread`) — one of several calls the frontend fires in parallel on cold open |
 | `GET /api/sources` | List sources with unread counts, filtered to keys present in the live config — a source removed from `feeds.yaml` stops appearing here immediately, even though its DB row and articles aren't deleted (§5) | No |
 | `POST /api/sources` | Structured add-source, any type (rss/imap) (validates, writes YAML, creates DB row) | No |
 | `GET /api/sources/:id` | Full detail for one source (url/query/mailbox_folder/fetch_full_text/rules) — `list_sources` deliberately omits these; backs the edit form's pre-fill | No |
@@ -430,29 +463,70 @@ instead — what a deployment with no auth layer at all should do), or put
 real auth in front of the whole app and leave the flag unset, since the
 endpoint is no longer anonymously reachable. The VM deployment moved from
 the former to the latter on 2026-08-13 (initially Apache Basic Auth, then
-the app-layer login described below, same day).
+the app-layer login described below, same day). **As of 2026-09-05/06**
+the "whole app" is no longer behind a login (`optional` mode allows
+anonymous reads) — what actually keeps this flag safely unset now is
+`PUT /api/config` specifically being `require_user_id`-gated, not the app
+as a whole; see §7.1's identity bullet for the live picture.
 
-**App-layer login (`app/auth.py`) replaced Apache Basic Auth the same
-day it was added.** Basic Auth's `WWW-Authenticate` popup turned out to
-be invisible to Chrome's password-manager save UI on any platform (that
-only hooks real `<form>` submissions), and its credential cache is an
-in-memory, browser-session/tab-lifetime thing mobile Chrome discards
-aggressively on backgrounding — no server-side knob extends it, so the
-login prompt reappeared very frequently on mobile. `AuthMiddleware` gates
-every `/api/*` route except `/api/login`/`/api/logout` with a
-`SameSite=Lax`/`HttpOnly`/`Secure` session cookie, stateless and
-HMAC-signed (`READER_SESSION_SECRET`) — no session table, no
-garbage-collection, verifying is just recomputing one HMAC and checking
-an expiry timestamp. The password itself is a bcrypt hash
-(`READER_AUTH_PASSWORD_HASH`), generated locally the same way the old
-`.htpasswd-reader` was (`htpasswd -nbB`) — the plaintext never touches
-the server, only ever arriving transiently in a login request body before
-`bcrypt.checkpw` (run via `asyncio.to_thread`, since it's deliberately
-~100-300ms of blocking CPU — same off-event-loop pattern as this app's
-other blocking work) discards it. `READER_SESSION_SECRET` unset (the
-default) means no login is required at all, matching every other optional
-credential in this app. Apache's role shrank back to a pure reverse proxy
-(`ProxyPass` only, no `AuthType Basic` block) once this was live.
+**App-layer login (`app/auth.py`), live 2026-08-13 → 2026-09-05, replaced
+by trusted-header SSO.** History, for context: Apache Basic Auth's
+`WWW-Authenticate` popup turned out to be invisible to Chrome's
+password-manager save UI (that only hooks real `<form>` submissions), and
+its credential cache is an in-memory, browser-session/tab-lifetime thing
+mobile Chrome discards aggressively on backgrounding — no server-side knob
+extends it, so the login prompt reappeared very frequently on mobile.
+`AuthMiddleware` (now deleted) replaced it with a stateless,
+HMAC-signed session cookie and a bcrypt password check — the functions
+survive in `auth.py` (`verify_password` through `clear_session_cookie`)
+purely as a documented rollback path; nothing calls them.
+
+**Superseded 2026-09-05/06: trusted-header SSO via `pchauth`.** Identity
+now comes from a shared Apache reverse-proxy vhost running
+`mod_auth_openidc` against Google — the same gateway fronting `/pages/`
+and Summra on `wordpress-2-vm` — which forwards a trusted `X-Remote-Email`
+header once a session already exists (e.g. from signing in at
+`pengyaochen.com/pages`). This app never runs an OAuth flow of its own and
+has no login form; `PchauthMiddleware` (`app/pchauth/starlette_adapter.py`)
+resolves `request.state.user_id` on every request from that header:
+
+- `READER_AUTH_MODE` unset or `off`: every request maps to `DEFAULT_USER_ID`
+  (reproduces pre-pchauth no-login behavior; there's no Apache gateway in
+  local/dev to supply anything).
+- No header + `optional` (this deployment's setting): anonymous —
+  `current_user_id()` returns `None`, request proceeds; reads render a
+  signed-out/public browsing state (see PRD, anonymous read-only mode).
+- No header + `required`: 401 immediately, before any handler runs.
+- Header present but email not in `READER_ALLOWED_EMAILS`: 403.
+- Header present and allowed: `upsert_user_by_email()` resolves/creates
+  the row, `request.state.user_id` is set.
+
+**A real Apache-layer bug delayed this from working at all for six hours
+of debugging (2026-09-06):** `<Location /reader/>` used `Require all
+granted`, which is a documented Apache 2.4 core optimization — if
+authorization succeeds unconditionally, Apache's core skips invoking any
+authentication module at all, including `mod_auth_openidc`. So
+`X-Remote-Email` was never injected even for a genuinely signed-in
+session; nothing in this app was ever broken. Fixed to `Require
+valid-user` (`OIDCUnAuthAction pass`, set vhost-wide, is the separate
+mechanism that still lets an anonymous request through untouched). Full
+incident write-up: `docs/WORKLOG.md`, 2026-09-06 entries, and the vault's
+`wordpress-vm-pages-setup.md`.
+
+**Read-only anonymous UX (2026-09-06):** the sidebar's "Sign in with
+Google" link — a plain `<a href="/">`, never wired to any click handler or
+OAuth code — was removed entirely rather than fixed, since this app has no
+sign-in action of its own to offer (see PRD §5's non-goals update). In its
+place: a friendly banner for anonymous visitors describing the read-only
+scope, and every mutating control (Refresh, Settings, mark-all-read)
+either removed outright or, for the reader toolbar's Star/Summarize/Pull-
+full-article icons, intercepted client-side with a `.toast` explanation
+instead of firing the request (critically, `onSummarize` never reaches the
+`claude` CLI subprocess call for an anonymous click — that path is
+LLM-billed). Auto-mark-read on opening an article and the `m`/`r` keyboard
+shortcuts are silently no-ops when anonymous, since there's no control to
+attach an explanation to and a toast on every article open would be its
+own bad UX. `frontend/src/App.tsx`, `Sidebar.tsx`, `index.css`.
 
 **Multiple accounts, one shared feed list (2026-08-31).** Two people
 reading one deployment need separate read and starred state and nothing
@@ -461,12 +535,23 @@ else separate — so `users` and `article_states` were added (§3), every
 `sources`, `articles` and cached summaries all stay global. Consequences
 worth naming:
 
+> The three bullets immediately below describe the 2026-08-13→09-05
+> password/session-cookie design. They're historical — accurate for the
+> dead rollback code path in `auth.py`, not for the live trusted-header
+> identity source — kept because the reasoning (why a cookie carries an
+> id, why the secret/hash pairing worked the way it did) doesn't apply to
+> pchauth but might matter again if this app ever needs `self_oidc` (its
+> own direct OIDC client, deferred per the consolidated-login design spec).
+
 - *The session cookie carries the account id* — payload is
   `"<user_id>:<expiry>"` with the HMAC over both, so one account's cookie
   can't be edited into another's. Pre-multi-user cookies (`"<expiry>"`,
   no identity) are rejected rather than attributed to account 1; honoring
   them would make account separation bypassable by holding a stale
-  cookie. Cost is one extra login each, once.
+  cookie. Cost is one extra login each, once. **Live equivalent:** there's
+  no cookie of this app's own any more — `request.state.user_id` is
+  resolved fresh from `X-Remote-Email` every request, so there's nothing
+  to forge or replay in the first place.
 - *Passwords moved into the DB.* `READER_AUTH_PASSWORD_HASH` is now a
   first-run seed for the auto-created account and nothing more;
   `app/useradm.py` manages passwords after that. Which means whether a
@@ -477,13 +562,20 @@ worth naming:
   tidying the stale line out of the env file would silently unlock an
   internet-facing deployment. `build_production_app()` prints a loud
   stderr warning instead when a multi-account DB starts with no secret.
+  **Live equivalent:** whether login is required keys off `READER_AUTH_MODE`
+  (`off`/`optional`/`required`); `READER_AUTH_PASSWORD_HASH`/
+  `READER_SESSION_SECRET` are unread by any live code path.
 - *A password change does not end existing sessions*, since the cookie
   holds only an id and an expiry. A `users.session_epoch` column checked
   per request would fix that properly, and was rejected: it puts a DB
   read on a deliberately stateless, zero-lookup verification path to
   defend a threat model (revoking a stolen cookie without touching the
   secret) that a two-person household reader doesn't have. Rotating
-  `READER_SESSION_SECRET` already invalidates everything.
+  `READER_SESSION_SECRET` already invalidates everything. **Live
+  equivalent:** revocation is the shared gateway's problem now — ending a
+  session means signing out at the Apache layer (or, for this app
+  specifically, removing the email from `READER_ALLOWED_EMAILS`, which
+  takes effect on the next request with no session to invalidate).
 - *`reconcile_read_state` sweeps for every account.* Being out of config
   scope is a property of the config, not of a person, so a removed source
   marks read for everyone still holding it unread — but it returns the
@@ -677,16 +769,23 @@ Full history of the tradeoffs and what was found along the way is in
   tight fit on a 1GB box also running Apache/MySQL/PHP-FPM — workable only
   because usage is sparse/adhoc (personal, ~1 query/5min), not something
   to run at any real frequency. See docs/WORKLOG.md, 2026-08-14.
-- **App-layer login** (`READER_SESSION_SECRET` set in
-  `/opt/openreader/openreader.env`, see §5) stands in front of the
-  whole app — `READER_READONLY_CONFIG` is intentionally *not* set here as
-  a result (see §5's entry on that flag): the config-write endpoint no
-  longer needs its own lock once nothing unauthenticated can reach it at
-  all. Briefly Apache Basic Auth instead (2026-08-13, same day) — dropped
-  once its `WWW-Authenticate` popup turned out to be invisible to Chrome's
+- **Identity: `READER_AUTH_MODE=optional`, `READER_ALLOWED_EMAILS` set**
+  (`/opt/openreader/openreader.env`, see §5's trusted-header entry) — an
+  anonymous visitor can reach every route, including `GET`s that render a
+  public read-only browsing experience, but every write still 401s via
+  `require_user_id`. `READER_READONLY_CONFIG` is correspondingly *not*
+  set — not because "nothing unauthenticated can reach it" (that stopped
+  being true the moment `optional` mode shipped; anonymous reads are the
+  whole point), but because `PUT /api/config` specifically is
+  `require_user_id`-gated regardless of mode, which is the narrower,
+  actually-correct protection this flag would otherwise have provided at
+  the whole-app level. History: briefly Apache Basic Auth (2026-08-13,
+  same day as the original app-layer login) — dropped once its
+  `WWW-Authenticate` popup turned out to be invisible to Chrome's
   password-manager save UI and its credential cache got evicted by mobile
-  Chrome constantly enough to reprompt very frequently; Apache is back to
-  a pure reverse proxy now.
+  Chrome constantly enough to reprompt very frequently; Apache is a pure
+  reverse proxy for `ProxyPass` purposes now, `mod_auth_openidc` config
+  aside.
 - Verified live end-to-end post-deploy: real RSS refresh (conditional-GET
   304s and dedup both confirmed against real feed servers, not just
   fixtures), the SSRF guard rejecting a loopback/metadata `/api/img` URL,

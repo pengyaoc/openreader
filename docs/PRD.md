@@ -1,8 +1,9 @@
 # OpenReader — Product Requirements Document
 
-Status: reflects the app as built (2026-08-14). Update this doc when product
-behavior changes — it should never drift further than a day or two behind
-the running app.
+Status: reflects the app as built (2026-09-06 — identity/access model
+rebuilt; everything else last touched 2026-08-31). Update this doc when
+product behavior changes — it should never drift further than a day or
+two behind the running app.
 
 ## 1. Problem
 
@@ -21,8 +22,18 @@ accounts (2026-08-31). Built for one person (an engineering manager)
 running it on their own machine and reading from other devices (phone,
 tablet) on the same LAN, plus anyone in the same household reading the
 same feeds — each with their own read and starred state over one shared,
-hand-curated feed list. Emphatically not a product with signups: accounts
-are created by whoever administers the box, from a CLI.
+hand-curated feed list. Emphatically not a product with signups: an
+account is either created by whoever administers the box (`python -m
+app.useradm`, from a CLI) or upserted automatically the first time a
+trusted, allowlisted email shows up via the shared-gateway SSO (§4.6).
+
+**A third audience as of 2026-09-06: the anonymous public visitor.** The
+cohosted deployment (`pengyaochen.com/reader`) runs `optional` auth mode —
+anyone can browse the feed and read articles with no account and no
+prompt to create one, which doubles as a public demo of the project
+(e.g. for a recruiter). Read state, stars, and feed configuration aren't
+theirs to change, so those controls are either absent or explained away
+with a message rather than silently failing — see §4.6.
 
 ## 3. Product principles
 
@@ -124,7 +135,8 @@ are created by whoever administers the box, from a CLI.
   the end of the article body, reachable by scrolling to it, + arrow
   keys), without ever flashing back to the list between articles.
 - Keyboard shortcuts: `j`/`k` move, `o`/`Enter` open, `Esc` close, `m`
-  toggle read, `r` refresh.
+  toggle read, `r` refresh (the latter two are silent no-ops for an
+  anonymous visitor — §4.6).
 - Full-text extraction is **per-article, once ever**: the list shows the
   feed's own summary until the full page is fetched and extracted, then
   cached forever. As of 2026-08-14, most of that happens automatically at
@@ -165,6 +177,38 @@ are created by whoever administers the box, from a CLI.
   editor (validates before writing — a bad regex or malformed YAML never
   reaches the file) for config keys the structured form doesn't cover.
 
+### 4.6 Identity and the public read-only mode (rebuilt 2026-09-06)
+
+- **No login screen, ever, in this app.** Identity comes from a shared
+  Apache reverse-proxy gateway (`mod_auth_openidc` against Google) that
+  also fronts `pengyaochen.com/pages` and Summra — if you're already
+  signed in there, this app picks that up transparently via a trusted
+  header; if not, you browse anonymously. There is no username/password
+  form, no "Sign in with Google" button, and no OAuth flow this app runs
+  itself. (A prior app-layer username/password login, 2026-08-13 →
+  2026-09-05, was fully replaced, not just hidden — see `docs/ERD.md` §5.)
+- **Anonymous browsing is a first-class, intentional state**, not a
+  degraded fallback: a small banner explains what's read-only, rather than
+  the app pretending to be fully interactive and failing silently.
+- **What's unavailable while anonymous**, and how it's communicated:
+  - Refresh feeds, Settings (feed add/edit/delete), and the per-source
+    "mark all read" controls are **not shown at all** — they'd 401 anyway,
+    and a visible dead button is worse than no button.
+  - Star, Summarize, and Pull-full-article on an open article are shown
+    but **don't perform the action** — clicking any of them shows a brief,
+    plain-language explanation instead (e.g. "AI summaries are turned off
+    in this read-only demo to avoid unexpected costs."). Summarize
+    specifically never reaches the `claude` CLI call for an anonymous
+    click, since that's the one feature with a real per-use cost.
+  - Opening an article still works, and marking it read locally in your
+    own view — it just doesn't persist, since there's no account to
+    persist it to.
+- **A household member's account still works exactly as before** once
+  they're recognized via the shared gateway — separate read/starred state,
+  same as pre-2026-09-06 multi-account behavior (§2). `useradm link
+  <username> <email>` attaches an email to an existing password-era
+  account for anyone who had one.
+
 ## 5. Non-goals (v1)
 
 - X/Twitter integration — no viable free API path as of 2026; deferred.
@@ -174,14 +218,18 @@ are created by whoever administers the box, from a CLI.
   LLM feature this app keeps is on-demand summarization of an article you
   already have, not sourcing new content. Filtering stays regex-only.
 - Any form of scheduling or background polling.
-- ~~Multi-user auth, accounts, or sharing.~~ **Partly shipped 2026-08-31**
-  (see docs/WORKLOG.md): multiple accounts, each with its own read and
-  starred state, signing in with their own username. Scoped to a
-  household, not to tenancy — the feed list, the articles, and the cached
-  summaries are all shared and global, accounts are created from a CLI
+- ~~Multi-user auth, accounts, or sharing.~~ **Partly shipped 2026-08-31,
+  identity source rebuilt 2026-09-06** (see docs/WORKLOG.md): multiple
+  accounts, each with its own read and starred state, recognized via a
+  shared-gateway SSO header rather than signing in with a username/password
+  in this app (§4.6). Scoped to a household, not to tenancy — the feed
+  list, the articles, and the cached summaries are all shared and global,
+  accounts are created from a CLI or auto-upserted from a trusted email
   rather than a signup page, and there is no sharing, no per-account
   config, and no notion of who added a feed. Still a non-goal: anything
-  that would make this multi-*tenant*.
+  that would make this multi-*tenant*, and still a non-goal: this app
+  running its own OAuth client directly (`self_oidc`, deferred — see
+  `docs/ERD.md` §5).
 - OPML import/export.
 - Mobile app (the responsive web UI is the mobile story).
 
