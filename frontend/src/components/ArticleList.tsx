@@ -145,6 +145,12 @@ interface Props {
   // loaded list). Without this the list rendered "Nothing here yet" for the
   // whole first fetch, which reads as broken rather than loading.
   loading?: boolean
+  // True while the reader overlay is open on top of the list. Renders the
+  // scroll container with no children — nothing left for VoiceOver to read
+  // or fall back to (see App.tsx's `readerOpen` comment) — while keeping
+  // the container's own DOM node (and its scrollTop) alive throughout, so
+  // closing the reader doesn't scroll the list back to the top.
+  hidden?: boolean
 }
 
 export function ArticleList({
@@ -158,12 +164,20 @@ export function ArticleList({
   onRefresh,
   refreshing,
   loading,
+  hidden,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
   }, [listKey])
   const pullDistance = usePullToRefresh(scrollRef, onRefresh, refreshing)
+
+  // Checked first, ahead of the loading/empty states below — same
+  // "article-list" id/ref every branch uses, so React keeps this as one
+  // continuous DOM node (and scroll position) as it switches between them.
+  if (hidden) {
+    return <div className="article-list" id="article-list" ref={scrollRef} />
+  }
 
   if (articles.length === 0 && loading) {
     return (
@@ -201,6 +215,11 @@ export function ArticleList({
           data-article-id={a.id}
           className={`article-row ${a.is_read ? 'read' : ''} ${a.id === selectedId ? 'selected' : ''}`}
           onClick={() => onOpen(a)}
+          // Focusable only for the row the reader was last opened from, so
+          // closing the reader has somewhere legitimate to hand focus back
+          // to (App.tsx's closeArticle) — see the plan's "reader-only"
+          // scope note: rows aren't made keyboard-activatable in general.
+          tabIndex={a.id === selectedId ? -1 : undefined}
         >
           <span className={`article-row__unread-dot ${a.is_read ? 'is-read' : ''}`} />
           <div className="article-row__main">

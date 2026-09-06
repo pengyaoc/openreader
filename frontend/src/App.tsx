@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   useInfiniteQuery,
   useMutation,
@@ -354,8 +354,21 @@ export default function App() {
     },
   })
 
+  // Both `#article-list` and `#sidebar-scroll` empty their contents while
+  // the reader is open (see the `hidden`/`inert` handling in ArticleList and
+  // Sidebar) so VoiceOver has nothing behind the reader to fall back onto —
+  // but an emptied scroll container clamps its own scrollTop to 0, and nothing
+  // restores that automatically once content comes back. Captured here, at
+  // the one place every "open an article" path funnels through (a row
+  // click and the j/k+o/Enter keyboard shortcut below both call
+  // `openArticle`), and written back in `closeArticle`.
+  const savedListScrollRef = useRef(0)
+  const savedSidebarScrollRef = useRef(0)
+
   const openArticle = useCallback(
     (article: ArticleListItem) => {
+      savedListScrollRef.current = document.getElementById('article-list')?.scrollTop ?? 0
+      savedSidebarScrollRef.current = document.getElementById('sidebar-scroll')?.scrollTop ?? 0
       setOpenArticleId(article.id)
       setCursorId(article.id)
       if (!article.is_read) markReadMutation.mutate(article)
@@ -363,7 +376,28 @@ export default function App() {
     [markReadMutation],
   )
 
-  const closeArticle = useCallback(() => setOpenArticleId(null), [])
+  // Closing unmounts the reader (which held VO/keyboard focus), so without
+  // hand-off the focus silently drops to the top of the document — send it
+  // back to the row the article was opened from, matching where j/k leaves
+  // the cursor (see the `data-article-id` lookup in the keydown handler
+  // below), and restore both scroll containers to where openArticle found
+  // them. rAF because none of this exists/has its content back — the row,
+  // and the list/sidebar's real children — until this state update commits.
+  const closeArticle = useCallback(() => {
+    setOpenArticleId((id) => {
+      if (id !== null) {
+        requestAnimationFrame(() => {
+          const row = document.querySelector<HTMLElement>(`[data-article-id="${id}"]`)
+          row?.focus()
+          const list = document.getElementById('article-list')
+          if (list) list.scrollTop = savedListScrollRef.current
+          const sidebarScroll = document.getElementById('sidebar-scroll')
+          if (sidebarScroll) sidebarScroll.scrollTop = savedSidebarScrollRef.current
+        })
+      }
+      return null
+    })
+  }, [])
 
   const articles = useMemo(() => articlesQuery.data?.pages.flat() ?? [], [articlesQuery.data])
 
@@ -384,6 +418,13 @@ export default function App() {
       content_html: '',
       llm_summary_html: null,
     })
+
+  // Drives `inert` on the sidebar and article list while the reader overlay
+  // sits on top of them — without it, VoiceOver's swipe/rotor navigation
+  // walks straight past the fixed-position overlay into content that isn't
+  // visible on screen (both panes stay mounted underneath; see App.tsx's
+  // render below and index.css's `.reader-overlay`).
+  const readerOpen = openArticleId !== null
 
   const openArticleIndex = articles.findIndex((a) => a.id === openArticleId)
   const hasPrev = openArticleIndex > 0
@@ -469,27 +510,45 @@ export default function App() {
         onLogout={() => api.logout().finally(resetForIdentityChange)}
         username={meQuery.data?.username}
         authEnabled={meQuery.data?.auth_enabled ?? false}
+        inert={readerOpen}
       />
 
-      <div className="main">
-        <div className="main__header">
-          <div className="main__header-inner">
-            <button
-              className="mobile-menu-btn"
-              onClick={() => setMobileSidebarOpen(true)}
-              aria-label="Open menu"
-            >
-              ☰
-            </button>
-            <div>
-              <span className="main__title">{headerTitle}</span>
-              <span className="main__title-count">
-                {articles.length}
-                {articlesQuery.hasNextPage ? '+' : ''} items
-              </span>
+      <div className="main" inert={readerOpen}>
+        {/* `inert` alone isn't a reliable guarantee on iOS: a documented
+            Safari 26 VoiceOver regression lets the virtual cursor keep
+            navigating into content that's still in the DOM even when it's
+            `inert` (https://discussions.apple.com/thread/256161078) — when
+            focus is lost, VoiceOver falls back to whatever's nearest by
+            screen position to where it last was, and an inert-but-present
+            article row is still a candidate (this is almost certainly why
+            titles from the list kept getting read with the reader open).
+            `inert` is kept for browsers where it behaves correctly (and for
+            pointer/keyboard blocking); not rendering the header, and
+            handing ArticleList `hidden` to empty out its rows, closes the
+            gap for everyone else — there's nothing left for VO to fall back
+            to. ArticleList itself stays mounted (see its `hidden` prop) so
+            the list's own scroll position survives the reader opening and
+            closing, rather than resetting to the top every time. */}
+        {!readerOpen && (
+          <div className="main__header">
+            <div className="main__header-inner">
+              <button
+                className="mobile-menu-btn"
+                onClick={() => setMobileSidebarOpen(true)}
+                aria-label="Open menu"
+              >
+                ☰
+              </button>
+              <div>
+                <span className="main__title">{headerTitle}</span>
+                <span className="main__title-count">
+                  {articles.length}
+                  {articlesQuery.hasNextPage ? '+' : ''} items
+                </span>
+              </div>
             </div>
           </div>
-        </div>
+        )}
         <ArticleList
           articles={articles}
           selectedId={cursorId}
@@ -501,10 +560,11 @@ export default function App() {
           onRefresh={() => refreshMutation.mutate()}
           refreshing={refreshMutation.isPending}
           loading={articlesQuery.isPending}
+          hidden={readerOpen}
         />
       </div>
 
-      {openArticleId !== null && openArticleDisplayData && (
+      {readerOpen && openArticleDisplayData && (
         <ArticleReader
           article={openArticleDisplayData}
           loading={openArticleQuery.isLoading}
