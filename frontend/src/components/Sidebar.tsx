@@ -18,7 +18,6 @@ interface Props {
   onMarkAllRead: (sourceId: number) => void
   onMarkAllUnreadRead: () => void
   username?: string
-  isAnonymous: boolean
 }
 
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
@@ -45,7 +44,6 @@ export function Sidebar({
   onMarkAllRead,
   onMarkAllUnreadRead,
   username,
-  isAnonymous,
 }: Props) {
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
@@ -166,16 +164,6 @@ export function Sidebar({
               <span aria-hidden="true">👤</span>
               <span className="sidebar__identity-name">{username}</span>
             </div>
-          )}
-          {/* Anonymous under `optional` mode: there's no app-level login
-              to open — visiting any gated pengyaochen.com path triggers
-              Apache's Google redirect. Signing out is the shared
-              gateway's own logout, not something this app can do. */}
-          {isAnonymous && (
-            <a className="sidebar__identity sidebar__signin-link" href="/">
-              <span aria-hidden="true">👤</span>
-              <span className="sidebar__identity-name">Sign in with Google</span>
-            </a>
           )}
           <button className="refresh-btn" onClick={onRefresh} disabled={refreshing}>
             <span className={`refresh-icon ${refreshing ? 'spinning' : ''}`}>⟳</span>

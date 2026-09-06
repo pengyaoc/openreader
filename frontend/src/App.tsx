@@ -458,10 +458,12 @@ export default function App() {
         onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
         onMarkAllUnreadRead={() => markAllUnreadReadMutation.mutate()}
         username={meQuery.data?.username ?? undefined}
-        isAnonymous={isAnonymous}
       />
 
       <div className="main">
+        {isAnonymous && (
+          <div className="readonly-banner">👋 You're viewing a public demo of OpenReader — browse freely, sign-in isn't required</div>
+        )}
         <div className="main__header">
           <div className="main__header-inner">
             <button
