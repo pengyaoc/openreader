@@ -846,3 +846,74 @@ def test_toggle_read_is_per_account(two_account_clients):
 
     assert alice.get(f"/api/articles/{article_id}").json()["is_read"] is False
     assert bob.get(f"/api/articles/{article_id}").json()["is_read"] is True
+
+
+# Consolidated login, 2026-09-05: in `optional` mode an anonymous request
+# must be able to read, but every write must 401 cleanly rather than 500
+# on a NULL user_id — see docs/WORKLOG.md and require_user_id in
+# app/api/_common.py.
+
+
+@pytest.fixture()
+def anon_client(tmp_path):
+    """require_auth=True, mode=optional, no X-Remote-Email header sent —
+    the anonymous-write path each test below exercises."""
+    import os
+
+    os.environ["READER_AUTH_MODE"] = "optional"
+    os.environ["READER_ALLOWED_EMAILS"] = "alice@example.com"
+    try:
+        db_path = tmp_path / "reader.db"
+        conn = connect(db_path)
+        init_schema(conn)
+        conn.execute(
+            "INSERT INTO sources (key, type, title, folder, url) VALUES (?, ?, ?, ?, ?)",
+            ("s1", "rss", "Source One", "Test", "https://x/feed"),
+        )
+        source_id = conn.execute("SELECT id FROM sources WHERE key='s1'").fetchone()[0]
+        conn.execute(
+            """INSERT INTO articles
+               (source_id, guid, url, title, excerpt, content_html, published_at, origin)
+               VALUES (?, 'g1', 'https://x/1', 'Hello World', 'An excerpt', '<p>Body</p>',
+                       '2026-08-01T00:00:00Z', 'feed')""",
+            (source_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        from app.config import to_yaml
+
+        config = Config(sources=[Source(key="s1", type="rss", title="Source One", folder="Test", url="https://x/feed")])
+        config_path = tmp_path / "feeds.yaml"
+        config_path.write_text(to_yaml(config))
+        app = create_app(db_path=db_path, config=config, config_path=config_path, require_auth=True)
+        yield TestClient(app), source_id
+    finally:
+        os.environ.pop("READER_AUTH_MODE", None)
+        os.environ.pop("READER_ALLOWED_EMAILS", None)
+
+
+def test_anonymous_reads_succeed_in_optional_mode(anon_client):
+    client, _source_id = anon_client
+    assert client.get("/api/sources").status_code == 200
+    assert client.get("/api/articles").status_code == 200
+    article_id = client.get("/api/articles").json()[0]["id"]
+    assert client.get(f"/api/articles/{article_id}").status_code == 200
+
+
+def test_anonymous_writes_401_in_optional_mode(anon_client):
+    client, source_id = anon_client
+    article_id = client.get("/api/articles").json()[0]["id"]
+
+    assert client.post("/api/sources", json={}).status_code == 401
+    assert client.put(f"/api/sources/{source_id}", json={}).status_code == 401
+    assert client.delete(f"/api/sources/{source_id}").status_code == 401
+    assert client.post(f"/api/sources/{source_id}/mark-all-read").status_code == 401
+    assert client.post("/api/articles/mark-all-read").status_code == 401
+    assert client.post(f"/api/articles/{article_id}/read").status_code == 401
+    assert client.post(f"/api/articles/{article_id}/star").status_code == 401
+    assert client.post(f"/api/articles/{article_id}/toggle-read").status_code == 401
+    assert client.post(f"/api/articles/{article_id}/summarize").status_code == 401
+    assert client.post(f"/api/articles/{article_id}/hydrate").status_code == 401
+    assert client.put("/api/config", json={"yaml": "sources: []"}).status_code == 401
+    assert client.post("/api/refresh").status_code == 401

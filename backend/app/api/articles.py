@@ -4,7 +4,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app import store
-from app.api._common import current_user_id
+from app.api._common import AnonymousUserError, current_user_id, require_user_id
 from app.db import run_off_thread
 from app.ingest.hydrate import hydrate_article
 from app.ingest.textutil import plain_text_excerpt
@@ -91,9 +91,14 @@ async def pull_full_article(request: Request) -> JSONResponse:
     regardless of source config, since the user asked for it directly.
     Still one-shot: a prior hydrated_at/hydrate_failed_at short-circuits,
     same as the passive path."""
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, current_user_id(request), article_id)
+    article = store.get_article(conn, user_id, article_id)
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -130,13 +135,18 @@ async def summarize(request: Request) -> JSONResponse:
     this 404s while it's off, so `claude` is never invoked. Cached forever
     once generated: no regenerate path here, since nothing in the feature
     calls for one."""
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+
     config = request.app.state.config
     if not config.llm.enabled:
         return JSONResponse({"error": "LLM generation is disabled"}, status_code=404)
 
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, current_user_id(request), article_id)
+    article = store.get_article(conn, user_id, article_id)
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -166,33 +176,49 @@ async def mark_all_read(request: Request) -> JSONResponse:
     unread article across every source, not scoped to one like
     sources.mark_all_read. Registered ahead of /api/articles/{article_id}
     in main.py's route table so this literal path wins the match."""
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     conn = request.app.state.get_conn()
-    marked = store.mark_all_read_global(conn, current_user_id(request))
+    marked = store.mark_all_read_global(conn, user_id)
     return JSONResponse({"ok": True, "marked": marked})
 
 
 async def mark_read(request: Request) -> JSONResponse:
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    ok = store.mark_read(conn, current_user_id(request), article_id)
+    ok = store.mark_read(conn, user_id, article_id)
     if not ok:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True})
 
 
 async def toggle_star(request: Request) -> JSONResponse:
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    result = store.toggle_star(conn, current_user_id(request), article_id)
+    result = store.toggle_star(conn, user_id, article_id)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(result)
 
 
 async def toggle_read(request: Request) -> JSONResponse:
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    result = store.toggle_read(conn, current_user_id(request), article_id)
+    result = store.toggle_read(conn, user_id, article_id)
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(result)

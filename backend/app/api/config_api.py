@@ -1,7 +1,7 @@
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from app.api._common import readonly_response
+from app.api._common import AnonymousUserError, readonly_response, require_user_id
 from app.config import ConfigError, parse_config
 from app.ingest.refresh import reconcile_read_state
 
@@ -12,6 +12,10 @@ async def get_config(request: Request) -> JSONResponse:
 
 
 async def put_config(request: Request) -> JSONResponse:
+    try:
+        require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     # Checked first so a read-only deployment never touches disk — see
     # app.api._common.readonly_response.
     if (resp := readonly_response()) is not None:
