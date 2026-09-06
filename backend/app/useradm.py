@@ -110,6 +110,20 @@ def cmd_copy_password(conn: sqlite3.Connection, args) -> None:
     print(f"copied {src[1]!r}'s password hash to {dst[1]!r}")
 
 
+def cmd_link(conn: sqlite3.Connection, args) -> None:
+    """Attaches an email to an existing account, so the first
+    trusted_header login with that email upserts onto this row instead
+    of creating a new one — preserves article_states for accounts that
+    predate this login system. See docs/WORKLOG.md, 2026-09-05."""
+    row = _require(conn, args.username)
+    conn.execute(
+        "UPDATE users SET email = ? WHERE id = ?",
+        (args.email.strip().lower(), row[0]),
+    )
+    conn.commit()
+    print(f"linked {args.username!r} to {args.email!r}")
+
+
 def cmd_rename(conn: sqlite3.Connection, args) -> None:
     row = _require(conn, args.old)
     if _find(conn, args.new) is not None:
@@ -144,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
     copy.add_argument("source")
     copy.add_argument("target")
     copy.set_defaults(fn=cmd_copy_password)
+
+    link = sub.add_parser("link", help="attach an email to an existing account")
+    link.add_argument("username")
+    link.add_argument("email")
+    link.set_defaults(fn=cmd_link)
 
     rename = sub.add_parser("rename", help="change an account's username")
     rename.add_argument("old")

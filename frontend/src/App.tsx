@@ -20,7 +20,6 @@ import { ArticleList } from './components/ArticleList'
 import { ArticleReader } from './components/ArticleReader'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { RefreshToast } from './components/RefreshToast'
-import { LoginPage } from './components/LoginPage'
 
 const VIEW_TITLES: Record<string, string> = {
   all: 'All items',
@@ -176,38 +175,17 @@ export default function App() {
     staleTime: Infinity,
   })
 
-  // /api/me is gated exactly like every data route, so its 401 is the
-  // authoritative answer. ['sources'] is still checked because it's the
-  // query that fires first on a cold load — without it the app would
-  // briefly render an empty shell before ['me'] resolved.
+  // Only reachable in `required` mode (not this deployment's default) —
+  // `optional` mode lets ['sources'] and ['me'] both resolve anonymously
+  // (see docs/WORKLOG.md, 2026-09-05), so a 401 here means the deployment
+  // truly requires signing in, not just that nobody has yet.
   const needsLogin =
     meQuery.error instanceof UnauthorizedError || sourcesQuery.error instanceof UnauthorizedError
 
-  // Everything that has to be thrown away when the signed-in account
-  // changes, in either direction. qc.clear() rather than
-  // invalidateQueries(): the cache holds the previous account's unread
-  // counts and read/starred flags, and article bodies sit in it for
-  // gcTime after that — invalidating refetches them eventually, but the
-  // stale rows render first. The React state reset matters just as much:
-  // `selection` and `openArticleId` survive the login-screen swap, so
-  // without it the next person lands on the previous one's open article.
-  // sessionStorage is wiped rather than namespaced per account for the
-  // same reason it can be: reaching a second identity in one tab must go
-  // through here, and namespacing would mean the restore-on-reload read
-  // (a useState initializer above) had to wait on an async ['me'] round
-  // trip and visibly flash the default view first.
-  const resetForIdentityChange = useCallback(() => {
-    try {
-      sessionStorage.removeItem(STORAGE_KEY)
-    } catch {
-      /* storage unavailable (private browsing etc) */
-    }
-    setOpenArticleId(null)
-    setCursorId(null)
-    setSelection({ kind: 'saved', view: 'unread' })
-    qc.clear()
-    qc.invalidateQueries()
-  }, [qc])
+  // ['me'] resolving with a null id means optional-mode anonymous
+  // browsing — content renders, but a "Sign in with Google" affordance
+  // shows in the sidebar instead of an identity.
+  const isAnonymous = meQuery.data?.id == null
 
   // A source selection restored from the URL only has the id (see
   // parseSelectionFromQuery) — fill in its title once sources have loaded.
@@ -450,7 +428,16 @@ export default function App() {
         : selection.folder
 
   if (needsLogin) {
-    return <LoginPage onLoggedIn={resetForIdentityChange} />
+    // `required` mode only — Apache owns login entirely in
+    // trusted_header mode, so there's nothing for this app to render but
+    // a pointer at the gated path that will trigger the gateway's
+    // redirect (see docs/superpowers/specs/2026-09-05-consolidated-login-design.md
+    // in the pchauth repo).
+    return (
+      <div className="signed-out-shell">
+        <p>Sign-in required. Visit any pengyaochen.com path to sign in with Google.</p>
+      </div>
+    )
   }
 
   return (
@@ -470,12 +457,13 @@ export default function App() {
         onCloseMobile={() => setMobileSidebarOpen(false)}
         onMarkAllRead={(sourceId) => markAllReadMutation.mutate(sourceId)}
         onMarkAllUnreadRead={() => markAllUnreadReadMutation.mutate()}
-        onLogout={() => api.logout().finally(resetForIdentityChange)}
-        username={meQuery.data?.username}
-        authEnabled={meQuery.data?.auth_enabled ?? false}
+        username={meQuery.data?.username ?? undefined}
       />
 
       <div className="main">
+        {isAnonymous && (
+          <div className="readonly-banner">👋 You're viewing a public demo of OpenReader — browse freely, sign-in isn't required</div>
+        )}
         <div className="main__header">
           <div className="main__header-inner">
             <button

@@ -2,12 +2,18 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app import settings
+from app.api._common import AnonymousUserError, require_user_id
 from app.connectors import imap as imap_connector
 from app.db import run_off_thread
 from app.ingest.refresh import refresh_all
 
 
 async def refresh(request: Request) -> JSONResponse:
+    try:
+        require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+
     config = request.app.state.config
     only_key = request.query_params.get("source")
 

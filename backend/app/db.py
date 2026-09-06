@@ -160,6 +160,31 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _migrate_per_user_state(conn)
     _backfill_decoded_entities(conn)
 
+    # Consolidated login, 2026-09-05 (see docs/WORKLOG.md and pchauth's
+    # spec). subject/name are reserved for the deferred self_oidc source
+    # and stay NULL under trusted_header, which only ever supplies email.
+    _add_column_if_missing(conn, "users", "email", "TEXT")
+    _add_column_if_missing(conn, "users", "subject", "TEXT")
+    _add_column_if_missing(conn, "users", "name", "TEXT")
+
+
+def upsert_user_by_email(conn: sqlite3.Connection, email: str) -> int:
+    """Creates the user row on first sight of this email, or returns the
+    existing id. For an account pre-linked via `useradm link`, the email
+    already matches an existing row. For a brand-new one, the email
+    doubles as the username (users.username is NOT NULL UNIQUE) — there's
+    no registration flow to collect anything else from."""
+    email = email.strip().lower()
+    row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+    if row:
+        return row[0]
+    cur = conn.execute(
+        "INSERT INTO users (username, password_hash, created_at, email) VALUES (?, '', ?, ?)",
+        (email, datetime.now(UTC).isoformat(), email),
+    )
+    conn.commit()
+    return cur.lastrowid
+
 
 def ensure_default_user(conn: sqlite3.Connection) -> None:
     """Fresh-DB safety net only: guarantees DEFAULT_USER_ID exists so the

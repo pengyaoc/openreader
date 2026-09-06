@@ -117,25 +117,27 @@ interface SourceFieldsImap {
 export type SourceFields = SourceFieldsRss | SourceFieldsImap
 export type NewSource = SourceFields & { key: string }
 
-// The signed-in account. `auth_enabled` is false on a no-login
-// deployment (local/LAN), where `username` is the default account rather
-// than anyone who actually signed in — the sidebar uses it to hide a Log
-// out button that would clear a cookie that was never gating anything.
+// The signed-in account, or the anonymous state (id/username both null)
+// under `optional` mode — see docs/WORKLOG.md, 2026-09-05. `auth_enabled`
+// is false on a no-login deployment (`off` mode, local/LAN), where a
+// non-null id is the default account rather than anyone who signed in.
 export interface Me {
-  id: number
-  username: string
+  id: number | null
+  username: string | null
   auth_enabled: boolean
 }
 
 // Thrown instead of a generic Error on a 401, so callers (App.tsx's
-// top-level auth check) can tell "not logged in" apart from a normal
-// request failure and show the login screen instead of an error state.
+// top-level auth check) can tell "not authenticated" apart from a normal
+// request failure. Only reachable in `required` mode now — `optional`
+// mode (this deployment's default) lets reads through anonymously; see
+// docs/WORKLOG.md, 2026-09-05.
 export class UnauthorizedError extends Error {}
 
-// Every call goes through here so `credentials: 'include'` (the session
-// cookie set by POST /api/login) is never forgotten at a call site — the
-// app-layer login replacing Apache Basic Auth (docs/WORKLOG.md,
-// 2026-08-13 cont.) only works if the cookie actually round-trips.
+// Every call goes through here. `credentials: 'include'` is a no-op under
+// trusted_header (there's no cookie of this app's own any more — identity
+// comes from Apache's X-Remote-Email header), kept only in case a
+// deployment ever sits behind something that does use cookies.
 function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${API_BASE}${path}`, { ...init, credentials: 'include' })
 }
@@ -156,18 +158,9 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  login: (username: string, password: string) =>
-    apiFetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    }).then((r) => json<{ ok: boolean; id: number; username: string }>(r)),
-
-  logout: () => apiFetch('/api/logout', { method: 'POST' }).then((r) => json<{ ok: boolean }>(r)),
-
-  // Gated like every other /api route, so its 401 is the single
-  // authoritative "show the login screen" signal — App.tsx used to infer
-  // that from whichever data query happened to fail first.
+  // There is no login/logout call any more — signing in means visiting
+  // any gated pengyaochen.com path and letting Apache's Google redirect
+  // run; signing out is the shared gateway's logout, not this app's.
   me: () => apiFetch('/api/me').then((r) => json<Me>(r)),
 
   sources: () => apiFetch('/api/sources').then((r) => json<Source[]>(r)),

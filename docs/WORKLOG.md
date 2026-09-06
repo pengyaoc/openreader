@@ -2265,3 +2265,120 @@ directions, migration tests against a synthetic legacy DB (including the interru
 resume path), and two-account end-to-end API tests running the real login flow. Verified live
 in a browser: signed in as the second account (185 unread, config-filtered), logged out, signed in as
 the primary account (48 unread, per-source counts all different, no stale rows).
+
+## 2026-09-06 — Shared Apache OIDC gateway live; app code not yet deployed
+
+The consolidated-login Apache gateway (see 2026-09-05 entry above, and pchauth's spec/plan
+in the `pchauth` repo) went live on `wordpress-2-vm` today. `wordpress-https.conf`'s
+`<Location ${READER_PREFIX}/>` block gained `AuthType openid-connect`, `Require all
+granted`, and `RequestHeader unset`/`set X-Remote-Email` — this repo's inline block, not a
+separate fragment (OpenReader's Apache config still isn't backported to its own repo; see
+the still-open follow-up from 2026-08-13). Backed up first
+(`wordpress-https.conf.bak-pre-oidc-20260906`).
+
+**Important: this repo's `feat/consolidated-login` branch (the actual app code —
+`pchauth`-backed `PchauthMiddleware`, `current_user_id`/`require_user_id` split,
+signed-out browsing UI) has NOT been deployed to the VM yet.** The gateway change alone
+is live; `/reader/` currently passes through Apache unauthenticated into the *old*,
+still-running app code, which still enforces its own bcrypt/session-cookie login and
+knows nothing about `X-Remote-Email`. A header-spoofing check run against
+`/reader/api/me` today returned 401 for a forged header, but that's the *old* app's own
+auth rejecting an unauthenticated request generally — it does not yet prove the new
+scrubbing behavior (`RequestHeader unset` before `set`) actually works, since the
+deployed code doesn't read that header at all. Re-verify once this branch is deployed.
+
+Two real Apache-layer bugs were found and fixed during the gateway rollout — full
+incident in `01-projects/personal-brand/wordpress-vm-pages-setup.md`'s "Consolidated
+login" section:
+1. `OIDCCacheShmMax` has an enforced minimum of 128, not the `20` the original design
+   spec assumed — `apache2ctl configtest` caught it immediately.
+2. `OIDCUnAuthAction pass`, set vhost-wide so `/reader/` and `/summrabook/` never block an
+   anonymous request, was initially inherited by `/pages/` too, briefly serving it with no
+   gate at all — fixed with a `/pages/`-local `OIDCUnAuthAction auth` override. Doesn't
+   affect OpenReader directly, but is why the vhost now has that override present.
+
+**Still needed before this branch deploys:** link the 2 real accounts to
+`pychen007@gmail.com`/`cassyheng@gmail.com` via `useradm link` (need their current
+usernames from the live DB first — not yet looked up), so the first Google login attaches
+to the existing rows instead of creating new ones.
+
+## 2026-09-06 (later same day) — App code deployed, full stack verified
+
+Deployed via the usual `scripts/deploy.sh`. Set `READER_AUTH_MODE=optional` and
+`READER_ALLOWED_EMAILS=pychen007@gmail.com,cassyheng@gmail.com` in `openreader.env`
+alongside the deploy (backed up first, `openreader.env.bak-pre-oidc-20260906`) so there was
+no window where the app ran with neither the old bcrypt auth nor the new trusted_header
+auth active.
+
+Linked both real accounts immediately after: `useradm link pengyao pychen007@gmail.com`,
+`useradm link heng cassyheng@gmail.com`. `article_states` history confirmed intact via
+`useradm list` before/after (437 read / 1 starred for pengyao, 66 read for heng — unchanged
+except pengyao's own read count from verification traffic).
+
+Verified live: anonymous `GET /api/sources` and `/api/me` succeed (200, `id: null`);
+a forged `X-Remote-Email: attacker@evil.com` sent from outside still resolves to `id: null`
+— proof the Apache `RequestHeader unset` scrub actually works now that this app reads the
+header (the 2026-09-06 morning check only proved the *old* app's unrelated auth rejected a
+forged header, not the new scrubbing behavior); `POST /api/refresh` 401s anonymously as
+expected.
+
+Deferred to a later pass, now that the deploy is confirmed working: deleting the
+bcrypt/session-cookie rollback code in `app/auth.py` and `useradm`'s
+`add`/`set-password`/`copy-password` subcommands (Task C4 Step 4), and merging this branch
+to `main`.
+
+## 2026-09-06 (later still) — Real root cause found: Require all granted silently skipped auth
+
+The first real human login (via `/pages/`) exposed the actual bug behind "still shows
+signed out": Apache's `<Location /reader/>` used `Require all granted`, which is a
+documented Apache 2.4 core optimization — if authorization succeeds unconditionally
+regardless of identity, Apache's core skips invoking any authentication module at all,
+including `mod_auth_openidc`. So `X-Remote-Email` was never injected even for a
+genuinely signed-in session; nothing in this app was ever broken. Two earlier real bugs
+found along the way (the `/oidc/callback` 404, and the default shm session cache getting
+wiped on every Apache reload) were also real and are documented in the vault note, but
+neither was sufficient to explain the symptom on its own.
+
+Fix (Apache-side only, this repo's code needed no change): `Require valid-user` instead
+of `Require all granted`. `OIDCUnAuthAction pass` (vhost-wide) is what still lets an
+anonymous, no-session request through untouched — confirmed this is a separate mechanism
+from `Require`'s own evaluation.
+
+**Fully verified live, in a real browser, real Google account:** signed in once via
+`/pages/`, `/reader/api/me` correctly returned the real identity (`{"id":1,"username":
+"pengyao",...}`), personalized state rendered (192 unread, pengyao's actual read
+history) instead of the anonymous/default view, and — the actual point of this whole
+project — landed already-signed-in on `/summrabook/` too with zero further login
+prompts. Anonymous access, write-gating, and header-spoofing scrubbing all re-confirmed
+unaffected by this fix.
+
+Full incident write-up: `01-projects/personal-brand/wordpress-vm-pages-setup.md`,
+"Consolidated login" sections (2026-09-06). This closes the item deferred in the previous
+entry — the deploy is now genuinely, completely verified, not just anonymous-path-verified.
+
+## 2026-09-06 (yet later) — Removed the dead "Sign in with Google" link; added a public-demo banner instead
+
+Separately from the SSO-plumbing fixes above: a user report that `/reader`'s sidebar
+"Sign in with Google" link just redirected to the pengyaochen.com homepage. Root cause:
+`frontend/src/components/Sidebar.tsx` rendered `<a href="/" className="sidebar__signin-link">`
+for the anonymous case — a plain anchor to ungated site root, not a link into any gated
+pengyaochen.com path that would actually trigger Apache's OIDC redirect. There was never any
+click handler or OAuth code behind it (confirmed nothing in the frontend bundle references
+Google/OAuth/client_id) — this wasn't a regression, the link was never finished.
+
+Product decision (not just a bug fix): OpenReader doesn't need its own sign-in UI at all.
+`optional` auth mode already gives silent cross-app SSO for allowed emails via the shared
+gateway (verified end-to-end in the entry above) when signed in at `/pages/`; there's no
+"local" sign-in this app could offer beyond that. So the fix removes the link entirely rather
+than pointing it at a working gated URL.
+
+For the anonymous case specifically, OpenReader's public deployment is meant to be browsed
+directly (e.g. by a recruiter looking at this project), so replaced the dead link with a
+friendly banner: "👋 You're viewing a public demo of OpenReader — browse freely, sign-in isn't
+required." (`.readonly-banner` in `index.css`, shown in `App.tsx` when `meQuery.data?.id ==
+null`). Removed the now-unused `isAnonymous` prop from `Sidebar` since its only use was the
+deleted link. 252 backend tests + frontend typecheck passed; deployed via `scripts/deploy.sh`.
+
+See Summra's equivalent entry in its own `WORK_LOG.md` (same session, same root cause, same
+decision) — Summra's fix has no banner (its anonymous UX was already fine as read-only), just
+a plain in-modal explanation instead of a CTA.

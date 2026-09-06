@@ -3,7 +3,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app import store
-from app.api._common import current_user_id, readonly_response, save_config
+from app.api._common import (
+    AnonymousUserError,
+    current_user_id,
+    readonly_response,
+    require_user_id,
+    save_config,
+)
 from app.config import ConfigError, Rule, Source, validate_config
 from app.ingest.refresh import get_or_create_source, reconcile_read_state
 
@@ -24,6 +30,10 @@ async def add_source(request: Request) -> JSONResponse:
     any SourceType (rss/imap) the request body specifies — nothing
     here is RSS-specific; that restriction was only ever in the old
     frontend modal."""
+    try:
+        require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     if (resp := readonly_response()) is not None:
         return resp
 
@@ -99,6 +109,10 @@ async def update_source(request: Request) -> JSONResponse:
     without this an edit would silently not show up in the sidebar until
     someone reads the code closely enough to notice it never will.
     """
+    try:
+        require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     if (resp := readonly_response()) is not None:
         return resp
 
@@ -152,6 +166,10 @@ async def remove_source(request: Request) -> JSONResponse:
     (list_sources' valid_keys) hides it immediately; reconcile_read_state
     marks its still-unread articles read, same as any other config-driven
     removal — see that function's docstring for the full reasoning."""
+    try:
+        require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     if (resp := readonly_response()) is not None:
         return resp
 
@@ -176,9 +194,13 @@ async def remove_source(request: Request) -> JSONResponse:
 
 
 async def mark_all_read(request: Request) -> JSONResponse:
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
     conn = request.app.state.get_conn()
     source_id = int(request.path_params["source_id"])
-    marked = store.mark_all_read(conn, current_user_id(request), source_id)
+    marked = store.mark_all_read(conn, user_id, source_id)
     if marked is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True, "marked": marked})

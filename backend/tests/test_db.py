@@ -17,6 +17,18 @@ def test_init_schema_creates_expected_tables(tmp_path):
     assert "jobs" not in tables
 
 
+def test_users_table_has_identity_columns(tmp_path):
+    """Consolidated login, 2026-09-05 (see docs/WORKLOG.md and pchauth's
+    spec). subject/name are reserved for the deferred self_oidc source
+    and stay NULL under trusted_header, which only ever supplies email."""
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    assert "email" in columns
+    assert "subject" in columns
+    assert "name" in columns
+
+
 def test_init_schema_decodes_leftover_html_entities_in_existing_titles(tmp_path):
     # Simulates articles ingested before connectors/rss.py started decoding
     # double-encoded entities (2026-08-31): the raw `&#8217;` baked into
