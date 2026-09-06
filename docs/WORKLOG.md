@@ -2265,3 +2265,39 @@ directions, migration tests against a synthetic legacy DB (including the interru
 resume path), and two-account end-to-end API tests running the real login flow. Verified live
 in a browser: signed in as the second account (185 unread, config-filtered), logged out, signed in as
 the primary account (48 unread, per-source counts all different, no stale rows).
+
+## 2026-09-06 — Shared Apache OIDC gateway live; app code not yet deployed
+
+The consolidated-login Apache gateway (see 2026-09-05 entry above, and pchauth's spec/plan
+in the `pchauth` repo) went live on `wordpress-2-vm` today. `wordpress-https.conf`'s
+`<Location ${READER_PREFIX}/>` block gained `AuthType openid-connect`, `Require all
+granted`, and `RequestHeader unset`/`set X-Remote-Email` — this repo's inline block, not a
+separate fragment (OpenReader's Apache config still isn't backported to its own repo; see
+the still-open follow-up from 2026-08-13). Backed up first
+(`wordpress-https.conf.bak-pre-oidc-20260906`).
+
+**Important: this repo's `feat/consolidated-login` branch (the actual app code —
+`pchauth`-backed `PchauthMiddleware`, `current_user_id`/`require_user_id` split,
+signed-out browsing UI) has NOT been deployed to the VM yet.** The gateway change alone
+is live; `/reader/` currently passes through Apache unauthenticated into the *old*,
+still-running app code, which still enforces its own bcrypt/session-cookie login and
+knows nothing about `X-Remote-Email`. A header-spoofing check run against
+`/reader/api/me` today returned 401 for a forged header, but that's the *old* app's own
+auth rejecting an unauthenticated request generally — it does not yet prove the new
+scrubbing behavior (`RequestHeader unset` before `set`) actually works, since the
+deployed code doesn't read that header at all. Re-verify once this branch is deployed.
+
+Two real Apache-layer bugs were found and fixed during the gateway rollout — full
+incident in `01-projects/personal-brand/wordpress-vm-pages-setup.md`'s "Consolidated
+login" section:
+1. `OIDCCacheShmMax` has an enforced minimum of 128, not the `20` the original design
+   spec assumed — `apache2ctl configtest` caught it immediately.
+2. `OIDCUnAuthAction pass`, set vhost-wide so `/reader/` and `/summrabook/` never block an
+   anonymous request, was initially inherited by `/pages/` too, briefly serving it with no
+   gate at all — fixed with a `/pages/`-local `OIDCUnAuthAction auth` override. Doesn't
+   affect OpenReader directly, but is why the vhost now has that override present.
+
+**Still needed before this branch deploys:** link the 2 real accounts to
+`pychen007@gmail.com`/`cassyheng@gmail.com` via `useradm link` (need their current
+usernames from the live DB first — not yet looked up), so the first Google login attaches
+to the existing rows instead of creating new ones.
