@@ -86,20 +86,56 @@
           }
         }
 
+        // Heights alone cannot reveal WebKit visually panning the document
+        // while leaving the layout/visual viewport sizes unchanged. Capture
+        // element positions too, so a negative root/body/shell top can be
+        // distinguished from a native compositor shift that the DOM cannot
+        // observe at all.
+        function rectFor(node) {
+          if (!node) return null
+          var rect = node.getBoundingClientRect()
+          return {
+            top: rect.top,
+            bottom: rect.bottom,
+            height: rect.height,
+            left: rect.left,
+            right: rect.right,
+            width: rect.width,
+          }
+        }
+
         function snap(label) {
           var vv = window.visualViewport
           var cs = probe ? getComputedStyle(probe) : null
+          var root = document.documentElement
+          var body = document.body
           var entry = {
             label: label,
             t: Date.now(),
+            innerWidth: window.innerWidth,
             innerHeight: window.innerHeight,
+            outerHeight: window.outerHeight,
             vvHeight: vv ? vv.height : null,
             vvOffsetTop: vv ? vv.offsetTop : null,
+            vvPageTop: vv ? vv.pageTop : null,
+            vvPageLeft: vv ? vv.pageLeft : null,
             vvScale: vv ? vv.scale : null,
-            clientHeight: document.documentElement.clientHeight,
+            scrollX: window.scrollX,
+            scrollY: window.scrollY,
+            rootScrollTop: root.scrollTop,
+            bodyScrollTop: body ? body.scrollTop : null,
+            clientWidth: root.clientWidth,
+            clientHeight: root.clientHeight,
             screenHeight: screen.height,
             screenWidth: screen.width,
             probeOffsetHeight: probe ? probe.offsetHeight : null,
+            rootRect: rectFor(root),
+            bodyRect: rectFor(body),
+            probeRect: rectFor(probe),
+            shellRect: rectFor(document.querySelector('.shell')),
+            bannerRect: rectFor(document.querySelector('.readonly-banner')),
+            headerRect: rectFor(document.querySelector('.main__header')),
+            articleListRect: rectFor(document.querySelector('.article-list')),
             safeTop: cs ? cs.paddingTop : null,
             safeBottom: cs ? cs.paddingBottom : null,
             visibilityState: document.visibilityState,
@@ -185,7 +221,7 @@
           init()
         }
         window.addEventListener('load', function () {
-          snap('load')
+          snapSeries('load')
         })
       })()
     </script>
