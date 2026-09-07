@@ -8,6 +8,8 @@ import {
 } from '@tanstack/react-query'
 import {
   api,
+  ForbiddenError,
+  SIGNIN_URL,
   UnauthorizedError,
   type Article,
   type ArticleListItem,
@@ -193,6 +195,20 @@ export default function App() {
   // browsing — content renders, but a "Sign in with Google" affordance
   // shows in the sidebar instead of an identity.
   const isAnonymous = meQuery.data?.id == null
+
+  // Completed Google sign-in with an account that isn't on
+  // READER_ALLOWED_EMAILS (Apache accepts any Google account; only this
+  // app's own allowlist rejects it — see pchauth's starlette_adapter).
+  // Surfaced distinctly from plain `isAnonymous` so the feed page can say
+  // *why* — "signed in as X, not authorized" — instead of looking
+  // identical to never having signed in at all (added 2026-09-07, after
+  // the "blank error page" report).
+  const wrongAccountEmail =
+    meQuery.error instanceof ForbiddenError
+      ? meQuery.error.email
+      : sourcesQuery.error instanceof ForbiddenError
+        ? sourcesQuery.error.email
+        : null
 
   // A source selection restored from the URL only has the id (see
   // parseSelectionFromQuery) — fill in its title once sources have loaded.
@@ -480,12 +496,22 @@ export default function App() {
   if (needsLogin) {
     // `required` mode only — Apache owns login entirely in
     // trusted_header mode, so there's nothing for this app to render but
-    // a pointer at the gated path that will trigger the gateway's
-    // redirect (see docs/superpowers/specs/2026-09-05-consolidated-login-design.md
-    // in the pchauth repo).
+    // a link that triggers the gateway's redirect (see
+    // docs/superpowers/specs/2026-09-05-consolidated-login-design.md in
+    // the pchauth repo). /reader/login is a dedicated Apache <Location>
+    // that overrides the vhost-wide OIDCUnAuthAction pass back to `auth`
+    // (same pattern as /pages/) — mod_auth_openidc has no query-string
+    // trigger to force a login on a `pass` location, so a real protected
+    // sub-path is the only mechanism. Must be a real `<a href>` (full
+    // top-level navigation), not a fetch/JS redirect: a PWA installed to
+    // an iOS home screen has no address bar, so this link is the only
+    // way to reach Google sign-in from inside it.
     return (
       <div className="signed-out-shell">
-        <p>Sign-in required. Visit any pengyaochen.com path to sign in with Google.</p>
+        <p>Sign-in required.</p>
+        <a className="signin-link" href={SIGNIN_URL}>
+          Sign in with Google
+        </a>
       </div>
     )
   }
@@ -519,12 +545,19 @@ export default function App() {
       />
 
       <div className="main" inert={readerOpen}>
-        {isAnonymous && (
-          <div className="readonly-banner">
-            👋 You're viewing a public demo of OpenReader — browse and read freely. This is a
-            read-only view, so marking articles read, starring, summarizing, and changing feeds
-            aren't available.
+        {wrongAccountEmail ? (
+          <div className="readonly-banner readonly-banner--warn">
+            ⚠️ Signed in as {wrongAccountEmail}, which isn't authorized for this reader. You're
+            viewing the public read-only demo instead.
           </div>
+        ) : (
+          isAnonymous && (
+            <div className="readonly-banner">
+              👋 You're viewing a public demo of OpenReader — browse and read freely. This is a
+              read-only view, so marking articles read, starring, summarizing, and changing feeds
+              aren't available.
+            </div>
+          )
         )}
         {/* `inert` alone isn't a reliable guarantee on iOS: a documented
             Safari 26 VoiceOver regression lets the virtual cursor keep

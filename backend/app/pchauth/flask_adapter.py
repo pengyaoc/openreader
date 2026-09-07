@@ -41,7 +41,11 @@ def init_pchauth(app: Flask, config: AuthConfig, upsert_user: Callable[[Identity
             return None
 
         if not is_allowed(identity.email, config):
-            return jsonify({"error": "not on the allowlist"}), 403
+            # `email` echoes back the caller's own identity so the frontend
+            # can render "you signed in as X, but X isn't authorized"
+            # instead of an indistinguishable generic failure — not a
+            # disclosure, since it's always the caller's own address.
+            return jsonify({"error": "not on the allowlist", "email": identity.email}), 403
 
         g.user_id = upsert_user(identity)
         return None

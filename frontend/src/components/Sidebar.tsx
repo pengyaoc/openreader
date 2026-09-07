@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { Source } from '../api'
+import { SIGNIN_URL, type Source } from '../api'
 import type { ViewSelection } from '../types'
 
 interface Props {
@@ -212,6 +212,15 @@ export function Sidebar({
                   ⚙ Settings
                 </button>
               </>
+            )}
+            {/* Deliberately understated — small, muted, bottom of the
+                sidebar, no icon or "Sign in with Google" framing — this
+                is a way back in for the owner, not an invitation for
+                random visitors to the public demo to create an account. */}
+            {readOnly && (
+              <a className="sidebar__signin" href={SIGNIN_URL}>
+                sign in
+              </a>
             )}
           </div>
         )}

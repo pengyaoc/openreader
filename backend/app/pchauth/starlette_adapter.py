@@ -56,7 +56,14 @@ class PchauthMiddleware:
             return
 
         if not is_allowed(identity.email, self.config):
-            response = JSONResponse({"error": "not on the allowlist"}, status_code=403)
+            # `email` echoes back the caller's own identity (already known to
+            # their own browser via the Google session they just completed)
+            # so the frontend can render "you signed in as X, but X isn't
+            # authorized" instead of an indistinguishable generic failure —
+            # not a disclosure, since it's always the caller's own address.
+            response = JSONResponse(
+                {"error": "not on the allowlist", "email": identity.email}, status_code=403
+            )
             await response(scope, receive, send)
             return
 

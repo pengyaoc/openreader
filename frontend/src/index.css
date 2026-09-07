@@ -412,6 +412,22 @@ a {
   white-space: nowrap;
 }
 
+/* Deliberately quiet — a way back in for the owner, not an invitation for
+   demo visitors. No icon, no "with Google", lowercase, faint. */
+.sidebar__signin {
+  display: block;
+  padding: 2px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--ink-faint);
+  text-decoration: none;
+}
+
+.sidebar__signin:hover {
+  color: var(--ink-dim);
+  text-decoration: underline;
+}
+
 .refresh-btn {
   width: 100%;
   display: flex;
@@ -470,6 +486,35 @@ a {
   color: var(--ink-dim);
   text-align: center;
   flex-shrink: 0;
+}
+
+/* Wrong-account case (App.tsx's wrongAccountEmail) — same shape as the
+   plain demo banner, amber instead of violet so it reads as "something
+   you did didn't work" rather than the neutral "you're not signed in". */
+.readonly-banner--warn {
+  background: var(--amber-wash);
+  color: var(--amber-dim);
+}
+
+.signin-link {
+  color: var(--violet);
+  font-weight: 600;
+  text-decoration: underline;
+}
+
+.signed-out-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100vh;
+  font-family: var(--font-ui);
+  text-align: center;
+}
+
+.signed-out-shell .signin-link {
+  font-size: 15px;
 }
 
 .main__header-inner {

@@ -7,6 +7,21 @@
 // call site.
 export const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, '')
 
+// Apache's dedicated login entry point (see docs/WORKLOG.md, 2026-09-07,
+// and the vault's wordpress-vm-pages-setup.md for the <Location> that
+// backs this). `logout=` first clears any existing Apache session before
+// redirecting back to this same URL — necessary because without it, an
+// existing session for the *wrong* Google account would just pass
+// straight through again with no new authorization request at all,
+// silently reusing the same wrong identity forever (mod_auth_openidc
+// only re-prompts when there's no valid session to satisfy `Require
+// valid-user` in the first place). The Apache <Location> also sets
+// `OIDCAuthRequestParams "prompt=select_account"` vhost-wide, so once a
+// fresh authorization request does fire, Google shows its account picker
+// instead of silently re-using its own still-active session for the
+// same wrong account.
+export const SIGNIN_URL = `${API_BASE}/login?logout=${encodeURIComponent(`${API_BASE}/login`)}`
+
 export type ArticleOrigin = 'feed' | 'email'
 
 export interface Article {
@@ -134,6 +149,20 @@ export interface Me {
 // docs/WORKLOG.md, 2026-09-05.
 export class UnauthorizedError extends Error {}
 
+// Thrown on a 403 — the caller completed Google sign-in (Apache accepts
+// any Google account; it doesn't know about READER_ALLOWED_EMAILS), but
+// the email isn't on this app's own allowlist. `email` is the backend's
+// echo of the caller's own identity (pchauth's starlette_adapter,
+// 2026-09-07), letting App.tsx show "signed in as X, not authorized"
+// instead of silently looking identical to never having signed in at all.
+export class ForbiddenError extends Error {
+  email: string | null
+  constructor(message: string, email: string | null) {
+    super(message)
+    this.email = email
+  }
+}
+
 // Every call goes through here. `credentials: 'include'` is a no-op under
 // trusted_header (there's no cookie of this app's own any more — identity
 // comes from Apache's X-Remote-Email header), kept only in case a
@@ -146,12 +175,15 @@ async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     if (res.status === 401) throw new UnauthorizedError('not authenticated')
     let detail = res.statusText
+    let email: string | null = null
     try {
       const body = await res.json()
       detail = body.error ?? detail
+      email = body.email ?? null
     } catch {
       /* ignore */
     }
+    if (res.status === 403) throw new ForbiddenError(detail, email)
     throw new Error(detail)
   }
   return res.json()

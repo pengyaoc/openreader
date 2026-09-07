@@ -2499,3 +2499,129 @@ Fix, in `frontend/src/App.tsx`, `Sidebar.tsx`, and `index.css`:
   summarizing, and changing feeds aren't available."
 
 Verified: 252 backend tests + `tsc -b && vite build` clean. Deployed via `scripts/deploy.sh`.
+
+---
+
+## 2026-09-07 — Real "Sign in with Google" link (PWA couldn't sign in at all)
+
+Two related login bugs reported by the user:
+
+1. **Sessions were expiring after a few hours, not the intended ~30 days.** Root cause:
+   `mod_auth_openidc` has two independent expiry knobs — `OIDCSessionInactivityTimeout`
+   (idle timeout, resets on activity) and `OIDCSessionMaxDuration` (an absolute hard cap
+   regardless of activity). The vhost only set the former (`2592000`, 30 days); the latter
+   was silently at the module's default of **28800s (8h)**. Fixed by adding
+   `OIDCSessionMaxDuration 2592000` next to the inactivity line (vault note
+   `01-projects/personal-brand/wordpress-vm-pages-setup.md`, applied live on
+   `wordpress-2-vm`, `apache2ctl configtest` + graceful reload — verified `/reader/` and
+   `/pages/` both still correct post-reload).
+
+2. **The PWA installed to an iOS home screen had no way to sign back in at all**, forcing a
+   delete-and-reinstall each time the session expired. Cause: login is 100% delegated to
+   Apache now (see the 2026-09-05 entry below), so this app has no login page of its own.
+   The signed-out UI (`needsLogin` in `App.tsx`) just printed plain text — "Visit any
+   pengyaochen.com path to sign in with Google" — not even a clickable link. A PWA has no
+   address bar, so there was genuinely nowhere to click. (Separately: reinstalling the PWA
+   "worked" only because iOS seeds a new home-screen web app's isolated storage with a
+   one-time snapshot of Safari's cookies at creation time — not a real fix, just a manual
+   way to force a fresh snapshot.)
+
+   First attempt was wrong: assumed `mod_auth_openidc` supports a `?oidc_action=login`
+   query-string trigger to force auth on a `pass`-mode location. It doesn't — confirmed by
+   grepping strings in the installed `mod_auth_openidc.so` (2.4.17) on the VM; no such
+   string exists, and a live `curl` against it returned a plain 200 from the backend, not a
+   302. Corrected to the actually-documented mechanism: a dedicated, more-specific
+   `<Location ${READER_PREFIX}/login>` that overrides the vhost-wide `OIDCUnAuthAction pass`
+   back to `auth` for that one path only — same pattern already used for `/pages/`. Apache
+   matches the longest/most-specific `<Location>` regardless of file order, so this new
+   block takes precedence over `/reader/` for that path without touching `/reader/`'s own
+   anonymous-passthrough behavior. `ProxyPass` targets the same backend root (there's no
+   `/login` app route) — after a successful Google login, `mod_auth_openidc` redirects the
+   browser back to this same `/reader/login` URL, which now proxies through with
+   `X-Remote-Email` set and just renders the normal app shell (safe because `frontend/dist`'s
+   asset paths are absolute `/reader/...`, not relative to the current path).
+
+   `App.tsx` changes: both signed-out surfaces — the `required`-mode full-page message and
+   the `optional`-mode anonymous read-only banner — now render a real `<a href="/reader/login">
+   Sign in with Google</a>` (`.signin-link`/`.signed-out-shell` added to `index.css`, themed
+   off the existing `--violet` token). Must be a real anchor (full top-level navigation), not
+   a fetch/JS redirect, specifically so it works from inside a PWA's own webview.
+
+Verified live: `curl -I https://pengyaochen.com/reader/login` returns `302` to
+`accounts.google.com/o/oauth2/v2/auth`; `/reader/` still `200` anonymous passthrough;
+`/pages/` still `302` (unaffected). 252 backend tests + `tsc -b && vite build` clean.
+Deployed via `scripts/deploy.sh`.
+
+Follow-up same day, in response to: "if sign in with the wrong account, user should land
+back on feed page with a notice rather than a blank error page." Investigated first —
+Apache's `Require valid-user` on `/reader/` and `/reader/login` has no email restriction
+(only `/pages/` gets `Require claim`), so *any* Google account completes login; the actual
+allowlist check is app-level (`pchauth`'s `is_allowed`, backed by `READER_ALLOWED_EMAILS`).
+A disallowed-but-authenticated identity already 403s on `/api/me`/`/api/sources`, and since
+every render site already defaults with `?? []`, the app doesn't actually crash — it was
+falling into the same `isAnonymous` demo view as a plain logged-out visitor, which is a
+*silent*, unexplained failure (not literally blank, but indistinguishable from never having
+signed in — same practical problem the user was flagging).
+
+Changes:
+- **`pchauth`** (`starlette_adapter.py`, `flask_adapter.py`, both `is_allowed` 403 paths):
+  echo the caller's own email in the 403 body — `{"error": "not on the allowlist", "email":
+  identity.email}`. Not a disclosure (it's always the caller's own address from their own
+  request header). Tests updated in both adapter suites; synced into `reader` via
+  `scripts/sync-auth.sh` (32 pchauth tests, 252 reader backend tests, both green). Not yet
+  synced into Summra — same fix is available there whenever it's next resynced.
+- **`frontend/src/api.ts`**: new `ForbiddenError` (mirrors `UnauthorizedError`, carries
+  `email`) thrown on a 403.
+- **`frontend/src/App.tsx`**: new `wrongAccountEmail` derived from `meQuery`/`sourcesQuery`
+  errors. When set, the top banner switches from the neutral "public demo" message to an
+  explicit amber one: "Signed in as {email}, which isn't authorized for this reader...".
+  Per explicit instruction, no sign-in link in this banner — it's informational only, sign-in
+  itself stays in the sidebar's already-quiet corner (2026-09-07 entry above).
+- **Fixed a real bug this surfaced**: the sidebar's `sign in` link (and the `required`-mode
+  full-page one) pointed straight at `/reader/login`, which only works the *first* time.
+  Once a wrong-account session exists, `/reader/login` would just satisfy `Require
+  valid-user` with the *existing* (wrong) Apache session and never re-prompt at all — a dead
+  loop back to the same rejected account. Fixed with a new `SIGNIN_URL` in `api.ts`:
+  `/reader/login?logout=/reader/login` (URL-encoded) — `logout=<url>` is a real
+  mod_auth_openidc query param (confirmed: appears literally in `mod_auth_openidc.so`'s
+  strings, unlike the earlier `oidc_action` false start) that clears the local Apache
+  session before redirecting to the given target, so hitting `/reader/login` again is
+  guaranteed to trigger a *fresh* authorization request instead of reusing the stale one.
+- **Apache**: added `OIDCAuthRequestParams "prompt=select_account"` (vhost-scope only —
+  confirmed live that it's rejected inside `<Location>`, `AH00526`) so that fresh
+  authorization request also forces Google's own account picker, rather than Google
+  silently re-authenticating its own still-active session for the same wrong account. Live
+  on `wordpress-2-vm`, `apache2ctl configtest` clean, graceful reload; verified `/reader/login`'s
+  redirect URL now includes `&prompt=select_account`, and `/reader/`/`/pages/` unaffected.
+
+Not fully verified end-to-end: confirming the *complete* wrong-account round trip (sign in
+wrong → see the amber notice → hit sidebar "sign in" → land on Google's account picker →
+pick the right account → notice clears) needs an actual second Google account to sign in
+with, which wasn't done live this session. Each individual mechanism was verified
+independently (`logout=` doesn't error, `prompt=select_account` appears on the redirect,
+the 403 body carries the email, the frontend renders the amber banner off that email) — the
+full chain is standing on real building blocks, not another `oidc_action`-style guess, but
+should still get one real live run before calling it fully closed.
+
+Verified: 252 backend + 32 pchauth tests, `tsc -b && vite build` clean. Deployed via
+`scripts/deploy.sh`.
+
+Same-day follow-up: "make sure both apps give the right error message — need to distinguish
+if Google login failed or email not on allow list." The wrong-account case above already
+covers the second half. The first half — the Google OAuth flow itself failing (cancelled
+consent, expired/mismatched state, blocked cookies) — happens entirely inside Apache/
+`mod_auth_openidc`, before any request ever reaches this app, so nothing in this repo could
+fix it. Verified live by grabbing a real pending state (hit `/reader/login`, kept the
+`mod_auth_openidc_state_*` cookie and `state=` value it returned) and replaying it against
+`/oidc/callback?error=access_denied&...` — got a bare, technical `400 Bad Request` back. This
+version of `mod_auth_openidc` (2.4.17) has no error-template directive (checked the module's
+own strings — `OIDCErrorTemplate` isn't real, learned that lesson from the earlier
+`oidc_action` false start above). Fixed vhost-wide instead: `ErrorDocument 400
+/login-error.html` plus a small static "Sign-in didn't go through — go back and try again"
+page. Confirmed `ProxyErrorOverride` is unset on the vhost, so this only intercepts errors
+Apache generates itself — replaying the same disallowed-email request this app returns as
+JSON (`{"error": "not on the allowlist", ...}`) confirmed it still comes back untouched, not
+swallowed by the new ErrorDocument. This fix lives in the shared vhost config (vault's
+`wordpress-vm-pages-setup.md`), not this repo, since it's Apache-level and applies equally to
+`/summrabook/` — see `summra/WORK_LOG.md`, 2026-09-07, for that side and for the same "sign
+in" entry point added there.
