@@ -154,7 +154,7 @@ export default function App() {
   // Not namespaced per account, deliberately: dark/light is a property of
   // the device and the light you're reading in, not of who's signed in.
   const [theme, setTheme] = useState<'dark' | 'light'>(
-    () => (localStorage.getItem('reader-theme') as 'dark' | 'light' | null) ?? 'dark',
+    () => (localStorage.getItem('reader-theme') === 'dark' ? 'dark' : 'light'),
   )
 
   useEffect(() => {

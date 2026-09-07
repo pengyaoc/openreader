@@ -247,13 +247,11 @@ export function Sidebar({
                   ? 'Copy failed'
                   : 'Copy viewport log'}
             </button>
-            {/* Deliberately understated — small, muted, bottom of the
-                sidebar, no icon or "Sign in with Google" framing — this
-                is a way back in for the owner, not an invitation for
-                random visitors to the public demo to create an account. */}
+            {/* A real link is required for the gateway's top-level sign-in
+                redirect, but it is styled as a sidebar action button. */}
             {readOnly && (
-              <a className="sidebar__signin" href={SIGNIN_URL}>
-                sign in
+              <a className="refresh-btn sidebar__signin" href={SIGNIN_URL}>
+                Sign in
               </a>
             )}
           </div>

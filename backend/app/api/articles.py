@@ -61,11 +61,15 @@ async def list_articles(request: Request) -> JSONResponse:
 async def get_article(request: Request) -> JSONResponse:
     conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, current_user_id(request), article_id)
+    user_id = current_user_id(request)
+    article = store.get_article(conn, user_id, article_id)
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    if article["origin"] == "feed":
+    # An anonymous article open is read-only and must never trigger a
+    # full-text network fetch or database write. Signed-in readers retain
+    # the existing fallback for items missed by refresh-time hydration.
+    if user_id is not None and article["origin"] == "feed":
         row = conn.execute(
             "SELECT key FROM sources WHERE id = ?", (article["source_id"],)
         ).fetchone()

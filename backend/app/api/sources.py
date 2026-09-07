@@ -18,8 +18,8 @@ from app.ingest.refresh import get_or_create_source, reconcile_read_state
 async def list_sources(request: Request) -> JSONResponse:
     valid_keys = {s.key for s in request.app.state.config.sources}
     # Off the event loop — see the matching comment on list_articles in
-    # api/articles.py. This handler runs an aggregate over every article on
-    # every cold open, alongside the other 3 startup calls.
+    # api/articles.py. Signed-in requests aggregate unread counts; anonymous
+    # requests deliberately skip that scan because public mode hides counts.
     sources = await run_off_thread(
         request.app.state.db_path,
         store.list_sources,

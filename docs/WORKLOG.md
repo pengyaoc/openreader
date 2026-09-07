@@ -2677,3 +2677,21 @@ started. This is why the investigation above had to lean on `mod_auth_openidc`'s
 cache files for evidence instead of the access log — there's no record of any real request to
 `/reader/`, `/oidc/callback`, or `/summrabook/` since. Worth a real fix (an explicit
 vhost-level `CustomLog` line) but out of scope for this session.
+
+## 2026-09-06 — Light-first theme and low-cost anonymous browsing
+
+- Changed the default theme to light while preserving an explicit saved dark preference. The
+  first-paint `<meta name="theme-color">` and PWA manifest now use the light palette so a new
+  browser or installed app does not flash dark before React initializes.
+- Restyled the public sidebar's sign-in link as the same full-width action treatment as “Copy
+  viewport log,” while retaining it as a real link required by the gateway's top-level redirect.
+- Anonymous article detail requests now skip passive full-text hydration: a public reader never
+  triggers an outbound fetch or a database write just by opening an article. Signed-in reads keep
+  the existing fallback for articles missed by refresh-time hydration.
+- Anonymous `/api/sources` requests bypass the per-source unread aggregate over `articles` and
+  return zero unread counts, which hides source and total unread badges without changing the
+  shared response shape. This makes public page opens independent of the retained article count.
+
+Verified with the full backend suite: **253 passed** (one existing Starlette/httpx deprecation
+warning). Frontend production build and lint also pass; lint retains one unrelated existing
+`ArticleReader.tsx` hook-dependency warning.

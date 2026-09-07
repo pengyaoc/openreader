@@ -31,7 +31,7 @@ _UNREAD_SUBQUERY = """
 
 
 def list_sources(
-    conn: sqlite3.Connection, user_id: int, valid_keys: set[str] | None = None
+    conn: sqlite3.Connection, user_id: int | None, valid_keys: set[str] | None = None
 ) -> list[dict]:
     """valid_keys, when given, restricts results to sources still present in
     the currently-loaded config — a source's DB row is create-only (written
@@ -40,19 +40,29 @@ def list_sources(
     without this filter a removed source keeps showing in the sidebar
     forever. The API layer passes the live config's source keys; callers
     that omit it (tests, internal tooling) get the unfiltered DB list."""
-    # A pre-aggregated subquery (rather than a correlated count per source)
-    # so the sidebar's whole unread picture is one pass over articles joined
-    # to this user's state, not one pass per source.
-    query = f"""
-        SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
-               s.last_error,
-               COALESCE(u.unread_count, 0) AS unread_count
-        FROM sources s
-        {_UNREAD_SUBQUERY}
-    """
-    # user_id first: the subquery's placeholder is textually ahead of the
-    # valid_keys IN(...) list appended below, and bind order follows text.
-    params: list = [user_id]
+    if user_id is None:
+        # Public browsing must stay cheap: anonymous visitors do not see
+        # unread badges, so do not scan articles merely to calculate them.
+        query = """
+            SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
+                   s.last_error, 0 AS unread_count
+            FROM sources s
+        """
+        params: list = []
+    else:
+        # A pre-aggregated subquery (rather than a correlated count per source)
+        # so the sidebar's whole unread picture is one pass over articles joined
+        # to this user's state, not one pass per source.
+        query = f"""
+            SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
+                   s.last_error,
+                   COALESCE(u.unread_count, 0) AS unread_count
+            FROM sources s
+            {_UNREAD_SUBQUERY}
+        """
+        # user_id first: the subquery's placeholder is textually ahead of the
+        # valid_keys IN(...) list appended below, and bind order follows text.
+        params = [user_id]
     if valid_keys is not None:
         placeholders = ", ".join("?" for _ in valid_keys)
         query += f" WHERE s.key IN ({placeholders})" if valid_keys else " WHERE 0"
@@ -63,18 +73,26 @@ def list_sources(
     return [_source_row_to_dict(r) for r in rows]
 
 
-def get_source(conn: sqlite3.Connection, user_id: int, source_id: int) -> dict | None:
+def get_source(conn: sqlite3.Connection, user_id: int | None, source_id: int) -> dict | None:
     """Single-source counterpart to list_sources, same column/aggregation
     shape (including unread_count) so both read paths agree on the count."""
-    row = conn.execute(
-        f"""SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
-                   s.last_error,
-                   COALESCE(u.unread_count, 0) AS unread_count
-            FROM sources s
-            {_UNREAD_SUBQUERY}
-            WHERE s.id = ?""",
-        (user_id, source_id),
-    ).fetchone()
+    if user_id is None:
+        row = conn.execute(
+            """SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
+                      s.last_error, 0 AS unread_count
+               FROM sources s WHERE s.id = ?""",
+            (source_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            f"""SELECT s.id, s.key, s.type, s.title, s.folder, s.last_fetched_at,
+                       s.last_error,
+                       COALESCE(u.unread_count, 0) AS unread_count
+                FROM sources s
+                {_UNREAD_SUBQUERY}
+                WHERE s.id = ?""",
+            (user_id, source_id),
+        ).fetchone()
     return _source_row_to_dict(row) if row else None
 
 
@@ -133,7 +151,7 @@ def _row_to_article(row) -> dict:
 
 def list_articles(
     conn: sqlite3.Connection,
-    user_id: int,
+    user_id: int | None,
     view: str = "all",
     source_id: int | None = None,
     folder: str | None = None,
@@ -188,7 +206,7 @@ def list_articles(
     return result
 
 
-def get_article(conn: sqlite3.Connection, user_id: int, article_id: int) -> dict | None:
+def get_article(conn: sqlite3.Connection, user_id: int | None, article_id: int) -> dict | None:
     # Joined with sources for source_title, matching list_articles — without
     # it, the reader has no source name to fall back on when an article has
     # no author (common: feed-level bylines, Twitter-sourced RSS, etc. often

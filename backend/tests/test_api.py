@@ -6,6 +6,7 @@ route/business logic, not the login flow itself (see test_auth.py for
 that), and would otherwise all need a session cookie fixture just to
 reach any endpoint.
 """
+import msgspec
 import pytest
 from starlette.testclient import TestClient
 
@@ -895,10 +896,32 @@ def anon_client(tmp_path):
 
 def test_anonymous_reads_succeed_in_optional_mode(anon_client):
     client, _source_id = anon_client
-    assert client.get("/api/sources").status_code == 200
+    sources = client.get("/api/sources")
+    assert sources.status_code == 200
+    # Anonymous mode intentionally omits the article-count aggregate; zero
+    # keeps the shared response shape while hiding every unread badge.
+    assert sources.json()[0]["unread_count"] == 0
     assert client.get("/api/articles").status_code == 200
     article_id = client.get("/api/articles").json()[0]["id"]
     assert client.get(f"/api/articles/{article_id}").status_code == 200
+
+
+def test_anonymous_article_open_does_not_hydrate(anon_client, monkeypatch):
+    client, _source_id = anon_client
+    config = client.app.state.config
+    source = msgspec.structs.replace(config.sources[0], fetch_full_text=True)
+    client.app.state.config = msgspec.structs.replace(config, sources=[source])
+    calls = []
+
+    def should_not_hydrate(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("anonymous reads must not hydrate")
+
+    monkeypatch.setattr("app.api.articles.hydrate_article", should_not_hydrate)
+    article_id = client.get("/api/articles").json()[0]["id"]
+
+    assert client.get(f"/api/articles/{article_id}").status_code == 200
+    assert calls == []
 
 
 def test_anonymous_writes_401_in_optional_mode(anon_client):

@@ -412,20 +412,12 @@ a {
   white-space: nowrap;
 }
 
-/* Deliberately quiet — a way back in for the owner, not an invitation for
-   demo visitors. No icon, no "with Google", lowercase, faint. */
 .sidebar__signin {
-  display: block;
-  padding: 2px;
-  font-family: var(--font-ui);
-  font-size: 11px;
-  color: var(--ink-faint);
   text-decoration: none;
 }
 
 .sidebar__signin:hover {
-  color: var(--ink-dim);
-  text-decoration: underline;
+  text-decoration: none;
 }
 
 .refresh-btn {
