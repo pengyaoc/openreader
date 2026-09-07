@@ -24,39 +24,10 @@ export type Pane = { kind: 'list' } | { kind: 'add' } | { kind: 'edit'; id: numb
 // glitch. Feeds tab is a friendly search-and-pick UX in front of that same
 // structured form; Advanced tab is the raw feeds.yaml editor, kept as an
 // escape hatch for config keys the per-source form doesn't cover.
-// TEMPORARY — standalone-PWA bottom-gap-after-resume investigation
-// (docs/WORKLOG.md, 2026-08-19). Dumps the passive viewport logger's
-// buffer (see the inline script in index.html) to the clipboard. A
-// standalone PWA has no address bar, so this drawer is the only reachable
-// place to read it off the device where the bug actually lives. Remove
-// this function and its call site together with the logger once root
-// cause is confirmed and a fix ships.
-declare global {
-  interface Window {
-    __vplogDump?: () => unknown[]
-  }
-}
-
-function dumpViewportLog(): string {
-  const buf = window.__vplogDump?.() ?? []
-  return JSON.stringify(buf, null, 2)
-}
-
 export function SettingsDrawer({ sources, onClose, onSaved, initialPane }: Props) {
   const [tab, setTab] = useState<Tab>('feeds')
   const [query, setQuery] = useState('')
   const [pane, setPane] = useState<Pane>(initialPane ?? { kind: 'list' })
-  const [vplogStatus, setVplogStatus] = useState<'idle' | 'copied' | 'error'>('idle')
-
-  const copyViewportLog = async () => {
-    try {
-      await navigator.clipboard.writeText(dumpViewportLog())
-      setVplogStatus('copied')
-    } catch {
-      setVplogStatus('error')
-    }
-    setTimeout(() => setVplogStatus('idle'), 2000)
-  }
 
   const folders = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -95,17 +66,6 @@ export function SettingsDrawer({ sources, onClose, onSaved, initialPane }: Props
 
         {pane.kind === 'list' ? (
           <>
-            {/* TEMPORARY — see dumpViewportLog above. Remove with the rest
-                of the investigation instrumentation. */}
-            <div style={{ padding: '8px 20px 0' }}>
-              <button className="btn" onClick={copyViewportLog}>
-                {vplogStatus === 'copied'
-                  ? 'Copied!'
-                  : vplogStatus === 'error'
-                    ? 'Copy failed'
-                    : 'Copy viewport log'}
-              </button>
-            </div>
             <div className="settings-tabs">
               <button
                 className={`settings-tabs__tab ${tab === 'feeds' ? 'active' : ''}`}

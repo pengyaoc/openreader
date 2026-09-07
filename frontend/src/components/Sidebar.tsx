@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { SIGNIN_URL, type Source } from '../api'
 import type { ViewSelection } from '../types'
 
@@ -30,6 +30,21 @@ interface Props {
   readOnly?: boolean
 }
 
+// TEMPORARY — standalone-PWA/Chrome viewport investigation
+// (docs/WORKLOG.md, 2026-08-19). Kept in the always-accessible sidebar
+// instead of Settings so anonymous users can capture the broken cold-load
+// geometry without signing in first. Remove with the logger in index.html
+// once the root cause is confirmed and a fix ships.
+declare global {
+  interface Window {
+    __vplogDump?: () => unknown[]
+  }
+}
+
+function dumpViewportLog(): string {
+  return JSON.stringify(window.__vplogDump?.() ?? [], null, 2)
+}
+
 function isSame(a: ViewSelection, b: ViewSelection): boolean {
   if (a.kind !== b.kind) return false
   if (a.kind === 'saved' && b.kind === 'saved') return a.view === b.view
@@ -57,6 +72,7 @@ export function Sidebar({
   inert,
   readOnly,
 }: Props) {
+  const [vplogStatus, setVplogStatus] = useState<'idle' | 'copied' | 'error'>('idle')
   const folders = useMemo(() => {
     const map = new Map<string, Source[]>()
     for (const s of sources) {
@@ -71,6 +87,16 @@ export function Sidebar({
   const select = (v: ViewSelection) => {
     onSelect(v)
     onCloseMobile()
+  }
+
+  const copyViewportLog = async () => {
+    try {
+      await navigator.clipboard.writeText(dumpViewportLog())
+      setVplogStatus('copied')
+    } catch {
+      setVplogStatus('error')
+    }
+    setTimeout(() => setVplogStatus('idle'), 2000)
   }
 
   return (
@@ -213,6 +239,14 @@ export function Sidebar({
                 </button>
               </>
             )}
+            <div style={{ height: 8 }} />
+            <button className="refresh-btn" onClick={copyViewportLog}>
+              {vplogStatus === 'copied'
+                ? 'Copied!'
+                : vplogStatus === 'error'
+                  ? 'Copy failed'
+                  : 'Copy viewport log'}
+            </button>
             {/* Deliberately understated — small, muted, bottom of the
                 sidebar, no icon or "Sign in with Google" framing — this
                 is a way back in for the owner, not an invitation for
