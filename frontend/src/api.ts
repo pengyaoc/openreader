@@ -223,7 +223,12 @@ export const api = {
 
   pullFullArticle: (id: number) =>
     apiFetch(`/api/articles/${id}/hydrate`, { method: 'POST' }).then((r) =>
-      json<{ content_html: string; hydrated_at: string | null; hydrate_failed_at: string | null }>(
+      json<{
+        content_html: string
+        excerpt: string
+        hydrated_at: string | null
+        hydrate_failed_at: string | null
+      }>(
         r,
       ),
     ),

@@ -510,6 +510,7 @@ def test_get_article_hydrates_full_text_via_the_threaded_fetch_path(tmp_path, mo
 
     assert resp.status_code == 200
     assert "first real paragraph" in resp.json()["content_html"]
+    assert "first real paragraph" in resp.json()["excerpt"]
     assert resp.json()["hydrated_at"] is not None
 
 

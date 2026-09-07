@@ -26,16 +26,12 @@ from app.connectors.rss import FeedParseError, parse_feed
 from app.ingest.dedup import canonicalize_url, content_hash
 from app.ingest.hydrate import hydrate_pending
 from app.ingest.rules import RawArticle, evaluate_rules
-from app.ingest.textutil import plain_text_excerpt, proxy_image_urls, tighten_newsletter_whitespace
+from app.ingest.textutil import EXCERPT_LIMIT, plain_text_excerpt, proxy_image_urls, tighten_newsletter_whitespace
 
 Fetcher = Callable[[Source, str | None, str | None], FetchResult]
 ImapSearchFn = Callable[..., list[str]]
 ImapFetchFn = Callable[[object, str], bytes]
 ImapConnectFn = Callable[[], object]
-
-# List-view subtitle length. Long enough to actually convey whether an
-# article is worth opening, not just echo the first clause of a sentence.
-EXCERPT_LIMIT = 900
 
 # Bounded pool for the RSS fetch phase. Enough to overlap most sources'
 # network latency in one batch (measured: 9 sources, none over ~2.6s) for a

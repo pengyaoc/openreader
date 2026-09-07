@@ -250,9 +250,12 @@ export function Sidebar({
             {/* A real link is required for the gateway's top-level sign-in
                 redirect, but it is styled as a sidebar action button. */}
             {readOnly && (
-              <a className="refresh-btn sidebar__signin" href={SIGNIN_URL}>
-                Sign in
-              </a>
+              <>
+                <div style={{ height: 8 }} />
+                <a className="refresh-btn sidebar__signin" href={SIGNIN_URL}>
+                  Sign in
+                </a>
+              </>
             )}
           </div>
         )}

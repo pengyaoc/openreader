@@ -84,12 +84,12 @@ async def get_article(request: Request) -> JSONResponse:
         )
         if result["content_html"]:
             article["content_html"] = result["content_html"]
-        # hydrate_article may have just written hydrated_at/hydrate_failed_at;
-        # re-read those two fields so the response reflects DB truth.
+        # hydrate_article may have just updated the full-text-derived feed
+        # subtitle as well as hydration state; re-read them for DB truth.
         row = conn.execute(
-            "SELECT hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article_id,)
+            "SELECT excerpt, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article_id,)
         ).fetchone()
-        article["hydrated_at"], article["hydrate_failed_at"] = row
+        article["excerpt"], article["hydrated_at"], article["hydrate_failed_at"] = row
 
     return JSONResponse(article)
 
@@ -117,13 +117,14 @@ async def pull_full_article(request: Request) -> JSONResponse:
     if result["content_html"]:
         article["content_html"] = result["content_html"]
     row = conn.execute(
-        "SELECT hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article_id,)
+        "SELECT excerpt, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article_id,)
     ).fetchone()
-    article["hydrated_at"], article["hydrate_failed_at"] = row
+    article["excerpt"], article["hydrated_at"], article["hydrate_failed_at"] = row
 
     return JSONResponse(
         {
             "content_html": article["content_html"],
+            "excerpt": article["excerpt"],
             "hydrated_at": article["hydrated_at"],
             "hydrate_failed_at": article["hydrate_failed_at"],
         }

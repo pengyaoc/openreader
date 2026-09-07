@@ -56,6 +56,15 @@ class PchauthMiddleware:
             return
 
         if not is_allowed(identity.email, self.config):
+            if self.config.mode == "optional":
+                # An unallowed Google account gets the same read-only data
+                # as a visitor with no identity. Keep its email in request
+                # state solely so /api/me can explain the public fallback.
+                _set_user(scope, None)
+                scope.setdefault("state", {})["unauthorized_email"] = identity.email
+                await self.app(scope, receive, send)
+                return
+
             # `email` echoes back the caller's own identity (already known to
             # their own browser via the Google session they just completed)
             # so the frontend can render "you signed in as X, but X isn't

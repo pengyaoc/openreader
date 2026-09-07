@@ -21,7 +21,7 @@ import httpx
 
 from app.connectors.http_fetch import USER_AGENT
 from app.ingest.extract import extract_readable
-from app.ingest.textutil import proxy_image_urls
+from app.ingest.textutil import EXCERPT_LIMIT, plain_text_excerpt, proxy_image_urls
 
 _SUBSTANTIAL_LEN = 600
 Fetcher = Callable[[str, float], str]
@@ -94,8 +94,8 @@ def hydrate_article(
         return {"content_html": ""}
 
     conn.execute(
-        "UPDATE articles SET content_html = ?, hydrated_at = ? WHERE id = ?",
-        (extracted, now, article_id),
+        "UPDATE articles SET content_html = ?, excerpt = ?, hydrated_at = ? WHERE id = ?",
+        (extracted, plain_text_excerpt(extracted, limit=EXCERPT_LIMIT), now, article_id),
     )
     conn.commit()
     return {"content_html": extracted}
@@ -162,8 +162,8 @@ def hydrate_pending(
     for article_id, extracted in results.items():
         if extracted:
             conn.execute(
-                "UPDATE articles SET content_html = ?, hydrated_at = ? WHERE id = ?",
-                (extracted, now, article_id),
+                "UPDATE articles SET content_html = ?, excerpt = ?, hydrated_at = ? WHERE id = ?",
+                (extracted, plain_text_excerpt(extracted, limit=EXCERPT_LIMIT), now, article_id),
             )
             hydrated += 1
         else:

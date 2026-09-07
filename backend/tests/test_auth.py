@@ -125,3 +125,26 @@ def test_optional_mode_allows_anonymous_reads_but_401s_writes(tmp_path, monkeypa
 
     authed = client.get("/api/me", headers={"X-Remote-Email": "alice@example.com"})
     assert authed.json()["username"] == "alice"
+
+
+def test_optional_mode_falls_back_to_public_reads_for_an_unallowed_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("READER_AUTH_MODE", "optional")
+    monkeypatch.setenv("READER_ALLOWED_EMAILS", "alice@example.com")
+
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    conn.commit()
+
+    app = create_app(db_path=db_path, config_path=tmp_path / "feeds.yaml", require_auth=True)
+    client = TestClient(app)
+    stranger = {"X-Remote-Email": "stranger@example.com"}
+
+    # Content endpoints receive the anonymous public-demo view, while /me
+    # retains the caller's email so the UI can explain that fallback.
+    assert client.get("/api/sources", headers=stranger).status_code == 200
+    assert client.get("/api/articles", headers=stranger).status_code == 200
+    me = client.get("/api/me", headers=stranger)
+    assert me.status_code == 403
+    assert me.json() == {"error": "not on the allowlist", "email": "stranger@example.com"}
+    assert client.post("/api/refresh", headers=stranger).status_code == 401

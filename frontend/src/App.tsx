@@ -308,6 +308,7 @@ export default function App() {
     onSuccess: (data, id) => {
       patchArticleCaches(qc, id, {
         content_html: data.content_html,
+        excerpt: data.excerpt,
         hydrated_at: data.hydrated_at,
         hydrate_failed_at: data.hydrate_failed_at,
       })

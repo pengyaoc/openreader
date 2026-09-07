@@ -2772,3 +2772,22 @@ misplaced native layer. The actionable outcome is a Chrome iOS bug report with t
 versions, reproduction steps, paired screenshots/logs, and 112-point calculation. Keep the
 temporary logger and public copy button until that report is filed or a reliable browser/app
 workaround is found.
+
+## 2026-09-06 — Hydrated subtitles and public fallback for unallowed accounts
+
+- Full-text hydration now also derives and stores the list-view subtitle from the extracted
+  website content. This applies to both refresh-time batch hydration and an explicit “Pull full
+  article” action. The pull response includes the new excerpt, so React patches the visible feed
+  row immediately rather than requiring a reload.
+- Kept the full-text subtitle limit in `textutil.py`, shared with feed ingestion, so direct and
+  hydrated articles use the same 900-character list-preview policy.
+- In optional auth mode, a Google account outside `READER_ALLOWED_EMAILS` now receives the same
+  public read-only source and article data as an unsigned visitor. `/api/me` alone returns its
+  email-specific 403, preserving the UI banner that explains why the public fallback is shown.
+  Required mode remains a hard 403; write requests in optional mode remain a 401.
+- Added the same 8px footer gap between the public “Copy viewport log” and “Sign in” controls as
+  between the authenticated Refresh and Settings controls.
+
+Regression coverage includes hydration persistence and API response excerpts, plus the optional
+wrong-account fallback. Verified before deploy with the full backend suite and production frontend
+build.

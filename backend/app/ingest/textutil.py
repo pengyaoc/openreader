@@ -30,6 +30,10 @@ _BOILERPLATE_LINE = re.compile(
     r"^(article url|comments url|points|#\s*comments)\s*:?", re.IGNORECASE
 )
 
+# List-view subtitle length. Long enough to convey whether an article is
+# worth opening, without turning each feed row into the article itself.
+EXCERPT_LIMIT = 900
+
 
 def plain_text_excerpt(html: str | None, limit: int | None = 300) -> str:
     if not html:

@@ -40,10 +40,11 @@ def test_hydrate_fetches_and_stores_content_when_truncated(tmp_path):
     assert len(calls) == 1
     assert "first real paragraph" in result["content_html"]
     row = conn.execute(
-        "SELECT content_html, hydrated_at FROM articles WHERE id = ?", (article_id,)
+        "SELECT content_html, excerpt, hydrated_at FROM articles WHERE id = ?", (article_id,)
     ).fetchone()
     assert "first real paragraph" in row[0]
-    assert row[1] is not None
+    assert "first real paragraph" in row[1]
+    assert row[2] is not None
 
 
 def test_hydrate_is_a_noop_on_second_call(tmp_path):
@@ -188,9 +189,12 @@ def test_hydrate_pending_hydrates_eligible_sources_only(tmp_path):
     )
 
     assert hydrated == 1
-    row1 = conn.execute("SELECT content_html, hydrated_at FROM articles WHERE id = ?", (a1,)).fetchone()
+    row1 = conn.execute(
+        "SELECT content_html, excerpt, hydrated_at FROM articles WHERE id = ?", (a1,)
+    ).fetchone()
     assert "first real paragraph" in row1[0]
-    assert row1[1] is not None
+    assert "first real paragraph" in row1[1]
+    assert row1[2] is not None
     row2 = conn.execute(
         "SELECT content_html, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (a2,)
     ).fetchone()

@@ -27,6 +27,12 @@ async def me(request: Request) -> JSONResponse:
     the identity below is the default account rather than anyone who
     signed in.
     """
+    unauthorized_email = getattr(request.state, "unauthorized_email", None)
+    if unauthorized_email is not None:
+        return JSONResponse(
+            {"error": "not on the allowlist", "email": unauthorized_email}, status_code=403
+        )
+
     user_id = current_user_id(request)
     if user_id is None:
         return JSONResponse({"id": None, "username": None, "auth_enabled": auth_configured()})
