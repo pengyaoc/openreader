@@ -2625,3 +2625,55 @@ swallowed by the new ErrorDocument. This fix lives in the shared vhost config (v
 `wordpress-vm-pages-setup.md`), not this repo, since it's Apache-level and applies equally to
 `/summrabook/` — see `summra/WORK_LOG.md`, 2026-09-07, for that side and for the same "sign
 in" entry point added there.
+
+## 2026-09-07 (cont.) — Yesterday's fix wasn't enough: the cookie itself had no expiry
+
+User reported being asked to sign in again shortly after a fresh login — and, critically,
+*also* on `/pages/`, and in both Safari and Chrome, ruling out Safari's ITP cross-site-bounce
+cookie cap as the cause (that's client-side-only and Chrome doesn't have it). Checked the
+actual mod_auth_openidc session cache on the VM: 9 separate session files created across one
+day (07:40, 16:23, 18:31, 20:09, 23:59, 01:13, 02:10, 02:50, 03:19), each written once and
+never reused — a fresh login roughly every 1-3 hours, nowhere close to either configured
+30-day timeout.
+
+Root cause, found in `/etc/apache2/conf-available/auth_openidc.conf`'s own bundled docs:
+`OIDCSessionType` defaults to bare `server-cache` (no `:persistent` suffix) when unset — which
+we'd left unset. That means the *browser-side* cookie has no `Expires`/`Max-Age` at all, a
+plain session cookie tied to the lifetime of the browser process itself.
+`OIDCSessionMaxDuration`/`OIDCSessionInactivityTimeout` (yesterday's fix) only ever governed
+the *server-side* cache entry's validity — never whether the cookie itself survives the
+browser (or, far more relevant on mobile, the OS backgrounding and killing the browser app)
+restarting, which happens far more often than any timeout value on iOS. Yesterday's fix was
+real and correct, just not sufficient — this was always going to keep happening regardless of
+how high `OIDCSessionMaxDuration` was set.
+
+Fix: added `OIDCSessionType server-cache:persistent` to the vhost. Per the module's own docs,
+the `:persistent` suffix gives the cookie a real `Expires` value (driven by
+`OIDCSessionInactivityTimeout`, so 30 days) instead of a bare session cookie. Live on
+`wordpress-2-vm`, `apache2ctl configtest` clean, graceful reload; `/reader/`, `/summrabook/`,
+`/pages/` all still respond correctly post-reload. This is vhost-level config (vault's
+`wordpress-vm-pages-setup.md`), applies to all three cohosted services identically.
+
+Not verified end-to-end yet — confirming the cookie now actually carries a multi-day Expires
+value needs a real login (I can complete the OIDC redirect chain and grab the *state* cookie
+via curl, but Google's authorization code exchange can't be faked, so I can't generate a real
+*session* cookie myself). Next real login should be checked for this.
+
+Also found and fixed a real UX bug while looking at a screenshot of the above: on mobile,
+both `.readonly-banner` and `.main__header` independently added
+`env(safe-area-inset-top)` padding — when the banner renders above the header (the demo/
+wrong-account cases), that safe-area inset got applied twice, producing a large empty band
+between the banner and the article list on an iOS PWA. Fixed with a
+`.readonly-banner + .main__header` override that drops the header's redundant copy when a
+banner precedes it. Deployed via `scripts/deploy.sh` (252 tests, `tsc -b && vite build`
+clean).
+
+Also found, not yet fixed: this vhost's general access logging has been effectively disabled
+since the `/pages/` tracker's own `CustomLog` was added (2026-09-05) — Apache's
+"log vhosts with no `CustomLog` of their own to `other_vhosts_access.log`" mechanism stops
+applying to a vhost the moment it defines *any* `CustomLog`, even a conditional one scoped to
+a `SetEnvIf`. `other_vhosts_access.log` has been sitting at 0 bytes since the day this
+started. This is why the investigation above had to lean on `mod_auth_openidc`'s own session
+cache files for evidence instead of the access log — there's no record of any real request to
+`/reader/`, `/oidc/callback`, or `/summrabook/` since. Worth a real fix (an explicit
+vhost-level `CustomLog` line) but out of scope for this session.

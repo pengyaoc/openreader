@@ -1576,6 +1576,15 @@ kbd {
     padding-top: calc(env(safe-area-inset-top) + 8px);
   }
 
+  /* When the banner is showing, it's the topmost element on screen and
+     already accounts for the safe-area inset above — .main__header no
+     longer needs its own copy, or the two stack into a large empty gap
+     (found live 2026-09-07, screenshot showed a big blank band between
+     the demo banner and the article list header on an iOS PWA). */
+  .readonly-banner + .main__header {
+    padding-top: 12px;
+  }
+
   .article-row {
     padding: 14px 16px;
     max-width: none;
