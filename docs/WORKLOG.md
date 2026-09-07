@@ -2695,3 +2695,80 @@ vhost-level `CustomLog` line) but out of scope for this session.
 Verified with the full backend suite: **253 passed** (one existing Starlette/httpx deprecation
 warning). Frontend production build and lint also pass; lint retains one unrelated existing
 `ArticleReader.tsx` hook-dependency warning.
+
+## 2026-09-06 (late) — iOS Chrome cold-reload content painted behind the native toolbar
+
+User reported a deterministic Chrome-on-iOS rendering failure: load `/reader/` normally,
+clear Chrome's browsing history for the last 24 hours (including cached files), and let
+Chrome reload the page. The public-demo banner and nearly all of the list header disappear
+behind the browser's top toolbar. Navigating away/backgrounding Chrome and returning repairs
+the display. Reproduced on an **iPhone 15 Pro Max**, **iOS 26.6.1**, **Chrome
+152.0.7977.64**. It occurs in a normal Chrome tab, not the installed Home Screen PWA, and is
+therefore distinct from the standalone viewport-height bugs documented on 2026-08-18 through
+2026-08-21.
+
+Two rounds of first-load instrumentation were captured before and after recovery. The first
+measured viewport sizes and lifecycle events; the second added window/root/body scroll
+positions, Visual Viewport page offsets, and `getBoundingClientRect()` values for the root,
+body, a `position:fixed; inset:0` probe, `.shell`, `.readonly-banner`, `.main__header`, and
+`.article-list`. The copy action was moved from authenticated Settings to the public sidebar
+so the broken anonymous state could be captured without signing in (`50c6be4`); the expanded
+position instrumentation landed in `f5eaeb9`.
+
+**All web-visible geometry was correct and identical in the broken and repaired states:**
+
+```
+screen / outer                       440 × 956
+layout + visual viewport             440 × 766
+window scrollX/scrollY               0 / 0
+root/body scrollTop                  0 / 0
+visualViewport offsetTop/pageTop     0 / 0
+root/body/fixed-probe/shell rect     top 0, bottom 766, height 766
+banner rect                          top 0, bottom 73
+header rect                          top 73, bottom 134
+article-list rect                    top 134, bottom 766
+safe-area top/bottom                 0 / 0 (expected for a browser tab)
+```
+
+The bad state persisted through the automatic `load` snapshots at double-rAF, +300ms, +1s,
+and +3s. The navigation was a real cold navigation (`pageshow.persisted === false`), not a
+BFCache restoration, and `document.wasDiscarded` stayed false. Chrome emitted `resize`
+events both at cold load and after returning to the page, but every measured dimension and
+position remained unchanged. A later transient `visualViewport.height === 526` occurred
+immediately before another navigation/address-bar interaction and returned to 766; it is not
+on the original failure path.
+
+**The screenshots identify the missing coordinate that JavaScript cannot observe.** The
+943-pixel screenshot represents the 440-point-wide screen at ~2.143 device pixels per CSS
+point. Chrome's native top toolbar ends at screenshot y≈240, or **112 CSS points**. In the
+bad screenshot the header's bottom border appears at y≈285; the DOM reports that border at
+CSS y=134, and `134 × 2.143 ≈ 287`. Therefore Chrome is painting DOM y=0 at physical screen
+y=0, underneath its own 112-point toolbar, instead of mapping DOM y=0 to physical y=112:
+
+- the banner at DOM y=0–73 is completely covered;
+- the header at DOM y=73–134 loses its first 39 points and only its last 22 remain visible;
+- the article list begins immediately after that clipped remnant.
+
+That pixel arithmetic matches the screenshot exactly, including only the bottom slice of the
+36-point hamburger button remaining visible. In the correct screenshot the same DOM y=0
+begins below the toolbar at physical y=112 and the full banner/header are visible.
+
+**Conclusion:** this is not stale data, font loading, root scrolling, safe-area padding,
+`100dvh`, or a layout/Visual Viewport calculation error. Chrome appears to create or place
+its native `WKWebView`/rendering layer with the correct 766-point size but the wrong native Y
+origin. Returning to the page triggers native view layout/compositing and repairs that origin
+without changing any CSSOM-visible value. This is analogous to WebKit
+[#312149](https://bugs.webkit.org/show_bug.cgi?id=312149), where painted pixels disagree
+with CSSOM coordinates on iOS Chrome, but that report concerns fixed-bottom elements after
+toolbar scrolling and is **not** claimed as the same bug. It also differs from WebKit
+[#311821](https://bugs.webkit.org/show_bug.cgi?id=311821): that keyboard-triggered issue
+exposes a negative `getBoundingClientRect().top`, while every rect here remains exactly zero.
+
+**No app-side fix implemented.** The broken and correct states are
+indistinguishable to page JavaScript—the native view's screen-space frame is not exposed.
+Adding a fixed 112px compensation would repair this one state while creating an equally large
+gap on every normal load, and forced DOM reflow/viewport-unit changes only operate below the
+misplaced native layer. The actionable outcome is a Chrome iOS bug report with the exact
+versions, reproduction steps, paired screenshots/logs, and 112-point calculation. Keep the
+temporary logger and public copy button until that report is filed or a reliable browser/app
+workaround is found.
