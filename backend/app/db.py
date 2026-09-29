@@ -159,6 +159,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     ensure_default_user(conn)
     _migrate_per_user_state(conn)
     _backfill_decoded_entities(conn)
+    _backfill_hydrated_excerpts(conn)
 
     # Consolidated login, 2026-09-05 (see docs/WORKLOG.md and pchauth's
     # spec). subject/name are reserved for the deferred self_oidc source
@@ -292,6 +293,43 @@ def _backfill_decoded_entities(conn: sqlite3.Connection) -> None:
     conn.executemany(
         "UPDATE articles SET title = ?, author = ? WHERE id = ?", updates
     )
+    conn.commit()
+
+
+def _backfill_hydrated_excerpts(conn: sqlite3.Connection) -> None:
+    """Rebuild subtitles for articles hydrated before subtitles used their
+    extracted website content.
+
+    Hydration is deliberately one-shot: a non-NULL ``hydrated_at`` prevents
+    a later open or refresh from fetching the article again. Consequently the
+    subtitle fix added to hydration only affected articles downloaded after
+    that deploy; older rows kept their RSS (often empty HN boilerplate)
+    excerpt indefinitely. Derive the preview from the already-stored,
+    sanitized body instead. Comparing the value makes this safe and cheap to
+    repeat on every startup, without a schema-version flag.
+    """
+    from app.ingest.textutil import EXCERPT_LIMIT, plain_text_excerpt
+
+    # Very old single-user databases can predate all three columns. The
+    # surrounding schema migration deliberately supports that historic
+    # shape, so this repair pass must be just as tolerant.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(articles)")}
+    if not {"excerpt", "content_html", "hydrated_at"} <= columns:
+        return
+
+    rows = conn.execute(
+        """SELECT id, excerpt, content_html
+           FROM articles
+           WHERE hydrated_at IS NOT NULL AND content_html IS NOT NULL"""
+    ).fetchall()
+    updates = []
+    for article_id, excerpt, content_html in rows:
+        new_excerpt = plain_text_excerpt(content_html, limit=EXCERPT_LIMIT)
+        if new_excerpt != (excerpt or ""):
+            updates.append((new_excerpt, article_id))
+    if not updates:
+        return
+    conn.executemany("UPDATE articles SET excerpt = ? WHERE id = ?", updates)
     conn.commit()
 
 

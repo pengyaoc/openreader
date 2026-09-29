@@ -71,6 +71,40 @@ def test_init_schema_decodes_leftover_html_entities_in_existing_titles(tmp_path)
     )
 
 
+def test_init_schema_rebuilds_subtitles_for_previously_hydrated_articles(tmp_path):
+    """The hydrated-subtitle fix must repair rows downloaded before it.
+
+    A hydrated_at timestamp makes hydration a one-shot operation, so merely
+    refreshing/opening an existing row cannot take the new extraction path.
+    """
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder) VALUES ('s1', 'rss', 'Hacker News', 'AI')"
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key = 's1'").fetchone()[0]
+    content = "<main><p>The extracted website lead is now the subtitle.</p></main>"
+    conn.execute(
+        """INSERT INTO articles
+           (source_id, guid, url, title, excerpt, content_html, hydrated_at, origin)
+           VALUES (?, 'g1', 'https://example.com/post', 'Title', '', ?, '2026-09-06T00:00:00Z', 'feed')""",
+        (source_id, content),
+    )
+    conn.commit()
+
+    init_schema(conn)
+
+    assert conn.execute("SELECT excerpt FROM articles WHERE guid = 'g1'").fetchone()[0] == (
+        "The extracted website lead is now the subtitle."
+    )
+
+    # The pass is idempotent on every subsequent startup.
+    init_schema(conn)
+    assert conn.execute("SELECT excerpt FROM articles WHERE guid = 'g1'").fetchone()[0] == (
+        "The extracted website lead is now the subtitle."
+    )
+
+
 def test_init_schema_drops_jobs_table_and_generation_columns_from_an_older_db(tmp_path):
     # Simulates a pre-2026-08-14 database (topic-generation era schema) —
     # init_schema must clean these up on next startup, not just skip
