@@ -404,6 +404,17 @@ def test_put_config_updates_the_config_file(client, tmp_path):
     assert "Renamed" in resp.json()["yaml"]
 
 
+def test_put_config_makes_new_sources_appear_before_any_refresh(client):
+    yaml_text = (
+        "sources:\n"
+        "- {key: s1, type: rss, title: Source One, folder: Test, url: 'https://x/feed'}\n"
+        "- {key: fresh, type: web, title: Fresh, folder: Investing, url: 'https://x.example/news', item_selector: 'li a'}\n"
+    )
+    assert client.put("/api/config", json={"yaml": yaml_text}).status_code == 200
+    titles = {s["key"]: s["title"] for s in client.get("/api/sources").json()}
+    assert titles["fresh"] == "Fresh"
+
+
 def test_put_config_is_blocked_when_readonly(client, monkeypatch):
     # READER_READONLY_CONFIG is set on the VM deployment specifically
     # because this endpoint is otherwise unauthenticated — an internet-

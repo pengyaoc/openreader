@@ -26,6 +26,7 @@ from app.api import (
 from app.auth import auth_configured, load_auth_config, upsert_user
 from app.config import Config, load_config
 from app.db import connect, init_schema
+from app.ingest.refresh import sync_sources
 from app.pchauth.starlette_adapter import PchauthMiddleware
 from app.timing import TimingMiddleware
 
@@ -127,6 +128,14 @@ def build_production_app() -> Starlette:
         )
 
     app = create_app()
+
+    # Sources hand-added to feeds.yaml get their DB row (and so their
+    # sidebar entry) now, not on their first refresh.
+    conn = connect(settings.DB_PATH)
+    try:
+        sync_sources(conn, app.state.config)
+    finally:
+        conn.close()
 
     frontend_dist = settings.REPO_ROOT / "frontend" / "dist"
     if frontend_dist.exists():

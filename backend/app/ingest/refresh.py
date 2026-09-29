@@ -69,6 +69,23 @@ def get_or_create_source(conn: sqlite3.Connection, source: Source) -> tuple[int,
     return source_id, None, None
 
 
+def sync_sources(conn: sqlite3.Connection, config: Config) -> int:
+    """Makes sure every configured source has a `sources` row, so it shows in
+    the sidebar/Settings list right away — even with zero articles. Those
+    lists read the DB, and a row otherwise appears only on the source's
+    first refresh (or via the Add-source UI), which left a source added by
+    hand-editing feeds.yaml invisible until someone pressed Refresh (found
+    2026-09-28). Insert-only, like get_or_create_source; returns how many
+    rows were created."""
+    existing = {row[0] for row in conn.execute("SELECT key FROM sources")}
+    created = 0
+    for source in config.sources:
+        if source.key not in existing:
+            get_or_create_source(conn, source)
+            created += 1
+    return created
+
+
 def _entry_to_raw_article(entry: NormalizedEntry) -> RawArticle:
     return RawArticle(
         title=entry.title,

@@ -2897,3 +2897,18 @@ Verification:
 Not deployed. Production has `READER_READONLY_CONFIG=1`, so adding sources from the UI is locked
 there. Follow the memos on the live site by adding the `howard-marks-memos` entry from
 `config/feeds.example.yaml` to the VM's `feeds.yaml`.
+
+## 2026-09-28 (later) — Configured sources appear before their first refresh
+
+Feedback: *"Even if there is no item, it should show on this list right?"* — after the Howard Marks
+memos source was added to the VM's `feeds.yaml` by hand and did not appear in the sidebar/Settings.
+
+Cause: the sidebar and Settings list read the `sources` table, and a row was only created by the
+source's first refresh or by the Add-source UI. A source added by editing `feeds.yaml` (the only way
+on the read-only production deployment) was therefore invisible until someone pressed Refresh.
+
+Fix: new `sync_sources(conn, config)` in `ingest/refresh.py` creates the missing rows (insert-only,
+via `get_or_create_source`, so it never touches existing rows' ETags or state). It runs at
+production startup (`build_production_app`) and on `PUT /api/config`. Tests cover creation with no
+refresh, idempotence, and the config-save path (301 backend tests pass); a scratch-DB boot confirmed
+`GET /api/sources` lists the source with 0 articles before any refresh.

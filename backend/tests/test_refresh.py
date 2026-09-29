@@ -15,6 +15,7 @@ from app.ingest.refresh import (
     refresh_all,
     refresh_imap_source,
     refresh_imap_sources,
+    sync_sources,
 )
 from tests.conftest import read_state, seed_user
 
@@ -892,3 +893,26 @@ def test_web_source_whose_selector_matches_nothing_records_an_error(tmp_path):
     assert report["sources"][0]["status"] == "error"
     row = conn.execute("SELECT last_error FROM sources WHERE key='memos'").fetchone()
     assert "matched no items" in row[0]
+
+
+def test_sync_sources_creates_rows_for_configured_sources_without_a_refresh(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    config = Config(sources=[_web_source(), _web_source(key="other", title="Other")])
+
+    assert sync_sources(conn, config) == 2
+    keys = {r[0] for r in conn.execute("SELECT key FROM sources")}
+    assert keys == {"memos", "other"}
+    assert conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0] == 0
+
+
+def test_sync_sources_is_idempotent_and_never_overwrites_existing_rows(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    config = Config(sources=[_web_source()])
+    sync_sources(conn, config)
+    conn.execute("UPDATE sources SET etag = 'keep-me' WHERE key = 'memos'")
+    conn.commit()
+
+    assert sync_sources(conn, config) == 0
+    assert conn.execute("SELECT etag FROM sources WHERE key='memos'").fetchone()[0] == "keep-me"
