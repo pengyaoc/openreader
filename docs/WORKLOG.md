@@ -2791,3 +2791,109 @@ workaround is found.
 Regression coverage includes hydration persistence and API response excerpts, plus the optional
 wrong-account fallback. Verified before deploy with the full backend suite and production frontend
 build.
+
+## 2026-09-06 — Fix wrong-account sign-in recovery
+
+The public sidebar's “Sign in” link attempted to clear a stale Apache OIDC session with
+`/reader/login?logout=/reader/login`. That does not work when a user is already signed in:
+`logout` is a mod_auth_openidc control parameter handled only on the configured
+`OIDCRedirectURI`, while `/reader/login` immediately accepts the existing session under
+`Require valid-user`. The browser therefore returned to Reader as the same unauthorized account
+without opening Google's account picker.
+
+Changed `SIGNIN_URL` to `/oidc/callback?logout=/reader/login`. The callback clears the local
+`mod_auth_openidc_session` cookie and redirects to the protected login path, which starts a fresh
+Google authorization request with the vhost's existing `prompt=select_account` parameter.
+
+Verified against the live gateway before changing the app: the callback returns a session-cookie
+deletion plus `Location: /reader/login`, and following that redirect reaches Google's authorization
+endpoint with `prompt=select_account`.
+
+Frontend production build and lint pass (with the existing `ArticleReader.tsx` hook-dependency
+warning). Deployed via `scripts/deploy.sh`; all 254 backend tests passed, the service restarted
+active, `/reader/` returned 200, and the live hashed JavaScript bundle contains the new
+`/oidc/callback?logout=...` route.
+
+## 2026-09-07 — Backfill subtitles for already-downloaded articles
+
+Follow-up feedback: *"I reported prior bug for downloaded website content not showing in subtitle
+in feed. I am still not seeing it. Check ‘The pencil case model of creativity’."* The prior fix
+correctly writes an extracted website subtitle at hydration time, but hydration is one-shot: rows
+that were downloaded before that deploy keep `hydrated_at`, so they cannot take the corrected path
+on a later refresh or open. This left their old, often empty Hacker News boilerplate subtitle in
+place indefinitely.
+
+Added an idempotent startup migration that rebuilds every already-hydrated article's subtitle from
+its stored extracted HTML. It changes only excerpts that differ, needs no network fetch, and leaves
+the article body and per-user reading state untouched. Regression coverage verifies both the repair
+and repeat startup behavior; the database, hydration, and API test groups pass (74 tests).
+
+## 2026-09-28 — Web feed builder (follow sites that have no RSS)
+
+Request: build Inoreader's "Create Web feeds" for this app. The user asked for *"Build as a general
+feature, not just specific to howard marks memo"*, with Oaktree's memo archive as the worked
+example: *"Everytime a new article comes out. It should land in my feed."*
+
+Scope decisions, made with the user:
+- Auto-extract + preview + a typed CSS-selector override. No visual click-to-pick yet.
+- Static HTML only, no headless browser.
+- **Refresh stays manual.** New items land on the next Refresh, like every other source. The
+  README's "no scheduler, refresh is a button" principle is unchanged.
+
+What was built:
+- `connectors/webpage.py` is pure: bytes in, `NormalizedEntry` list out.
+  - `extract_candidates` groups same-site links by structural signature, after stripping
+    nav/header/footer/aside, and ranks groups by size × title length.
+  - `extract_with_selector` applies a saved or typed selector.
+  - Also includes `find_feed_links` and `page_title`.
+- Behaviours found against real pages while building it:
+  - The Oaktree archive puts `<time>` *beside* the link, not around it. Dates are therefore read
+    from the item container, which is the highest ancestor holding only that one link.
+  - Its `datetime` values carry a junk leading `>`. A lenient date pre-clean handles that, and
+    also parses text dates like "Sep 25, 2026".
+  - Its "Compilations" tab reuses the same link class for PDFs, so a mixed group gets narrowed to
+    the majority's path with `[href*="/insights/memo/"]`. Numeric segments are never used, or a
+    `/news/2026/09/` filter would drop next month's items.
+  - anthropic.com/news uses CSS-module classes with build hashes. Selectors match only the stable
+    component and local-name parts, so a saved selector survives the site's next deploy.
+  - Card links that wrap date + category + title now take their title from the inner
+    heading or title-class element.
+- Each scrape is capped at the newest 30 items. The first refresh of Oaktree's 168-memo archive
+  doesn't flood Unread, and since the cap applies every time, old archive items never trickle in.
+- `type: web` + `item_selector` in `config.py`. Web sources ride the RSS concurrent
+  conditional-GET batch in `refresh.py`; only parsing differs (`_parse_body`). A selector that
+  matches nothing is recorded as a source error.
+- Editing a source's url or selector clears its cached ETag/Last-Modified. Otherwise the fix would
+  sit behind a 304 until the page changed.
+- `POST /api/webfeed/preview` is signed-in only. The image proxy's SSRF helpers moved to
+  `app/netsafety.py`, plus a new `safe_get`: a per-hop redirect check and a 3 MB streamed cap.
+- The preview reports RSS/Atom feeds the page advertises, or that the URL itself is a feed. The
+  UI then offers "Add as RSS feed" instead of scraping.
+- Frontend:
+  - New `WebFeedBuilder.tsx` as the third "Web page" option in `SourceForm`. It shows the 3-step
+    explainer and a dismissible "What is a web feed?" panel, then candidate tabs, a preview list,
+    and a custom-selector field.
+  - "Follow feed" saves the post-redirect URL, because refresh doesn't follow redirects. It then
+    refreshes the new source once so the feed isn't empty.
+
+Verification:
+- Backend tests: 29 new webpage, refresh and config tests, plus 14 API tests. All 298 pass.
+- Seven IMAP refresh tests were already failing on a clean HEAD checkout, which would have blocked
+  `scripts/deploy.sh` (it runs pytest first). Cause: the test helpers hard-coded message dates of
+  11 Aug 2026, and refresh correctly drops IMAP mail older than the source's since-window (30 days
+  on a first refresh), so they aged out as the calendar moved on. Not a code bug. The helpers now
+  date messages "now".
+- Frontend `tsc`, lint (only the existing `ArticleReader.tsx` warning) and build pass.
+- Live run against a scratch config/DB:
+  - Following `https://www.oaktreecapital.com/insights/memos` from the UI brought in 30 memos,
+    newest first, dated, with full text hydrated for 29. The 30th hit a transient fetch failure
+    during parallel hydration; it extracts fine on retry.
+  - Re-refresh → `not_modified`. Deleting the newest memo and refreshing → exactly 1 new.
+  - `/insights` → no candidates, with a sub-page hint. localhost and 169.254.169.254 are
+    rejected. simonwillison.net → "already publishes a feed".
+- Also sanity-checked auto-detection on anthropic.com/news, paulgraham.com/articles.html,
+  sive.rs/blog and federalreserve.gov press releases.
+
+Not deployed. Production has `READER_READONLY_CONFIG=1`, so adding sources from the UI is locked
+there. Follow the memos on the live site by adding the `howard-marks-memos` entry from
+`config/feeds.example.yaml` to the VM's `feeds.yaml`.

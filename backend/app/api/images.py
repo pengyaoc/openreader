@@ -16,17 +16,16 @@ can't satisfy both. Deriving the Referer from the image URL's own origin
 from __future__ import annotations
 
 import asyncio
-import ipaddress
-import socket
-from urllib.parse import SplitResult, urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from starlette.requests import Request
 from starlette.responses import Response
 
 from app.connectors.http_fetch import USER_AGENT
+from app.netsafety import SsrfBlocked
+from app.netsafety import assert_safe_url as _assert_safe_url
 
-_ALLOWED_SCHEMES = {"http", "https"}
 _MAX_BYTES = 15 * 1024 * 1024  # 15 MB — generous for a single image, not unbounded
 _TIMEOUT = 8.0
 _MAX_REDIRECTS = 3
@@ -35,66 +34,6 @@ _MAX_REDIRECTS = 3
 def referer_for(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}/"
-
-
-class SsrfBlocked(Exception):
-    """Raised when a URL — or a redirect target — resolves to a non-public
-    address. Without this, /api/img is an open forwarder: it takes any URL
-    from an unauthenticated request and fetches it server-side, which is
-    exactly the shape of a request needed to reach the VM's own localhost
-    services or GCP's internal network."""
-
-
-def _is_public_address(ip: str) -> bool:
-    addr = ipaddress.ip_address(ip)
-    return not (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_multicast
-        or addr.is_reserved
-        or addr.is_unspecified
-    )
-
-
-def _assert_public_host(host: str) -> None:
-    """Resolves `host` and rejects it if *any* resolved address is not
-    publicly routable — checking every address, not just the first, since a
-    host can round-robin between a public and an internal one.
-
-    This check and the connection httpx eventually makes are not atomic: a
-    DNS record could change between this resolve and httpx's own connect
-    ("DNS rebinding"). Closing that gap needs a custom transport that pins
-    the resolved IP into the TCP connection, which is out of scope here.
-    What this closes is the straightforward case actually seen against open
-    image proxies — a URL that directly names a private, loopback, or
-    metadata address (e.g. 127.0.0.1, 169.254.169.254, 10.0.0.0/8).
-
-    Deliberately synchronous — socket.getaddrinfo() blocks, and keeping
-    this a plain sync function (rather than an async one wrapping it
-    internally) keeps it a pure, directly-unit-testable helper with no
-    event-loop dependency. Callers in the async proxy_image handler below
-    run it via asyncio.to_thread(); calling it directly there would block
-    uvicorn's single event loop for the DNS lookup's duration on every
-    image request — serializing what the browser intended to fetch in
-    parallel, which is exactly what made image-heavy articles slow to
-    open (found 2026-08-13, from a live report of a slow-loading article).
-    """
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror as exc:
-        raise SsrfBlocked(f"could not resolve host: {host}") from exc
-    for _family, _type, _proto, _canon, sockaddr in infos:
-        if not _is_public_address(sockaddr[0]):
-            raise SsrfBlocked(f"host {host!r} resolves to a non-public address")
-
-
-def _assert_safe_url(url: str) -> SplitResult:
-    parts = urlsplit(url)
-    if parts.scheme not in _ALLOWED_SCHEMES or not parts.hostname:
-        raise SsrfBlocked(f"unsupported or invalid URL: {url}")
-    _assert_public_host(parts.hostname)
-    return parts
 
 
 _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (

@@ -157,3 +157,33 @@ sources:
     {field}: x
 """
             )
+
+
+def test_web_source_requires_url():
+    with pytest.raises(ConfigError):
+        parse_config(
+            """
+sources:
+  - key: w
+    type: web
+    title: W
+    folder: F
+"""
+        )
+
+
+def test_web_source_with_selector_roundtrips():
+    config = parse_config(
+        """
+sources:
+  - key: w
+    type: web
+    title: W
+    folder: F
+    url: https://x.example/news
+    item_selector: 'li.item > a[href*="/news/"]'
+"""
+    )
+    again = parse_config(to_yaml(config))
+    assert again.sources[0].type == "web"
+    assert again.sources[0].item_selector == 'li.item > a[href*="/news/"]'

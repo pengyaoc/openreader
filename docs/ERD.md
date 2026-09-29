@@ -124,10 +124,10 @@ erDiagram
     sources {
         int id PK
         text key UK "stable identifier from config"
-        text type "rss | imap"
+        text type "rss | imap | web"
         text title
         text folder
-        text url "null for imap"
+        text url "null for imap; the scraped page for web"
         text etag "RSS conditional-GET cache"
         text last_modified
         text last_fetched_at
@@ -256,7 +256,7 @@ request never reaches a handler at all — the middleware 401s it first.
 |---|---|---|
 | `GET /api/me` | `{id, username, auth_enabled}` — `id: null` for an anonymous request under `optional` mode (not an error; the frontend renders a signed-out browsing state, not a forced login screen). Under `required` mode this is unreachable anonymously. `auth_enabled` reflects whether this deployment configures login at all (`READER_AUTH_MODE != 'off'`), regardless of whether *this* request is signed in | User-row fetch runs off the event loop (`asyncio.to_thread`) — one of several calls the frontend fires in parallel on cold open |
 | `GET /api/sources` | List sources with unread counts, filtered to keys present in the live config — a source removed from `feeds.yaml` stops appearing here immediately, even though its DB row and articles aren't deleted (§5) | No |
-| `POST /api/sources` | Structured add-source, any type (rss/imap) (validates, writes YAML, creates DB row) | No |
+| `POST /api/sources` | Structured add-source, any type (rss/imap/web) (validates, writes YAML, creates DB row) | No |
 | `GET /api/sources/:id` | Full detail for one source (url/query/mailbox_folder/fetch_full_text/rules) — `list_sources` deliberately omits these; backs the edit form's pre-fill | No |
 | `PUT /api/sources/:id` | Edit a source's fields in place; `key`/`type` locked to the existing entry regardless of what's sent (§5) | No |
 | `DELETE /api/sources/:id` | Remove from config only — DB rows/articles untouched, same behavior as a raw-YAML removal (§5) | No |
@@ -272,6 +272,7 @@ request never reaches a handler at all — the middleware 401s it first.
 | `GET /api/llm-status` | `{"enabled": bool}` — lets the frontend hide the Summarize button entirely rather than showing one that would just 404 | No |
 | `POST /api/refresh` | Refresh (`?source=key` for one); RSS fetches concurrently (bounded pool), IMAP sequentially over one shared connection (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-5s typical) |
 | `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |
+| `POST /api/webfeed/preview` | Web feed builder: fetch a pasted URL (SSRF-checked each hop, 3 MB cap), return `{final_url, page_title, feed_links, candidates:[{selector, custom, count, items}]}`. Signed-in only (401 anonymous); writes nothing — following is `POST /api/sources` with `type: web` + `item_selector` | Runs off the event loop (`asyncio.to_thread`) |
 | `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | SSRF-check DNS lookup runs off the event loop (`asyncio.to_thread`, §5); the actual fetch is async `httpx` |
 
 ## 5. Key technical decisions (and why)

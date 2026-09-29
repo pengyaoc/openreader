@@ -14,7 +14,15 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app import settings
-from app.api import articles, auth_api, config_api, images, refresh_api, sources
+from app.api import (
+    articles,
+    auth_api,
+    config_api,
+    images,
+    refresh_api,
+    sources,
+    webfeed,
+)
 from app.auth import auth_configured, load_auth_config, upsert_user
 from app.config import Config, load_config
 from app.db import connect, init_schema
@@ -56,6 +64,7 @@ def create_app(
         Route("/api/config", config_api.get_config, methods=["GET"]),
         Route("/api/config", config_api.put_config, methods=["PUT"]),
         Route("/api/img", images.proxy_image),
+        Route("/api/webfeed/preview", webfeed.preview, methods=["POST"]),
         Route("/api/me", auth_api.me),
     ]
 

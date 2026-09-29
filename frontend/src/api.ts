@@ -7,20 +7,17 @@
 // call site.
 export const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, '')
 
-// Apache's dedicated login entry point (see docs/WORKLOG.md, 2026-09-07,
-// and the vault's wordpress-vm-pages-setup.md for the <Location> that
-// backs this). `logout=` first clears any existing Apache session before
-// redirecting back to this same URL — necessary because without it, an
-// existing session for the *wrong* Google account would just pass
-// straight through again with no new authorization request at all,
-// silently reusing the same wrong identity forever (mod_auth_openidc
-// only re-prompts when there's no valid session to satisfy `Require
-// valid-user` in the first place). The Apache <Location> also sets
-// `OIDCAuthRequestParams "prompt=select_account"` vhost-wide, so once a
-// fresh authorization request does fire, Google shows its account picker
-// instead of silently re-using its own still-active session for the
-// same wrong account.
-export const SIGNIN_URL = `${API_BASE}/login?logout=${encodeURIComponent(`${API_BASE}/login`)}`
+// mod_auth_openidc only handles `logout=` on its configured redirect URI,
+// `/oidc/callback`. Putting the parameter on the protected `/reader/login`
+// entry point does not clear an existing session: `Require valid-user`
+// simply accepts the already-signed-in (possibly wrong) account and the
+// request reaches Reader unchanged. Route through the callback to kill the
+// gateway session, then return to the protected login path; that starts a
+// fresh authorization request. The vhost adds `prompt=select_account`, so
+// Google presents its account picker instead of silently choosing the same
+// account again. See docs/WORKLOG.md, 2026-09-06.
+const LOGIN_URL = `${API_BASE}/login`
+export const SIGNIN_URL = `/oidc/callback?logout=${encodeURIComponent(LOGIN_URL)}`
 
 export type ArticleOrigin = 'feed' | 'email'
 
@@ -60,7 +57,7 @@ export type ArticleListItem = Omit<Article, 'content_html' | 'llm_summary_html'>
   has_summary: boolean
 }
 
-export type SourceType = 'rss' | 'imap'
+export type SourceType = 'rss' | 'imap' | 'web'
 
 export interface Source {
   id: number
@@ -80,6 +77,7 @@ export interface SourceDetail extends Source {
   url: string | null
   query: string | null
   mailbox_folder: string | null
+  item_selector: string | null
   fetch_full_text: boolean
   rules: Rule[]
 }
@@ -129,8 +127,45 @@ interface SourceFieldsImap {
   rules?: Rule[]
 }
 
-export type SourceFields = SourceFieldsRss | SourceFieldsImap
+// A scraped web page (the web feed builder) — item_selector is the CSS
+// selector the preview picked or the user typed; see connectors/webpage.py.
+interface SourceFieldsWeb {
+  type: 'web'
+  title: string
+  folder: string
+  url: string
+  item_selector: string
+  fetch_full_text?: boolean
+  rules?: Rule[]
+}
+
+export type SourceFields = SourceFieldsRss | SourceFieldsImap | SourceFieldsWeb
 export type NewSource = SourceFields & { key: string }
+
+// POST /api/webfeed/preview — what a web-page source built from `url`
+// would ingest. `candidates` are best-first; a `custom` one (the user's
+// own selector) always comes first when a selector was sent. `feed_links`
+// are RSS/Atom feeds the page advertises (or the URL itself, if it is one).
+export interface WebFeedItem {
+  title: string
+  url: string
+  published_at: string | null
+  summary: string
+}
+
+export interface WebFeedCandidate {
+  selector: string
+  custom: boolean
+  count: number
+  items: WebFeedItem[]
+}
+
+export interface WebFeedPreview {
+  final_url: string
+  page_title: string
+  feed_links: string[]
+  candidates: WebFeedCandidate[]
+}
 
 // The signed-in account, or the anonymous state (id/username both null)
 // under `optional` mode — see docs/WORKLOG.md, 2026-09-05. `auth_enabled`
@@ -250,6 +285,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(source),
     }).then((r) => json<{ ok: boolean; key: string }>(r)),
+
+  previewWebFeed: (url: string, selector?: string) =>
+    apiFetch('/api/webfeed/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, selector: selector || undefined }),
+    }).then((r) => json<WebFeedPreview>(r)),
 
   getSource: (id: number) => apiFetch(`/api/sources/${id}`).then((r) => json<SourceDetail>(r)),
 

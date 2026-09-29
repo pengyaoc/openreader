@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, type Rule, type RuleAction, type RuleField, type SourceFields } from '../api'
+import { WebFeedBuilder, type WebFeedPick } from './WebFeedBuilder'
 
 interface Props {
   /** Back to the Settings drawer's feed list — not a close, since this form
@@ -50,7 +51,7 @@ const FIELD_OPTIONS: RuleField[] = ['title', 'summary', 'content', 'author', 'ur
 export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
   const isEditing = editingSourceId !== undefined
 
-  const [sourceType, setSourceType] = useState<'rss' | 'imap'>('rss')
+  const [sourceType, setSourceType] = useState<'rss' | 'imap' | 'web'>('rss')
   const [title, setTitle] = useState('')
   const [folder, setFolder] = useState('')
   const [url, setUrl] = useState('')
@@ -59,6 +60,7 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
   const [querySubject, setQuerySubject] = useState('')
   const [queryNewerThanDays, setQueryNewerThanDays] = useState('30')
   const [fetchFullText, setFetchFullText] = useState(false)
+  const [itemSelector, setItemSelector] = useState('')
   const [rules, setRules] = useState<Rule[]>([])
   const [loading, setLoading] = useState(isEditing)
   const [saving, setSaving] = useState(false)
@@ -75,9 +77,10 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
         setTitle(detail.title)
         setFolder(detail.folder)
         setRules(detail.rules)
-        if (detail.type === 'rss') {
-          setSourceType('rss')
+        if (detail.type === 'rss' || detail.type === 'web') {
+          setSourceType(detail.type)
           setUrl(detail.url ?? '')
+          setItemSelector(detail.item_selector ?? '')
           setFetchFullText(detail.fetch_full_text)
         } else {
           setSourceType('imap')
@@ -105,10 +108,41 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
     title.trim() &&
     folder.trim() &&
     (isEditing || key) &&
-    (sourceType === 'rss' ? url.trim() : true)
+    (sourceType === 'imap' ? true : url.trim()) &&
+    (sourceType === 'web' ? itemSelector.trim() : true)
+
+  const selectType = (type: 'rss' | 'imap' | 'web') => {
+    setSourceType(type)
+    // Scraped items are only links + titles, so full text is what makes
+    // them readable in-app; default it on for web pages.
+    if (type === 'web') setFetchFullText(true)
+  }
+
+  const onWebPick = (pick: WebFeedPick | null) => {
+    setUrl(pick?.url ?? '')
+    setItemSelector(pick?.selector ?? '')
+    if (pick && !title.trim() && pick.pageTitle) setTitle(pick.pageTitle)
+  }
+
+  const useAdvertisedFeed = (feedUrl: string) => {
+    setSourceType('rss')
+    setUrl(feedUrl)
+    setItemSelector('')
+  }
 
   const buildFields = (): SourceFields => {
     const cleanRules = rules.filter((r) => r.pattern.trim())
+    if (sourceType === 'web') {
+      return {
+        type: 'web',
+        title: title.trim(),
+        folder: folder.trim(),
+        url: url.trim(),
+        item_selector: itemSelector.trim(),
+        fetch_full_text: fetchFullText,
+        rules: cleanRules,
+      }
+    }
     if (sourceType === 'rss') {
       return {
         type: 'rss',
@@ -137,6 +171,11 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
         await api.updateSource(editingSourceId, buildFields())
       } else {
         await api.addSource({ key, ...buildFields() })
+        if (sourceType === 'web') {
+          // Pull the first batch now so the new feed isn't empty until the
+          // next manual Refresh. Best-effort: the source is already saved.
+          await api.refresh(key).catch(() => undefined)
+        }
       }
       onSaved()
       onCancel()
@@ -179,14 +218,21 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
                 <button
                   type="button"
                   className={`type-toggle__option ${sourceType === 'rss' ? 'active' : ''}`}
-                  onClick={() => setSourceType('rss')}
+                  onClick={() => selectType('rss')}
                 >
                   RSS feed
                 </button>
                 <button
                   type="button"
+                  className={`type-toggle__option ${sourceType === 'web' ? 'active' : ''}`}
+                  onClick={() => selectType('web')}
+                >
+                  Web page
+                </button>
+                <button
+                  type="button"
                   className={`type-toggle__option ${sourceType === 'imap' ? 'active' : ''}`}
-                  onClick={() => setSourceType('imap')}
+                  onClick={() => selectType('imap')}
                 >
                   Newsletter
                 </button>
@@ -198,18 +244,27 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
               </p>
             )}
 
+            {sourceType === 'web' && (
+              <WebFeedBuilder
+                initialUrl={url}
+                initialSelector={itemSelector}
+                onPick={onWebPick}
+                onUseFeed={useAdvertisedFeed}
+              />
+            )}
+
             <label className="field">
               <span className="field__label">Title</span>
               <input
                 className="field__input"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Simon Willison"
-                autoFocus
+                placeholder={sourceType === 'web' ? 'Filled in from the page' : 'Simon Willison'}
+                autoFocus={sourceType !== 'web'}
               />
             </label>
 
-            {sourceType === 'rss' ? (
+            {sourceType === 'web' ? null : sourceType === 'rss' ? (
               <label className="field">
                 <span className="field__label">Feed URL</span>
                 <input
@@ -287,7 +342,7 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
               </div>
             )}
 
-            {sourceType === 'rss' && (
+            {sourceType !== 'imap' && (
               <label className="field field--checkbox">
                 <input
                   type="checkbox"
@@ -368,7 +423,13 @@ export function SourceForm({ onCancel, onSaved, editingSourceId }: Props) {
             onClick={submit}
             disabled={!canSubmit || saving || loading}
           >
-            {saving ? 'Saving…' : isEditing ? 'Save changes' : 'Add source'}
+            {saving
+              ? 'Saving…'
+              : isEditing
+                ? 'Save changes'
+                : sourceType === 'web'
+                  ? 'Follow feed'
+                  : 'Add source'}
           </button>
         </div>
       </div>

@@ -41,6 +41,17 @@ sources:
       - { action: include, field: any, pattern: "(?i)llm|agent|inference|eval" }
       - { action: exclude, field: title, pattern: "(?i)\\bsponsored\\b" }
 
+  # A web page with no RSS (the "Web page" option in Add source builds these).
+  # Each refresh re-fetches the page and takes the newest 30 links that
+  # item_selector matches; omit item_selector to auto-detect every time.
+  - key: howard-marks-memos
+    type: web
+    title: Memos from Howard Marks
+    url: https://www.oaktreecapital.com/insights/memos
+    item_selector: 'div.description > div.row > div.col-xl-3 > a.oc-title-link[href*="/insights/memo/"]'
+    folder: Investing
+    fetch_full_text: true
+
   # An IMAP source: reads a mailbox over READER_IMAP_HOST/_USER/_PASSWORD
   # (an app password, not OAuth — no re-auth or token expiry to manage).
   # `query` uses Gmail-search-style syntax (from:/subject:/newer_than:)

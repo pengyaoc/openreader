@@ -941,3 +941,169 @@ def test_anonymous_writes_401_in_optional_mode(anon_client):
     assert client.post(f"/api/articles/{article_id}/hydrate").status_code == 401
     assert client.put("/api/config", json={"yaml": "sources: []"}).status_code == 401
     assert client.post("/api/refresh").status_code == 401
+
+
+# --- web feed builder (POST /api/webfeed/preview) ---------------------------
+
+from pathlib import Path as _Path
+
+from app.api import webfeed as _webfeed
+from app.netsafety import SafeFetch as _SafeFetch
+from app.netsafety import SsrfBlocked as _SsrfBlocked
+
+_FIXTURES = _Path(__file__).parent / "fixtures"
+
+
+def _fake_fetch(body: bytes, content_type="text/html; charset=utf-8", status=200, final_url=None):
+    def fetch(url, **_kwargs):
+        return _SafeFetch(url=final_url or url, status=status, content_type=content_type, body=body)
+
+    return fetch
+
+
+def test_webfeed_preview_returns_ranked_candidates(client, monkeypatch):
+    monkeypatch.setattr(_webfeed, "safe_get", _fake_fetch((_FIXTURES / "webpage_blog_list.html").read_bytes()))
+
+    resp = client.post("/api/webfeed/preview", json={"url": "https://acme.example/blog"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["page_title"] == "Acme Engineering Blog"
+    top = data["candidates"][0]
+    assert top["count"] == 4
+    assert top["items"][0]["title"] == "Scaling Postgres to a billion rows"
+    assert top["items"][0]["url"] == "https://acme.example/blog/scaling-postgres-to-a-billion-rows"
+
+
+def test_webfeed_preview_adds_https_when_scheme_missing(client, monkeypatch):
+    seen = []
+
+    def fetch(url, **_kwargs):
+        seen.append(url)
+        return _SafeFetch(url=url, status=200, content_type="text/html", body=b"<html></html>")
+
+    monkeypatch.setattr(_webfeed, "safe_get", fetch)
+    client.post("/api/webfeed/preview", json={"url": "acme.example/blog"})
+    assert seen == ["https://acme.example/blog"]
+
+
+def test_webfeed_preview_with_custom_selector_puts_it_first(client, monkeypatch):
+    monkeypatch.setattr(_webfeed, "safe_get", _fake_fetch((_FIXTURES / "webpage_blog_list.html").read_bytes()))
+
+    resp = client.post(
+        "/api/webfeed/preview",
+        json={"url": "https://acme.example/blog", "selector": "aside a"},
+    )
+
+    first = resp.json()["candidates"][0]
+    assert first["selector"] == "aside a"
+    assert first["custom"] is True
+    assert first["count"] == 2
+
+
+def test_webfeed_preview_resolves_links_against_the_final_redirected_url(client, monkeypatch):
+    monkeypatch.setattr(
+        _webfeed,
+        "safe_get",
+        _fake_fetch((_FIXTURES / "webpage_blog_list.html").read_bytes(), final_url="https://www.acme.example/blog/"),
+    )
+    resp = client.post("/api/webfeed/preview", json={"url": "https://acme.example/blog"})
+    data = resp.json()
+    assert data["final_url"] == "https://www.acme.example/blog/"
+    assert data["candidates"][0]["items"][0]["url"].startswith("https://www.acme.example/")
+
+
+def test_webfeed_preview_reports_advertised_feeds(client, monkeypatch):
+    monkeypatch.setattr(_webfeed, "safe_get", _fake_fetch((_FIXTURES / "webpage_with_feed_link.html").read_bytes()))
+    resp = client.post("/api/webfeed/preview", json={"url": "https://hasafeed.example/"})
+    assert resp.json()["feed_links"][0] == "https://hasafeed.example/feed.xml"
+
+
+def test_webfeed_preview_recognizes_a_url_that_is_itself_a_feed(client, monkeypatch):
+    monkeypatch.setattr(
+        _webfeed, "safe_get", _fake_fetch((_FIXTURES / "rss2.xml").read_bytes(), content_type="application/rss+xml")
+    )
+    resp = client.post("/api/webfeed/preview", json={"url": "https://x.example/feed"})
+    assert resp.status_code == 200
+    assert resp.json()["feed_links"] == ["https://x.example/feed"]
+    assert resp.json()["candidates"] == []
+
+
+def test_webfeed_preview_blocks_private_addresses(client, monkeypatch):
+    def blocked(url, **_kwargs):
+        raise _SsrfBlocked("host resolves to a non-public address")
+
+    monkeypatch.setattr(_webfeed, "safe_get", blocked)
+    resp = client.post("/api/webfeed/preview", json={"url": "http://127.0.0.1:8000/"})
+    assert resp.status_code == 400
+
+
+def test_webfeed_preview_real_guard_rejects_loopback(client):
+    # No monkeypatch: the real safe_get must refuse before any connection.
+    resp = client.post("/api/webfeed/preview", json={"url": "http://127.0.0.1:9/"})
+    assert resp.status_code == 400
+
+
+def test_webfeed_preview_rejects_non_html(client, monkeypatch):
+    monkeypatch.setattr(_webfeed, "safe_get", _fake_fetch(b"%PDF-1.4", content_type="application/pdf"))
+    resp = client.post("/api/webfeed/preview", json={"url": "https://x.example/a.pdf"})
+    assert resp.status_code == 400
+
+
+def test_webfeed_preview_reports_upstream_http_errors(client, monkeypatch):
+    monkeypatch.setattr(_webfeed, "safe_get", _fake_fetch(b"denied", status=403))
+    resp = client.post("/api/webfeed/preview", json={"url": "https://x.example/"})
+    assert resp.status_code == 400
+    assert "403" in resp.json()["error"]
+
+
+def test_webfeed_preview_requires_url(client):
+    assert client.post("/api/webfeed/preview", json={}).status_code == 400
+
+
+def test_webfeed_preview_is_401_for_anonymous(anon_client):
+    client, _ = anon_client
+    resp = client.post("/api/webfeed/preview", json={"url": "https://acme.example/"})
+    assert resp.status_code == 401
+
+
+def test_add_web_source_via_structured_api(client):
+    resp = client.post(
+        "/api/sources",
+        json={
+            "key": "howard-marks-memos",
+            "type": "web",
+            "title": "Memos from Howard Marks",
+            "folder": "Investing",
+            "url": "https://www.oaktreecapital.com/insights/memos",
+            "item_selector": 'a.oc-title-link[href*="/insights/memo/"]',
+            "fetch_full_text": True,
+        },
+    )
+    assert resp.status_code == 201
+    source = client.app.state.config.source("howard-marks-memos")
+    assert source.type == "web"
+    assert source.item_selector == 'a.oc-title-link[href*="/insights/memo/"]'
+
+
+def test_editing_a_web_source_selector_clears_cached_validators(client):
+    client.post(
+        "/api/sources",
+        json={"key": "w", "type": "web", "title": "W", "folder": "F",
+              "url": "https://x.example/news", "item_selector": "li a"},
+    )
+    conn = client.app.state.get_conn()
+    conn.execute("UPDATE sources SET etag = 'e1', last_modified = 'lm1' WHERE key = 'w'")
+    conn.commit()
+    source_id = conn.execute("SELECT id FROM sources WHERE key = 'w'").fetchone()[0]
+
+    detail = client.get(f"/api/sources/{source_id}").json()
+    assert detail["item_selector"] == "li a"
+
+    resp = client.put(
+        f"/api/sources/{source_id}",
+        json={"title": "W", "folder": "F", "url": "https://x.example/news", "item_selector": "li.item a"},
+    )
+    assert resp.status_code == 200
+    row = conn.execute("SELECT etag, last_modified FROM sources WHERE id = ?", (source_id,)).fetchone()
+    assert tuple(row) == (None, None)

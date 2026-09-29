@@ -93,6 +93,7 @@ async def get_source(request: Request) -> JSONResponse:
             "url": cfg_source.url,
             "query": cfg_source.query,
             "mailbox_folder": cfg_source.mailbox_folder,
+            "item_selector": cfg_source.item_selector,
             "fetch_full_text": cfg_source.fetch_full_text,
             "rules": [
                 {"action": r.action, "field": r.field, "pattern": r.pattern}
@@ -157,6 +158,11 @@ async def update_source(request: Request) -> JSONResponse:
         "UPDATE sources SET title = ?, folder = ?, url = ? WHERE id = ?",
         (updated.title, updated.folder, updated.url, source_id),
     )
+    if updated.url != existing.url or updated.item_selector != existing.item_selector:
+        # Forget the cached validators, or the next refresh gets a 304 for
+        # the unchanged page and a fixed web-feed selector would sit unused
+        # until the site happens to publish something.
+        conn.execute("UPDATE sources SET etag = NULL, last_modified = NULL WHERE id = ?", (source_id,))
     conn.commit()
 
     # Rules may have changed — sweep articles that no longer pass, same as

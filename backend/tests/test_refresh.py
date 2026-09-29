@@ -2,6 +2,8 @@
 dedup -> persist, with a per-source report. Network is stubbed via a fake
 fetcher so these run with zero I/O.
 """
+from datetime import UTC, datetime
+from email.utils import format_datetime
 from pathlib import Path
 
 from app.config import Config, Rule, Source
@@ -192,7 +194,10 @@ def make_imap_message(message_id: str, subject: str, html: str = "<p>body</p>") 
     msg["Message-Id"] = f"<{message_id}@newsletter.example.com>"
     msg["Subject"] = subject
     msg["From"] = "Sender <sender@example.com>"
-    msg["Date"] = "Tue, 11 Aug 2026 05:30:24 +0000"
+    # Dated "now", not a fixed day: refresh drops IMAP mail older than the
+    # source's since-window (30 days on a first refresh), so a hard-coded
+    # date silently starts failing once the calendar moves past it.
+    msg["Date"] = format_datetime(datetime.now(UTC))
     msg.set_content(html, subtype="html")
     return bytes(msg)
 
@@ -735,7 +740,9 @@ def test_refresh_imap_sources_routes_by_from_query_locally(tmp_path):
         msg["Message-Id"] = f"<{mid}@newsletter.example.com>"
         msg["Subject"] = subject
         msg["From"] = sender
-        msg["Date"] = "Tue, 11 Aug 2026 05:30:24 +0000"
+        # Dated "now" (see make_imap_message): a fixed date ages out of the
+        # since-window.
+        msg["Date"] = format_datetime(datetime.now(UTC))
         msg.set_content("<p>body</p>", subtype="html")
         return bytes(msg)
 
@@ -811,3 +818,77 @@ def test_refresh_imap_sources_new_source_backfill_not_truncated_by_synced_siblin
     # Should reach back close to the 7-day cap for the new source, not be
     # truncated to ~1 day (synced's own since, after overlap subtraction).
     assert sinces_seen[0] < datetime.now(UTC) - timedelta(days=5)
+
+
+# --- type=web sources (scraped listing pages) ------------------------------
+
+def _web_source(**overrides):
+    fields = {
+        "key": "memos", "type": "web", "title": "Memos", "folder": "F",
+        "url": "https://www.oaktreecapital.com/insights/memos",
+        "item_selector": 'a.oc-title-link[href*="/insights/memo/"]',
+    }
+    fields.update(overrides)
+    return Source(**fields)
+
+
+def test_web_source_inserts_scraped_entries(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    fetcher = make_fetcher({"memos": (FIXTURES / "webpage_oaktree_memos.html").read_bytes()})
+
+    report = refresh_all(conn, [_web_source()], fetcher=fetcher)
+
+    assert report["sources"][0]["status"] == "ok"
+    assert report["sources"][0]["new"] == 12
+    row = conn.execute(
+        "SELECT title, url, published_at FROM articles ORDER BY published_at DESC LIMIT 1"
+    ).fetchone()
+    assert row[0] == "Shall We Repeal the Laws of Economics – Part III"
+    assert row[1].startswith("https://www.oaktreecapital.com/insights/memo/")
+    assert row[2] == "2026-09-22T07:00:00+00:00"
+
+
+def test_web_source_second_refresh_only_adds_genuinely_new_items(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    page = (FIXTURES / "webpage_oaktree_memos.html").read_bytes()
+    refresh_all(conn, [_web_source()], fetcher=make_fetcher({"memos": page}))
+
+    new_item = (
+        b'<div class="col-xl-3 col-lg-4 col-6 my-4">'
+        b'<time datetime=">2026-10-05T07:00:00.0000000Z">Oct 5, 2026</time>'
+        b'<a class="oc-title-link" href="/insights/memo/a-brand-new-memo">A Brand New Memo</a></div>'
+    )
+    updated = page.replace(b'<div class="col-xl-3 col-lg-4 col-6 my-4">', new_item + b'<div class="col-xl-3 col-lg-4 col-6 my-4">', 3)
+    # replace(..., 3) would inject three copies (compilations + years); that's
+    # fine — dedup must still collapse them to one new article.
+    report = refresh_all(conn, [_web_source()], fetcher=make_fetcher({"memos": updated}))
+
+    assert report["sources"][0]["new"] == 1
+    titles = [r[0] for r in conn.execute("SELECT title FROM articles WHERE title LIKE 'A Brand%'")]
+    assert titles == ["A Brand New Memo"]
+
+
+def test_web_source_without_selector_auto_detects(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = _web_source(key="blog", url="https://acme.example/blog", item_selector=None)
+    fetcher = make_fetcher({"blog": (FIXTURES / "webpage_blog_list.html").read_bytes()})
+
+    report = refresh_all(conn, [source], fetcher=fetcher)
+
+    assert report["sources"][0]["new"] == 4
+
+
+def test_web_source_whose_selector_matches_nothing_records_an_error(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = _web_source(item_selector="div.gone a")
+    fetcher = make_fetcher({"memos": (FIXTURES / "webpage_oaktree_memos.html").read_bytes()})
+
+    report = refresh_all(conn, [source], fetcher=fetcher)
+
+    assert report["sources"][0]["status"] == "error"
+    row = conn.execute("SELECT last_error FROM sources WHERE key='memos'").fetchone()
+    assert "matched no items" in row[0]

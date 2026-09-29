@@ -100,6 +100,38 @@ with a message rather than silently failing — see §4.6.
   stacked `<br>` runs, and long `&nbsp;` runs (both artifacts of HTML email
   templates, not article content) are collapsed at ingest time.
 
+### 4.2a Web pages without RSS — the web feed builder (2026-09-28)
+
+- Settings → Add source → **Web page** works like Inoreader's "Create Web
+  feeds". You paste a site URL and click **Load website**. The server fetches
+  the page and proposes the repeating groups of article links: the best match
+  first, then up to two alternatives, each with a preview of its items. You
+  can also type your own CSS selector. **Follow feed** saves a `type: web`
+  source whose `item_selector` is the chosen selector.
+- It is general, not tied to any one site. Links are grouped by *structural
+  signature* (their tag/class path), after nav/header/footer/sidebar chrome is
+  stripped. Two refinements keep saved selectors stable:
+  - When a group mixes article links with a minority of other links, it is
+    narrowed to the majority's path, e.g. `[href*="/insights/memo/"]`.
+    Numeric path segments such as years and months are never used.
+  - CSS-module build hashes are kept out of selectors.
+  - Dates come from a `<time>` anywhere in the item's card or row.
+- Each scrape takes the newest 30 items. The first refresh of a long archive
+  therefore doesn't flood Unread, and old archive items never trickle in
+  later. Dedup is the same as RSS, so only new links become new articles.
+  `fetch_full_text` defaults on, since a scrape only yields title and link.
+- A page that advertises an RSS/Atom feed (or is one) gets an "Add as RSS
+  feed" shortcut instead.
+- Static HTML only; there is no headless browser. A page that renders its
+  list with JavaScript yields nothing, and the builder suggests trying a
+  listing sub-page. Worked example: `oaktreecapital.com/insights` embeds its
+  memo list as JSON, while `/insights/memos` is plain HTML and works.
+- Refresh stays manual, like every other source.
+- Preview requires sign-in, because it makes the server fetch an arbitrary
+  URL. It is SSRF-guarded on every redirect hop.
+- A selector that stops matching records a source error rather than
+  refreshing to nothing silently.
+
 ### 4.3 On-demand article summarization
 
 - A **Summarize** button in the fullscreen reader, next to Star — for

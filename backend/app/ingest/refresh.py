@@ -23,10 +23,16 @@ from app.connectors import imap as imap_connector
 from app.connectors.base import NormalizedEntry
 from app.connectors.http_fetch import FetchResult, conditional_get
 from app.connectors.rss import FeedParseError, parse_feed
+from app.connectors.webpage import extract_candidates, extract_with_selector
 from app.ingest.dedup import canonicalize_url, content_hash
 from app.ingest.hydrate import hydrate_pending
 from app.ingest.rules import RawArticle, evaluate_rules
-from app.ingest.textutil import EXCERPT_LIMIT, plain_text_excerpt, proxy_image_urls, tighten_newsletter_whitespace
+from app.ingest.textutil import (
+    EXCERPT_LIMIT,
+    plain_text_excerpt,
+    proxy_image_urls,
+    tighten_newsletter_whitespace,
+)
 
 Fetcher = Callable[[Source, str | None, str | None], FetchResult]
 ImapSearchFn = Callable[..., list[str]]
@@ -192,7 +198,7 @@ def _persist_rss_result(
         return {"key": source.key, "status": "not_modified"}
 
     try:
-        entries = parse_feed(result.body)
+        entries = _parse_body(source, result.body)
     except FeedParseError as parse_exc:
         conn.execute(
             "UPDATE sources SET last_error = ?, last_error_at = ? WHERE id = ?",
@@ -227,6 +233,24 @@ def _persist_rss_result(
         "new": new_count,
         "filtered": filtered_count,
     }
+
+
+def _parse_body(source: Source, body: bytes) -> list[NormalizedEntry]:
+    """rss: the feed document. web: a scraped listing page — the source's
+    saved item_selector, or the best auto-detected link group when it has
+    none. A web page that yields nothing is an error (layout changed,
+    selector stale), not a quiet empty refresh, so it shows on the source."""
+    if source.type != "web":
+        return parse_feed(body)
+    if source.item_selector:
+        entries = extract_with_selector(body, source.url, source.item_selector)
+        if not entries:
+            raise FeedParseError(f"selector {source.item_selector!r} matched no items on the page")
+        return entries
+    candidates = extract_candidates(body, source.url, limit=1)
+    if not candidates:
+        raise FeedParseError("auto-detect matched no items on the page — set item_selector")
+    return candidates[0].entries
 
 
 def _refresh_rss_batch(conn: sqlite3.Connection, sources: list[Source], fetcher: Fetcher) -> dict[str, dict]:
@@ -502,7 +526,9 @@ def refresh_all(
     # Results are keyed by source key so the final report list matches
     # `to_refresh`'s original order regardless of how source types are
     # interleaved in config.
-    rss_sources = [s for s in to_refresh if s.type == "rss"]
+    # type=web sources are plain HTTP pages, so they ride the same
+    # concurrent conditional-GET batch; only parsing differs (_parse_body).
+    rss_sources = [s for s in to_refresh if s.type in ("rss", "web")]
     rss_reports = _refresh_rss_batch(conn, rss_sources, fetcher) if rss_sources else {}
 
     imap_sources = [s for s in to_refresh if s.type == "imap"]

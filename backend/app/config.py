@@ -13,7 +13,7 @@ import yaml
 
 RuleAction = Literal["include", "exclude"]
 RuleField = Literal["title", "summary", "content", "author", "url", "any"]
-SourceType = Literal["rss", "imap"]
+SourceType = Literal["rss", "imap", "web"]
 
 # feeds.yaml is served verbatim, unauthenticated, by GET /api/config — so a
 # credential ever written into it would be published at that URL. msgspec
@@ -51,6 +51,10 @@ class Source(msgspec.Struct, frozen=True, kw_only=True):
     query: str | None = None
     mailbox_folder: str | None = None  # type=imap only; IMAP mailbox to SEARCH (default INBOX).
     # Distinct from `folder` above, which is a UI grouping label, not a mailbox.
+    # type=web only: CSS selector picking the page's article links (or item
+    # containers). None means auto-detect on every refresh — see
+    # connectors/webpage.py; the web feed builder UI always saves one.
+    item_selector: str | None = None
     poll_interval_minutes: int | None = None
     fetch_full_text: bool = False
     rules: list[Rule] = msgspec.field(default_factory=list)
@@ -93,6 +97,8 @@ def validate_config(config: Config) -> None:
         seen_keys.add(source.key)
         if source.type == "rss" and not source.url:
             raise ConfigError(f"source '{source.key}': type=rss requires 'url'")
+        if source.type == "web" and not source.url:
+            raise ConfigError(f"source '{source.key}': type=web requires 'url'")
         # type=imap has no required field: an absent query means "everything
         # in the mailbox folder", which is a reasonable default for a
         # dedicated newsletter-only account.
