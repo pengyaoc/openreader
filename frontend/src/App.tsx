@@ -445,7 +445,10 @@ export default function App() {
 
   const openArticleIndex = articles.findIndex((a) => a.id === openArticleId)
   const hasPrev = openArticleIndex > 0
-  const hasNext = openArticleIndex !== -1 && openArticleIndex < articles.length - 1
+  const hasLoadedNext = openArticleIndex !== -1 && openArticleIndex < articles.length - 1
+  // Past the last loaded article, Next (and the swipe) carries on into the
+  // list's next page rather than stopping at whatever happened to load.
+  const hasNext = hasLoadedNext || (openArticleIndex !== -1 && articlesQuery.hasNextPage)
 
   // Prefetch the articles on either side once the open one has loaded, so
   // Next/Previous (and ←/→) render from cache instead of showing the
@@ -453,7 +456,7 @@ export default function App() {
   // the prefetches from competing with it on a slow connection. Fetching an
   // article doesn't mark it read — only openArticle does that.
   const prevArticleId = hasPrev ? articles[openArticleIndex - 1].id : null
-  const nextArticleId = hasNext ? articles[openArticleIndex + 1].id : null
+  const nextArticleId = hasLoadedNext ? articles[openArticleIndex + 1].id : null
   const openArticleLoaded = openArticleQuery.isSuccess
   useEffect(() => {
     if (!openArticleLoaded) return
@@ -471,7 +474,26 @@ export default function App() {
     [articles, openArticleIndex, openArticle],
   )
   const goPrev = useCallback(() => goToOffset(-1), [goToOffset])
-  const goNext = useCallback(() => goToOffset(1), [goToOffset])
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = articlesQuery
+  // So a page that lands after the reader was closed or moved on doesn't
+  // yank it back to where Next was pressed.
+  const openArticleIdRef = useRef(openArticleId)
+  openArticleIdRef.current = openArticleId
+  const goNext = useCallback(() => {
+    if (hasLoadedNext || !hasNextPage) {
+      goToOffset(1)
+      return
+    }
+    if (isFetchingNextPage) return
+    const fromId = openArticleId
+    void fetchNextPage().then((res) => {
+      if (openArticleIdRef.current !== fromId) return
+      const list = res.data?.pages.flat() ?? []
+      const idx = list.findIndex((a) => a.id === fromId)
+      const next = idx === -1 ? undefined : list[idx + 1]
+      if (next) openArticle(next)
+    })
+  }, [hasLoadedNext, hasNextPage, isFetchingNextPage, fetchNextPage, goToOffset, openArticleId, openArticle])
 
   // keyboard: j/k move, o/Enter open, Esc close (handled in reader), m toggle, r refresh
   useEffect(() => {
@@ -662,6 +684,8 @@ export default function App() {
           onNext={goNext}
           hasPrev={hasPrev}
           hasNext={hasNext}
+          prevItem={hasPrev ? articles[openArticleIndex - 1] : null}
+          nextItem={hasLoadedNext ? articles[openArticleIndex + 1] : null}
         />
       )}
 

@@ -2992,3 +2992,38 @@ would be more RAM or moving WordPress/MySQL off it.
 312 backend tests pass (301 → 312: migration incl. idempotence and FK survival, refresh/IMAP
 overlap timing, `hydrate=False`, background single-flight/queueing, gzip, cache headers, and
 refresh hand-off). Not deployed.
+
+## 2026-10-18 — Summra-style article navigation (margins, swipe, trackpad)
+
+Adapted Summra's page-turn controls (`summra/frontend/static/js/pagination.js`) to move between
+articles instead of pages. Same swipe direction as Summra: finger right-to-left = next.
+
+- **Desktop margin strips** (`ArticleReader.tsx`, `index.css`): full-height 64px ‹ › strips
+  8px outside the 760px column, opacity 0.35 → 1 on hover/focus. Mouse only, and only at
+  ≥920px so they never cover text. Side without a neighbor isn't rendered.
+- **Mobile swipe** (`useSwipeNav.ts`): Summra's state machine — 10px axis lock, turn past 25% of
+  width or on a flick (>30px at >0.5px/ms), 200ms snap-back, ⅓ resistance with no neighbor.
+  Instead of rendering the neighbor article (its top beside the middle of the current one), the
+  track carries a peek card per side (source/title/date from the loaded list). On turn the new
+  article settles in from that side in a layout effect, so no flash.
+  - Ignored: multi-touch, active text selection, touches starting within 20px of the left edge
+    (iOS back gesture), and touches inside a horizontally scrolling element (code blocks, tables).
+  - `.reader-scroll` gets `touch-action: pan-y pinch-zoom`.
+- **Trackpad**: sideways two-finger swipe turns once its travel passes 80px, then ignores that
+  gesture's momentum until 300ms of quiet. `overscroll-behavior-x: none` while the reader is open
+  so it doesn't trigger browser back/forward.
+- **Past the last loaded article** (`App.tsx`): Next fetches the list's next page and opens the
+  following article (guarded so a late page doesn't reopen a closed reader).
+- **One-time hint**: pill plus a nudge on touch; `localStorage` keys `reader_nav_hint_touch` /
+  `reader_nav_hint_desktop`. Reduced motion disables the nudge and slides.
+
+Verified in Playwright (desktop 1280px; 390px touch context via CDP touch events): margin
+clicks, ←/→, one trackpad swipe = one article, vertical scroll unaffected; short drag snaps back,
+long drag and flick turn both ways, vertical drag and left-edge drag don't turn, swipe on a
+wide `<pre>` doesn't turn; Next from article 50 of "All" loaded page 2 and opened article 51.
+Not tested on a physical iPhone.
+
+Deployed 2026-10-18 with `scripts/deploy.sh` (this also shipped the 2026-10-17 performance pass,
+including its one-time table-rebuild migration). The verify curl right after restart got 503 while
+the service was still starting; 200 within 10s after, startup logs clean, live bundle matches the
+local build.

@@ -888,6 +888,188 @@ kbd {
   overflow-x: hidden;
 }
 
+/* -------------------- article-to-article navigation --------------------
+   Modelled on Summra's page turns. The stage holds the margin strips (which
+   stay put) and the track, which slides as a whole under a swipe — the
+   article plus a peek card for each neighbor, one stage-width either side
+   (see useSwipeNav.ts). The stage clips them, so they only show mid-swipe. */
+
+.reader-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.reader-track {
+  position: relative;
+  height: 100%;
+}
+
+.reader-track.is-swiping {
+  will-change: transform;
+}
+
+.reader-track > .reader-scroll {
+  height: 100%;
+  /* The browser keeps vertical scroll (and pinch zoom); horizontal drags
+     are left to the swipe handler. */
+  touch-action: pan-y pinch-zoom;
+  overscroll-behavior-x: none;
+}
+
+/* Keep a sideways trackpad swipe from becoming browser back/forward. */
+html:has(.reader-overlay) {
+  overscroll-behavior-x: none;
+}
+
+.reader-peek {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+.reader-peek--next {
+  left: 100%;
+}
+.reader-peek--prev {
+  right: 100%;
+}
+
+.reader-peek__inner {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+.reader-peek__label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--amber);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 14px;
+}
+
+.reader-peek__source {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 10px;
+}
+
+.reader-peek__title {
+  font-family: var(--font-read);
+  font-weight: 600;
+  font-size: 26px;
+  line-height: 1.25;
+  color: var(--ink);
+}
+.reader-peek__title--loading {
+  color: var(--ink-faint);
+}
+
+.reader-peek__date {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--ink-faint);
+}
+
+/* Margin strips: mouse only, and only when the window leaves room for them
+   beside the 760px column (64px strip + 8px gap each side), so they never
+   cover text. Touch uses the swipe; screen readers have the footer nav. */
+.reader-margin-nav {
+  display: none;
+}
+
+@media (hover: hover) and (pointer: fine) and (min-width: 920px) {
+  .reader-margin-nav {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 2;
+    width: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink);
+    font-size: 36px;
+    font-weight: 300;
+    cursor: pointer;
+    opacity: 0.35;
+    transition: opacity 0.15s ease, background-color 0.15s ease;
+  }
+  .reader-margin-nav:hover,
+  .reader-margin-nav:focus-visible {
+    opacity: 1;
+    background-color: var(--bg-hover);
+  }
+  .reader-margin-nav--prev {
+    left: calc(50% - 380px - 72px);
+  }
+  .reader-margin-nav--next {
+    right: calc(50% - 380px - 72px);
+  }
+}
+
+/* One-time navigation hint (see usePageTurnHint in ArticleReader). */
+.page-turn-hint {
+  position: fixed;
+  left: 50%;
+  bottom: calc(40px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: calc(100% - 32px);
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--bg-overlay);
+  font-size: 13.5px;
+  text-align: center;
+  pointer-events: none;
+  animation: page-turn-hint-in 0.3s ease-out;
+}
+
+@keyframes page-turn-hint-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+}
+
+/* Touch: the article slides a little and back, twice, to show it swipes. */
+.reader-track.hint-nudge {
+  animation: page-turn-hint-nudge 1.4s ease-in-out 0.4s 2;
+}
+
+@keyframes page-turn-hint-nudge {
+  0%,
+  60%,
+  100% {
+    transform: translateX(0);
+  }
+  30% {
+    transform: translateX(-32px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-track.hint-nudge,
+  .page-turn-hint {
+    animation: none;
+  }
+}
+
 .reader-article {
   max-width: 760px;
   margin: 0 auto;
@@ -1841,6 +2023,14 @@ kbd {
        safe-area bottom padding here just eats into the reading area for
        no visual benefit. */
     padding: 28px 20px 80px;
+  }
+
+  .reader-peek__inner {
+    padding: 0 20px;
+  }
+
+  .reader-peek__title {
+    font-size: 22px;
   }
 
   .settings-pane,
