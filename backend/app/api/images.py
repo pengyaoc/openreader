@@ -31,6 +31,25 @@ _TIMEOUT = 8.0
 _MAX_REDIRECTS = 3
 
 
+_client: httpx.AsyncClient | None = None
+_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _shared_client() -> httpx.AsyncClient:
+    """One pooled client for the process, instead of a fresh one per image:
+    an article's images usually come from one or two CDNs, and a new client
+    per request paid a full TCP+TLS handshake to the same host for every
+    image. Keyed to the running loop because an AsyncClient's connections
+    belong to the loop that opened them (uvicorn has one; the test client
+    may start several)."""
+    global _client, _client_loop
+    loop = asyncio.get_running_loop()
+    if _client is None or _client_loop is not loop:
+        _client = httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT)
+        _client_loop = loop
+    return _client
+
+
 def referer_for(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}/"
@@ -73,24 +92,24 @@ async def proxy_image(request: Request) -> Response:
     # same public-address check as the original URL, or a private/loopback
     # SSRF becomes reachable via a 302 from an otherwise-public host.
     try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=_TIMEOUT) as client:
-            current_url = url
-            headers = {"User-Agent": USER_AGENT, "Referer": referer_for(current_url)}
-            for _ in range(_MAX_REDIRECTS):
-                resp = await client.get(current_url, headers=headers)
-                if resp.status_code not in (301, 302, 303, 307, 308):
-                    break
-                location = resp.headers.get("Location")
-                if not location:
-                    return Response(status_code=502)
-                current_url = urljoin(current_url, location)
-                try:
-                    await asyncio.to_thread(_assert_safe_url, current_url)
-                except SsrfBlocked:
-                    return Response(status_code=400)
-                headers["Referer"] = referer_for(current_url)
-            else:
-                return Response(status_code=502)  # too many redirects
+        client = _shared_client()
+        current_url = url
+        headers = {"User-Agent": USER_AGENT, "Referer": referer_for(current_url)}
+        for _ in range(_MAX_REDIRECTS):
+            resp = await client.get(current_url, headers=headers)
+            if resp.status_code not in (301, 302, 303, 307, 308):
+                break
+            location = resp.headers.get("Location")
+            if not location:
+                return Response(status_code=502)
+            current_url = urljoin(current_url, location)
+            try:
+                await asyncio.to_thread(_assert_safe_url, current_url)
+            except SsrfBlocked:
+                return Response(status_code=400)
+            headers["Referer"] = referer_for(current_url)
+        else:
+            return Response(status_code=502)  # too many redirects
     except httpx.HTTPError:
         return Response(status_code=502)
 

@@ -2912,3 +2912,83 @@ via `get_or_create_source`, so it never touches existing rows' ETags or state). 
 production startup (`build_production_app`) and on `PUT /api/config`. Tests cover creation with no
 refresh, idempotence, and the config-save path (301 backend tests pass); a scratch-DB boot confirmed
 `GET /api/sources` lists the source with 0 articles before any refresh.
+
+## 2026-10-17 — Performance pass: article loading, feed loading, refresh
+
+Request: *"article loading, feed loading and feed refresh is slow. Benchmark and improve
+performance."*
+
+**Measured first.** A scratch benchmark (not committed) built a 5k-article DB (~14KB bodies, two
+users, 70% read), timed every read endpoint through a real uvicorn, and timed `POST /api/refresh`
+against a local fake origin with 250ms per-response latency (12 feeds × 30 items, 4 with
+`fetch_full_text`). Production was sampled read-only with `curl` and the VM's `TIMING` log lines.
+
+- Server-side reads were already fast locally (2–5ms), so slow loads were not query CPU.
+- Production sent API JSON **uncompressed**: Apache gzips the static frontend but not
+  `application/json`. A 50-row article page was 88KB on the wire; ~12KB gzipped.
+- Hashed JS/CSS had **no Cache-Control**, so every cold open revalidated each file first.
+- Production server time for the same tiny query swung from 2ms to 1.6s. The `TIMING` log's
+  `majflt_delta` matched it exactly (466 major faults on the 1.6s request, 0 on 2ms ones), and
+  `free -m` showed 400MB in swap with 93MB free. This confirms 2026-09-03's hypothesis: the idle
+  worker gets swapped out on the 1GB box, and the next request faults it back in from disk.
+- List queries read each row's **body overflow pages** anyway. `content_html` sat mid-row
+  (ADD COLUMN can only append), so reaching `hydrated_at`/`origin`/… meant walking the body's
+  overflow chain. SQLite CLI `.stats`: selecting `hydrated_at` for 50 rows cost 182 page reads
+  vs 32 without it. On a box whose page cache is under constant pressure, those are disk reads.
+- Startup `fetchall()`'d every hydrated body (`_backfill_hydrated_excerpts`), holding tens of MB
+  in memory at once on that same swapping box.
+- Refresh: 5.24s, of which **4.65s was full-text hydration** blocking the response. RSS fetch at
+  6 workers ran a 9-feed config as two waves, and IMAP waited for the whole RSS batch.
+- Opening the next article always paid a full round trip (skeleton flash).
+
+**Changes.**
+
+- `main.py`: `GZipMiddleware` (level 6, ≥1KB; images excluded by Starlette's defaults).
+  `FrontendStaticFiles` marks `assets/*` `immutable` for a year and everything else `no-cache`.
+- `db.py`: `articles` now ends with `content_html, llm_summary_html`. `_move_bodies_to_row_end`
+  is a 12-step rebuild (foreign keys off so `article_states` doesn't cascade), detected from
+  column order, idempotent. `store.list_articles`' `has_summary` reads `llm_summary_at`.
+  The excerpt backfill iterates its cursor instead of `fetchall()`.
+- `refresh.py`: RSS pool 6 → 16, and the RSS fetches are submitted before the IMAP pass and
+  persisted after it, so the two network phases overlap. All writes stay on one thread.
+  `refresh_all(hydrate=False)` skips the hydration tail.
+- `hydrate.py`: batch uses one pooled `httpx.Client`; workers 6 → 10. New
+  `hydrate_in_background` is a single-flight daemon thread (a refresh mid-batch queues one more
+  pass). `POST /api/refresh` responds once articles are stored and hands hydration to it. It's
+  still only started by a refresh someone asked for. An article opened before its batch reaches
+  it falls back to the lazy on-open fetch, as before batch hydration existed.
+- `api/articles.py`: `GET /api/articles/:id` skips the worker-thread hop and its fresh
+  connection when the article is already hydrated or failed (the common case).
+- `api/images.py`: one pooled `AsyncClient` per event loop instead of one per image, so an
+  article's images from one CDN share a TLS connection.
+- `App.tsx`: after the open article loads, prefetch its previous/next neighbors through a shared
+  `articleQueryOptions`, so Next/←/→ render from cache.
+
+**Results** (same benchmark, before → after):
+
+| | Before | After |
+|---|---|---|
+| `/api/articles` page on the wire | 72KB | 10KB |
+| Unread page, page reads (SQLite `.stats`) | 245 | 95 |
+| All items page, page reads | 184 | 34 |
+| `POST /api/refresh` response | 5.24s | 0.32s |
+| Refresh → hydration finished | 5.24s | 3.03s |
+| Next article (browser, local) | full fetch + skeleton | from cache, no request |
+
+Against the real configured feeds locally, refresh now tracks the slowest single feed (xilei,
+2.3–3.4s across runs). Parse+persist for all 9 feeds is ~70ms. Verified in the browser on a copy
+of the dev DB: the migration applied, assets come back `immutable`, the API is gzipped, and →
+from an open article issued no request for the article it showed.
+
+Benchmark caveat found along the way: after `ANALYZE`, SQLite (3.43 CLI and 3.53 in Python)
+switches the list query to scanning `sources` first plus a temp B-tree sort. The app never runs
+`ANALYZE`, and without stats the plan walks `idx_articles_pub` and stops at the LIMIT. If
+`ANALYZE`/`PRAGMA optimize` is ever added, re-check that plan.
+
+Not fixed (infrastructure, not app code): the swap-induced cold-request latency itself. The app
+changes reduce how much each request has to fault in, but the box is memory-starved. Real fixes
+would be more RAM or moving WordPress/MySQL off it.
+
+312 backend tests pass (301 → 312: migration incl. idempotence and FK survival, refresh/IMAP
+overlap timing, `hydrate=False`, background single-flight/queueing, gzip, cache headers, and
+refresh hand-off). Not deployed.

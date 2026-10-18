@@ -352,3 +352,87 @@ def test_init_schema_creates_read_path_indexes(tmp_path):
         "idx_articles_starred",
         "idx_articles_src_unread",
     }
+
+
+# The articles layout every database had before 2026-10-17: the two body
+# columns in the middle of the row, where ADD COLUMN had left them.
+_PRE_2026_10_17_SCHEMA = """
+    CREATE TABLE sources (id INTEGER PRIMARY KEY, key TEXT UNIQUE NOT NULL,
+        type TEXT NOT NULL, title TEXT NOT NULL, folder TEXT NOT NULL, url TEXT,
+        config_json TEXT, etag TEXT, last_modified TEXT, last_fetched_at TEXT,
+        last_error TEXT, last_error_at TEXT);
+    CREATE TABLE articles (
+        id INTEGER PRIMARY KEY,
+        source_id INTEGER NOT NULL REFERENCES sources(id),
+        guid TEXT NOT NULL, url TEXT NOT NULL, canonical_url TEXT,
+        title TEXT NOT NULL, author TEXT, published_at TEXT, fetched_at TEXT,
+        excerpt TEXT, content_html TEXT, top_image_path TEXT, content_hash TEXT,
+        matched_rule TEXT, origin TEXT NOT NULL DEFAULT 'feed',
+        hydrated_at TEXT, hydrate_failed_at TEXT,
+        llm_summary_html TEXT, llm_summary_at TEXT,
+        UNIQUE(source_id, guid));
+    CREATE TABLE users (id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        password_hash TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+        password_changed_at TEXT);
+    CREATE TABLE article_states (
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+        is_read INTEGER NOT NULL DEFAULT 0, read_at TEXT,
+        is_starred INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, article_id)) WITHOUT ROWID;
+    INSERT INTO sources (id, key, type, title, folder) VALUES (1, 's1', 'rss', 'S1', 'F');
+    INSERT INTO users (id, username, created_at) VALUES (1, 'alice', 'x');
+    INSERT INTO articles (id, source_id, guid, url, title, excerpt, content_html,
+                          hydrated_at, llm_summary_html, llm_summary_at)
+        VALUES (7, 1, 'g7', 'https://x/7', 'Seven', 'sub', '<p>body</p>',
+                '2026-10-01', '<p>sum</p>', '2026-10-02');
+    INSERT INTO article_states (user_id, article_id, is_read, is_starred) VALUES (1, 7, 1, 1);
+"""
+
+
+def _article_columns(conn):
+    return [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
+
+
+def test_init_schema_moves_article_bodies_to_the_end_of_the_row(tmp_path):
+    # The list query never selects content_html, but with it mid-row SQLite
+    # had to walk its overflow pages to reach every column stored after it.
+    conn = connect(tmp_path / "reader.db")
+    conn.executescript(_PRE_2026_10_17_SCHEMA)
+
+    init_schema(conn)
+
+    assert _article_columns(conn)[-2:] == ["content_html", "llm_summary_html"]
+    row = conn.execute(
+        """SELECT id, title, excerpt, content_html, hydrated_at, llm_summary_html, llm_summary_at
+           FROM articles"""
+    ).fetchone()
+    assert row == (7, "Seven", "body", "<p>body</p>", "2026-10-01", "<p>sum</p>", "2026-10-02")
+    # Per-user state survives: the rebuild drops the old table with
+    # foreign keys off, so ON DELETE CASCADE must not have fired.
+    assert conn.execute("SELECT is_read, is_starred FROM article_states").fetchone() == (1, 1)
+    indexes = {r[1] for r in conn.execute("PRAGMA index_list(articles)").fetchall()}
+    assert {"idx_articles_pub", "idx_articles_source_pub", "idx_articles_content_hash"} <= indexes
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_article_body_move_is_idempotent_and_keeps_foreign_keys_working(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    conn.executescript(_PRE_2026_10_17_SCHEMA)
+    init_schema(conn)
+    first = _article_columns(conn)
+
+    init_schema(conn)
+
+    assert _article_columns(conn) == first
+    # article_states' reference still resolves to the rebuilt table.
+    conn.execute("DELETE FROM articles WHERE id = 7")
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM article_states").fetchone()[0] == 0
+
+
+def test_fresh_schema_already_has_article_bodies_last(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    assert _article_columns(conn)[-2:] == ["content_html", "llm_summary_html"]

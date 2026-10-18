@@ -146,14 +146,14 @@ erDiagram
         text published_at "canonical UTC ISO-8601, see connectors/dates.py"
         text fetched_at
         text excerpt "boilerplate-filtered, ~900 chars"
-        text content_html "sanitized, images rewritten through /api/img"
         text content_hash "sha256(canonical_url + normalized title)"
         text matched_rule "which include/exclude rule let this through"
         text origin "feed | email"
         text hydrated_at "lazy full-text fetch completed"
         text hydrate_failed_at "lazy full-text fetch failed (suppresses retry)"
-        text llm_summary_html "sanitized; cached forever once generated"
         text llm_summary_at
+        text content_html "sanitized, images rewritten through /api/img; LAST by design"
+        text llm_summary_html "sanitized; cached forever once generated; LAST by design"
     }
 
     users {
@@ -270,7 +270,7 @@ request never reaches a handler at all — the middleware 401s it first.
 | `POST /api/articles/:id/summarize` | On-demand summary via `claude -p` (sonnet, hardcoded); cached forever once generated — returns the cached value with no subprocess call on repeat requests; 404 if `llm.enabled=false` | Runs off the event loop (`asyncio.to_thread`, §5) — a single call is ~5-20s |
 | `POST /api/articles/:id/hydrate` | On-demand full-text pull — reuses the same `hydrate_article()` as the passive path (§4.4), forcing `fetch_full_text=True` regardless of source config; one-shot like the passive path (short-circuits on an existing `hydrated_at`/`hydrate_failed_at`) | Runs off the event loop (`asyncio.to_thread`, §5) |
 | `GET /api/llm-status` | `{"enabled": bool}` — lets the frontend hide the Summarize button entirely rather than showing one that would just 404 | No |
-| `POST /api/refresh` | Refresh (`?source=key` for one); RSS fetches concurrently (bounded pool), IMAP sequentially over one shared connection (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests, but is still the slowest single call in the app (~2-5s typical) |
+| `POST /api/refresh` | Refresh (`?source=key` for one); RSS fetches concurrently (bounded pool), overlapped with IMAP running sequentially over one shared connection (§5). Responds once new articles are stored; full-text hydration continues on a background thread (§5) | Runs off the event loop (`asyncio.to_thread`, §5) — doesn't block other requests; bounded by the slowest single feed (~2-4s typical) |
 | `GET/PUT /api/config` | Read/write `feeds.yaml` (validates on write); `PUT` also runs `reconcile_read_state` (§5) before responding | No |
 | `POST /api/webfeed/preview` | Web feed builder: fetch a pasted URL (SSRF-checked each hop, 3 MB cap), return `{final_url, page_title, feed_links, candidates:[{selector, custom, count, items}]}`. Signed-in only (401 anonymous); writes nothing — following is `POST /api/sources` with `type: web` + `item_selector` | Runs off the event loop (`asyncio.to_thread`) |
 | `GET /api/img` | Image proxy (strips Referer, sidesteps hotlink protection) | SSRF-check DNS lookup runs off the event loop (`asyncio.to_thread`, §5); the actual fetch is async `httpx` |
@@ -296,7 +296,10 @@ via `asyncio.to_thread` from the API layer (own SQLite connection, same
 pattern as the SSRF-guard and hydration fixes above) — proven live to
 matter, not assumed: a request fired 0.3s into a refresh, before that fix,
 sat blocked for the remaining 8.4s before uvicorn's single event loop
-could serve anything else.
+could serve anything else. Since 2026-10-17 the RSS pool is 16 wide (one
+wave for a typical config instead of two at 6), and its fetches are
+submitted *before* the IMAP pass and persisted after it, so the two
+network phases overlap while every write still happens on one thread.
 
 IMAP briefly went through the same per-source-concurrent shape RSS uses
 (`_refresh_imap_batch`, one connection per source via a `connect_fn`
@@ -327,6 +330,28 @@ already-hydrated row instead of fetching live. `GET /api/articles/:id`
 keeps its own on-open call as the fallback for anything `hydrate_pending`
 hasn't gotten to yet (batch limit, or a source not covered by the
 triggering refresh). See docs/WORKLOG.md, 2026-08-14 (cont.).
+
+Since 2026-10-17, `POST /api/refresh` calls `refresh_all(hydrate=False)`
+and hands the batch to `hydrate_in_background`: a single-flight daemon
+thread (a refresh arriving mid-batch queues one more pass instead of
+starting a second batch), 10 workers sharing one pooled `httpx.Client`.
+Hydration was ~90% of a refresh's wall time in the benchmark. It is still
+only ever started by a refresh someone asked for, never by a timer, and
+it writes only at the end, so a restart mid-batch loses nothing. Direct
+`refresh_all()` callers (tests, tooling) keep the old inline behavior.
+
+**`articles.content_html`/`llm_summary_html` are the last columns, on
+purpose.** A row with a tens-of-KB body spills into an overflow-page
+chain, and SQLite can only reach a column stored after the body by
+walking that chain. ADD COLUMN had left the bodies mid-row, so every list
+query (which never selects them) paid for them anyway: on a 5k-article
+copy, an Unread page read 245 pages, now 95; All items 184, now 34.
+`db._move_bodies_to_row_end` rebuilds the table on startup whenever the
+bodies aren't last, so a later ADD COLUMN (which appends after them) is
+moved ahead of them on the following start. That rebuild copies into the
+`SCHEMA` definition, so a new column must be declared there too, ahead of
+the two bodies, or startup fails loudly rather than dropping it.
+`has_summary` reads `llm_summary_at` for the same reason.
 
 **Image proxy (`/api/img`) is mandatory, not optional.** Several real
 feeds (dapenti.com/xilei, discovered mid-build) hotlink-protect their

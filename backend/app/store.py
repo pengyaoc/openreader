@@ -172,9 +172,12 @@ def list_articles(
     else:
         state_join = _STATE_JOIN
 
+    # has_summary tests llm_summary_at, not llm_summary_html: save_summary
+    # always sets both, and the body columns sit at the end of the row
+    # behind content_html's overflow chain (see db.py's SCHEMA comment).
     query = f"""
         SELECT {cols}, {_STATE_SELECT},
-               (a.llm_summary_html IS NOT NULL) AS has_summary, s.title AS source_title
+               (a.llm_summary_at IS NOT NULL) AS has_summary, s.title AS source_title
         FROM articles a
         JOIN sources s ON s.id = a.source_id
         {state_join}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,6 +45,13 @@ CREATE TABLE IF NOT EXISTS sources (
     last_error_at TEXT
 );
 
+-- content_html and llm_summary_html are deliberately the LAST columns. A
+-- row whose body is tens of KB spills into a chain of overflow pages, and
+-- SQLite can only reach a column stored after the body by walking that
+-- whole chain. With the bodies last, the list query (which never selects
+-- them) reads just the row's first page. See _move_bodies_to_row_end:
+-- declare any new column here, ahead of these two, even when an
+-- _add_column_if_missing call adds it to existing databases.
 CREATE TABLE IF NOT EXISTS articles (
     id INTEGER PRIMARY KEY,
     source_id INTEGER NOT NULL REFERENCES sources(id),
@@ -55,15 +63,15 @@ CREATE TABLE IF NOT EXISTS articles (
     published_at TEXT,
     fetched_at TEXT,
     excerpt TEXT,
-    content_html TEXT,
     top_image_path TEXT,
     content_hash TEXT,
     matched_rule TEXT,
     origin TEXT NOT NULL DEFAULT 'feed',
     hydrated_at TEXT,
     hydrate_failed_at TEXT,
-    llm_summary_html TEXT,
     llm_summary_at TEXT,
+    content_html TEXT,
+    llm_summary_html TEXT,
     UNIQUE(source_id, guid)
 );
 
@@ -158,6 +166,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # anything can be backfilled onto it.
     ensure_default_user(conn)
     _migrate_per_user_state(conn)
+    _move_bodies_to_row_end(conn)
     _backfill_decoded_entities(conn)
     _backfill_hydrated_excerpts(conn)
 
@@ -266,6 +275,53 @@ def _migrate_per_user_state(conn: sqlite3.Connection, owner_user_id: int = DEFAU
     conn.commit()
 
 
+_BODY_COLUMNS = ("content_html", "llm_summary_html")
+
+
+def _move_bodies_to_row_end(conn: sqlite3.Connection) -> None:
+    """Rebuilds `articles` so content_html/llm_summary_html are its last
+    columns (2026-10-17, see docs/WORKLOG.md). Older databases have them in
+    the middle of the row, because ADD COLUMN can only append: every list
+    query then walked each row's body overflow chain to reach hydrated_at,
+    origin and the rest. Measured on a 5k-article copy with ~14KB bodies: a
+    50-row Unread page went from 245 page reads to 95. On the
+    production VM, where the page cache is under constant pressure, each of
+    those reads can be a disk read.
+
+    "Already done" is detected from the column order itself, the same
+    no-version-table approach as the helpers below. SQLite can't reorder
+    columns in place, so this is its documented 12-step table rebuild.
+    foreign_keys must be off for it, or dropping the old table would cascade
+    into article_states."""
+    columns = [r[1] for r in conn.execute("PRAGMA table_info(articles)").fetchall()]
+    if not set(_BODY_COLUMNS) <= set(columns) or tuple(columns[-2:]) == _BODY_COLUMNS:
+        return
+
+    create_articles = re.search(r"CREATE TABLE IF NOT EXISTS articles \(.*?\n\);", SCHEMA, re.S).group(0)
+    article_indexes = re.findall(r"CREATE INDEX IF NOT EXISTS \w+ ON articles\(.*?\);", SCHEMA)
+    target = [c for c in columns if c not in _BODY_COLUMNS] + list(_BODY_COLUMNS)
+    column_list = ", ".join(target)
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(create_articles.replace("articles (", "articles_new (", 1))
+        conn.execute(f"INSERT INTO articles_new ({column_list}) SELECT {column_list} FROM articles")
+        conn.execute("DROP TABLE articles")
+        conn.execute("ALTER TABLE articles_new RENAME TO articles")
+        for ddl in article_indexes:
+            conn.execute(ddl)
+        if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise sqlite3.IntegrityError("foreign key violation after articles rebuild")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 def _backfill_decoded_entities(conn: sqlite3.Connection) -> None:
     """Fixes articles ingested before connectors/rss.py started decoding
     double-encoded entities (`&amp;#8217;` where a feed meant `&#8217;`,
@@ -317,11 +373,13 @@ def _backfill_hydrated_excerpts(conn: sqlite3.Connection) -> None:
     if not {"excerpt", "content_html", "hydrated_at"} <= columns:
         return
 
+    # Iterated, not fetchall()'d: that held every hydrated body in memory at
+    # once (tens of MB) during startup on a ~1GB box that's already swapping.
     rows = conn.execute(
         """SELECT id, excerpt, content_html
            FROM articles
            WHERE hydrated_at IS NOT NULL AND content_html IS NOT NULL"""
-    ).fetchall()
+    )
     updates = []
     for article_id, excerpt, content_html in rows:
         new_excerpt = plain_text_excerpt(content_html, limit=EXCERPT_LIMIT)

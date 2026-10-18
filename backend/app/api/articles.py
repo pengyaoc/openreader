@@ -69,7 +69,12 @@ async def get_article(request: Request) -> JSONResponse:
     # An anonymous article open is read-only and must never trigger a
     # full-text network fetch or database write. Signed-in readers retain
     # the existing fallback for items missed by refresh-time hydration.
-    if user_id is not None and article["origin"] == "feed":
+    # hydrate_article would return immediately for an article already
+    # hydrated (or already failed) — the usual case once refresh-time
+    # hydration has run — so skip the worker thread and its fresh
+    # connection rather than paying for a no-op.
+    settled = article["hydrated_at"] is not None or article["hydrate_failed_at"] is not None
+    if user_id is not None and article["origin"] == "feed" and not settled:
         row = conn.execute(
             "SELECT key FROM sources WHERE id = ?", (article["source_id"],)
         ).fetchone()

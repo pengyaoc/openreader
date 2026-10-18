@@ -5,7 +5,8 @@ from app import settings
 from app.api._common import AnonymousUserError, require_user_id
 from app.connectors import imap as imap_connector
 from app.db import run_off_thread
-from app.ingest.refresh import refresh_all
+from app.ingest.hydrate import hydrate_in_background
+from app.ingest.refresh import hydration_scope, refresh_all
 
 
 async def refresh(request: Request) -> JSONResponse:
@@ -46,6 +47,15 @@ async def refresh(request: Request) -> JSONResponse:
         config.sources,
         only_key=only_key,
         imap_connect=imap_connect,
+        hydrate=False,
     )
+
+    # Full-text hydration used to be the tail of refresh_all, and it was most
+    # of a refresh's wall time (benchmark, 2026-10-17: 4.7s of 5.2s). New
+    # articles are already in the DB at this point, so answer now and let
+    # the hydration finish on its own thread. Same scope as before: only the
+    # sources this refresh covered.
+    refreshed = [s for s in config.sources if only_key is None or s.key == only_key]
+    hydrate_in_background(request.app.state.db_path, hydration_scope(refreshed))
 
     return JSONResponse(report)

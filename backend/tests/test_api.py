@@ -1118,3 +1118,50 @@ def test_editing_a_web_source_selector_clears_cached_validators(client):
     assert resp.status_code == 200
     row = conn.execute("SELECT etag, last_modified FROM sources WHERE id = ?", (source_id,)).fetchone()
     assert tuple(row) == (None, None)
+
+
+def test_api_json_is_gzipped_when_the_client_accepts_it(client):
+    # Apache compresses the static frontend but not application/json, so
+    # this has to happen in the app (2026-10-17).
+    conn = connect(client.app.state.db_path)
+    for i in range(30):
+        conn.execute(
+            """INSERT INTO articles (source_id, guid, url, title, excerpt, origin)
+               VALUES (1, ?, ?, ?, ?, 'feed')""",
+            (f"gz{i}", f"https://x/gz{i}", f"Title {i}", "words " * 100),
+        )
+    conn.commit()
+    conn.close()
+
+    resp = client.get("/api/articles", headers={"Accept-Encoding": "gzip"})
+
+    assert resp.headers["content-encoding"] == "gzip"
+    assert len(resp.json()) == 31
+
+
+def test_hashed_frontend_assets_are_cached_forever_but_index_is_revalidated(tmp_path):
+    from app.main import FrontendStaticFiles
+
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "index-abc123.js").write_text("console.log(1)")
+    (tmp_path / "index.html").write_text("<html></html>")
+    app = create_app(db_path=tmp_path / "r.db", config=Config(), config_path=tmp_path / "f.yaml", require_auth=False)
+    app.mount("/", FrontendStaticFiles(directory=tmp_path, html=True))
+    c = TestClient(app)
+
+    assert "immutable" in c.get("/assets/index-abc123.js").headers["cache-control"]
+    assert c.get("/").headers["cache-control"] == "no-cache"
+
+
+def test_refresh_responds_without_waiting_for_hydration(client, monkeypatch):
+    # Hydration is handed to hydrate_in_background with this refresh's
+    # scope instead of running inside refresh_all.
+    import app.api.refresh_api as refresh_api
+
+    calls = []
+    monkeypatch.setattr(refresh_api, "refresh_all", lambda conn, sources, **kw: calls.append(kw) or {"sources": []})
+    monkeypatch.setattr(refresh_api, "hydrate_in_background", lambda db, scope: calls.append(scope))
+
+    assert client.post("/api/refresh").status_code == 200
+    assert calls[0]["hydrate"] is False
+    assert calls[1] == {"s1": False}

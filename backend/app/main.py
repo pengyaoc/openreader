@@ -10,8 +10,10 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from starlette.staticfiles import StaticFiles
 
 from app import settings
 from app.api import (
@@ -29,6 +31,23 @@ from app.db import connect, init_schema
 from app.ingest.refresh import sync_sources
 from app.pchauth.starlette_adapter import PchauthMiddleware
 from app.timing import TimingMiddleware
+
+
+class FrontendStaticFiles(StaticFiles):
+    """Vite fingerprints everything under assets/ (index-<hash>.js), so those
+    files can be cached forever. Without a Cache-Control header the browser
+    sent a revalidation request for each one on every cold open — a round
+    trip per file before the app could even start. Everything else,
+    index.html above all, is revalidated each time so a deploy shows up on
+    the next load."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        if Path(full_path).parent.name == "assets":
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def create_app(
@@ -71,7 +90,12 @@ def create_app(
 
     # TimingMiddleware wraps outermost so its clock covers auth too — see
     # app/timing.py for why (chasing an intermittent cold-open slowdown).
-    middleware = [Middleware(TimingMiddleware)]
+    # GZip next: Apache compresses the static frontend but not
+    # application/json, so a 50-row article page went out as ~88KB instead
+    # of ~12KB (measured 2026-10-17). Level 6 rather than Starlette's 9: on
+    # the shared 1-vCPU VM, 9 costs noticeably more CPU for ~1% smaller
+    # output. Images are already compressed and in Starlette's exclude list.
+    middleware = [Middleware(TimingMiddleware), Middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)]
     if require_auth:
         middleware.append(
             Middleware(
@@ -139,9 +163,7 @@ def build_production_app() -> Starlette:
 
     frontend_dist = settings.REPO_ROOT / "frontend" / "dist"
     if frontend_dist.exists():
-        from starlette.staticfiles import StaticFiles
-
-        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+        app.mount("/", FrontendStaticFiles(directory=frontend_dist, html=True), name="frontend")
     else:
         async def no_frontend(request):
             return JSONResponse(

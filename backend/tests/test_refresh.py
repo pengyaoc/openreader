@@ -916,3 +916,58 @@ def test_sync_sources_is_idempotent_and_never_overwrites_existing_rows(tmp_path)
 
     assert sync_sources(conn, config) == 0
     assert conn.execute("SELECT etag FROM sources WHERE key='memos'").fetchone()[0] == "keep-me"
+
+
+def test_imap_pass_overlaps_the_rss_fetches_instead_of_waiting_for_them(tmp_path, monkeypatch):
+    # 2026-10-17: IMAP used to start only after the whole RSS batch, so a
+    # refresh cost the slowest feed plus the IMAP pass. Now the RSS fetches
+    # are in flight while IMAP runs.
+    import time as time_module
+
+    import app.ingest.refresh as refresh_module
+
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    delay = 0.4
+    sources = [
+        Source(key="rss", type="rss", title="R", folder="F", url="https://x/r"),
+        Source(key="mail", type="imap", title="M", folder="F", query=""),
+    ]
+
+    def slow_fetcher(source, etag, last_modified):
+        time_module.sleep(delay)
+        return FetchResult(304, None, etag, last_modified)
+
+    def slow_imap_pass(conn, imap_sources, connect_fn):
+        time_module.sleep(delay)
+        return {s.key: {"key": s.key, "status": "ok"} for s in imap_sources}
+
+    monkeypatch.setattr(refresh_module, "_refresh_imap_sequential", slow_imap_pass)
+
+    started = time_module.monotonic()
+    report = refresh_all(conn, sources, fetcher=slow_fetcher, imap_connect=lambda: None)
+    elapsed = time_module.monotonic() - started
+
+    assert [s["status"] for s in report["sources"]] == ["not_modified", "ok"]
+    # Sequential would be 2 * delay; overlapped is about one delay.
+    assert elapsed < delay * 1.6
+
+
+def test_refresh_all_can_leave_hydration_to_the_caller(tmp_path, monkeypatch):
+    # POST /api/refresh passes hydrate=False and hydrates on its own thread
+    # afterwards, so the response doesn't wait on article page fetches.
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    source = Source(
+        key="s1", type="rss", title="S1", folder="Test", url="https://x/feed", fetch_full_text=True
+    )
+    fetcher = make_fetcher({"s1": (FIXTURES / "rss2.xml").read_bytes()})
+
+    import app.ingest.refresh as refresh_module
+
+    monkeypatch.setattr(
+        refresh_module, "hydrate_pending", lambda *a, **k: (_ for _ in ()).throw(AssertionError("hydrated"))
+    )
+    report = refresh_all(conn, [source], fetcher=fetcher, hydrate=False)
+
+    assert report["sources"][0]["new"] > 0

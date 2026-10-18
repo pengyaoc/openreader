@@ -2,7 +2,7 @@
 background polling. Returns a per-source report so filter rules are easy
 to tune interactively (design doc Part 2).
 
-RSS sources are fetched concurrently (see _refresh_rss_batch) — found live,
+RSS sources are fetched concurrently (see _start_rss_fetches) — found live,
 2026-08-13: 9 sequential RSS fetches took ~7.7s with no single dominant
 outlier, just ordinary per-host TLS+network latency summed one at a time.
 IMAP stays sequential over one shared connection — see
@@ -39,11 +39,13 @@ ImapSearchFn = Callable[..., list[str]]
 ImapFetchFn = Callable[[object, str], bytes]
 ImapConnectFn = Callable[[], object]
 
-# Bounded pool for the RSS fetch phase. Enough to overlap most sources'
-# network latency in one batch (measured: 9 sources, none over ~2.6s) for a
-# single-user app hitting a handful of distinct hosts, without opening an
-# unreasonable number of simultaneous connections out of one process.
-_RSS_FETCH_CONCURRENCY = 6
+# Bounded pool for the RSS fetch phase. Sized so a typical config's feeds
+# (9-14 here, almost all on distinct hosts) go out in a single wave: at 6,
+# a 9-feed refresh ran as two waves, so a slow feed in the second wave
+# (xilei alone is ~4.4s from the VM) stacked on top of the first wave's
+# slowest instead of overlapping it. Still bounded, so a large OPML import
+# doesn't open hundreds of simultaneous connections out of one process.
+_RSS_FETCH_CONCURRENCY = 16
 
 
 def _default_fetcher(client: httpx.Client) -> Fetcher:
@@ -166,7 +168,7 @@ def _persist_entry(
 
 def refresh_source(conn: sqlite3.Connection, source: Source, fetcher: Fetcher) -> dict:
     """Single-source fetch + persist, both on the calling thread. The
-    RSS batch path (_refresh_rss_batch) instead fetches many sources
+    RSS batch path (_start_rss_fetches) instead fetches many sources
     concurrently first, then calls _persist_rss_result (this function's
     second half, factored out below) sequentially — this function stays
     as the direct single-source entry point tests and callers use."""
@@ -270,31 +272,41 @@ def _parse_body(source: Source, body: bytes) -> list[NormalizedEntry]:
     return candidates[0].entries
 
 
-def _refresh_rss_batch(conn: sqlite3.Connection, sources: list[Source], fetcher: Fetcher) -> dict[str, dict]:
-    """Fetches every given RSS source concurrently, then persists results
-    sequentially on the calling thread. Returns a dict keyed by source key
-    so the caller can reassemble reports in the original source order.
+def _start_rss_fetches(
+    conn: sqlite3.Connection,
+    sources: list[Source],
+    fetcher: Fetcher,
+    pool: concurrent.futures.Executor,
+) -> list[tuple[Source, int, concurrent.futures.Future]]:
+    """First half of the RSS batch: submits every source's fetch to `pool`
+    and returns without waiting, so refresh_all can run the IMAP pass while
+    the HTTP requests are in flight. _persist_rss_fetches is the second.
 
-    get_or_create_source() runs upfront, sequentially — it's a cheap local
+    get_or_create_source() runs here, sequentially — it's a cheap local
     DB read/insert, not worth parallelizing, and it has to happen before
     the fetch anyway (need each source's etag/last_modified to send). The
     fetches themselves are the actual cost (network + TLS per distinct
     host) and the only part that's safe to run off-thread: sqlite3
-    connections default to check_same_thread=True, so every DB write below
-    has to stay on the thread that opened `conn`, not a pool worker.
+    connections default to check_same_thread=True, so every DB write has
+    to stay on the thread that opened `conn`, not a pool worker.
     """
-    prepared = [(s, *get_or_create_source(conn, s)) for s in sources]
+    pending = []
+    for source in sources:
+        source_id, etag, last_modified = get_or_create_source(conn, source)
+        future = pool.submit(_rss_fetch_only, fetcher, source, etag, last_modified)
+        pending.append((source, source_id, future))
+    return pending
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=_RSS_FETCH_CONCURRENCY) as pool:
-        fetch_results = list(
-            pool.map(
-                lambda p: _rss_fetch_only(fetcher, p[0], p[2], p[3]),
-                prepared,
-            )
-        )
 
+def _persist_rss_fetches(
+    conn: sqlite3.Connection, pending: list[tuple[Source, int, concurrent.futures.Future]]
+) -> dict[str, dict]:
+    """Second half: waits for each fetch and persists it on the calling
+    thread (the connection's own). Returns reports keyed by source key so
+    the caller can reassemble them in the original source order."""
     reports = {}
-    for (source, source_id, _etag, _last_modified), (result, exc) in zip(prepared, fetch_results):
+    for source, source_id, future in pending:
+        result, exc = future.result()
         reports[source.key] = _persist_rss_result(conn, source, source_id, result, exc)
     return reports
 
@@ -524,44 +536,61 @@ def refresh_all(
     fetcher: Fetcher | None = None,
     only_key: str | None = None,
     imap_connect: ImapConnectFn | None = None,
+    hydrate: bool = True,
 ) -> dict:
+    """hydrate=False skips the trailing full-text hydration phase, for a
+    caller that runs it separately via hydrate_in_background (the API does,
+    so the refresh response doesn't wait on up to 100 article fetches)."""
     if fetcher is None:
-        with httpx.Client() as client:
+        # Pool sized to the RSS fan-out: httpx's default of 10 keep-alive
+        # connections would otherwise park the extra fetch threads.
+        limits = httpx.Limits(max_connections=_RSS_FETCH_CONCURRENCY)
+        with httpx.Client(limits=limits) as client:
             return refresh_all(
                 conn,
                 sources,
                 fetcher=_default_fetcher(client),
                 only_key=only_key,
                 imap_connect=imap_connect,
+                hydrate=hydrate,
             )
 
     started = time.monotonic()
     to_refresh = [s for s in sources if only_key is None or s.key == only_key]
 
     # RSS sources are fetched as one concurrent batch, IMAP sequentially
-    # over one shared connection — see _refresh_rss_batch/_refresh_imap_sequential.
+    # over one shared connection — see _start_rss_fetches/_refresh_imap_sequential.
+    # The two network phases overlap: the RSS fetches are submitted first,
+    # the IMAP pass runs on this thread while they're in flight, and only
+    # then are the RSS results persisted. Every DB write still happens on
+    # this thread and connection. Before, IMAP waited for the whole RSS
+    # batch, so a refresh cost the slowest feed *plus* the IMAP pass.
     # Results are keyed by source key so the final report list matches
     # `to_refresh`'s original order regardless of how source types are
     # interleaved in config.
     # type=web sources are plain HTTP pages, so they ride the same
     # concurrent conditional-GET batch; only parsing differs (_parse_body).
     rss_sources = [s for s in to_refresh if s.type in ("rss", "web")]
-    rss_reports = _refresh_rss_batch(conn, rss_sources, fetcher) if rss_sources else {}
-
     imap_sources = [s for s in to_refresh if s.type == "imap"]
-    if not imap_sources:
-        imap_reports: dict[str, dict] = {}
-    elif imap_connect is None:
-        imap_reports = {
-            s.key: {
-                "key": s.key,
-                "status": "error",
-                "error": "IMAP not configured — set READER_IMAP_HOST/_USER/_PASSWORD",
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_RSS_FETCH_CONCURRENCY) as pool:
+        pending = _start_rss_fetches(conn, rss_sources, fetcher, pool)
+
+        if not imap_sources:
+            imap_reports: dict[str, dict] = {}
+        elif imap_connect is None:
+            imap_reports = {
+                s.key: {
+                    "key": s.key,
+                    "status": "error",
+                    "error": "IMAP not configured — set READER_IMAP_HOST/_USER/_PASSWORD",
+                }
+                for s in imap_sources
             }
-            for s in imap_sources
-        }
-    else:
-        imap_reports = _refresh_imap_sequential(conn, imap_sources, imap_connect)
+        else:
+            imap_reports = _refresh_imap_sequential(conn, imap_sources, imap_connect)
+
+        rss_reports = _persist_rss_fetches(conn, pending)
 
     reports_by_key: dict[str, dict] = {**rss_reports, **imap_reports}
     reports = [reports_by_key[s.key] for s in to_refresh]
@@ -572,11 +601,16 @@ def refresh_all(
     # module docstring. Scoped to `to_refresh` (not all `sources`) so a
     # single-source refresh (?source=key) doesn't also hydrate backlog on
     # every other source.
-    source_fetch_full_text = {s.key: s.fetch_full_text for s in to_refresh}
-    hydrate_pending(conn, source_fetch_full_text)
+    if hydrate:
+        hydrate_pending(conn, hydration_scope(to_refresh))
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     return {"elapsed_ms": elapsed_ms, "sources": reports}
+
+
+def hydration_scope(sources: list[Source]) -> dict[str, bool]:
+    """Source key -> fetch_full_text, the argument hydrate_pending takes."""
+    return {s.key: s.fetch_full_text for s in sources}
 
 
 def reconcile_read_state(conn: sqlite3.Connection, config: Config) -> int:

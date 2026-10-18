@@ -59,6 +59,21 @@ function patchArticleCaches(qc: QueryClient, id: number, patch: Partial<Article>
   qc.setQueryData<Article>(['article', id], (prev) => (prev ? { ...prev, ...patch } : prev))
 }
 
+// Shared by the open-article query and the neighbor prefetch below, so a
+// prefetched article lands under exactly the key and cache policy the
+// reader will look it up with. An article body never changes after
+// hydration (read/star mutations patch the cache in place — see
+// patchArticleCaches), so once fetched there's no reason to ever refetch or
+// evict it just from time passing.
+function articleQueryOptions(id: number) {
+  return {
+    queryKey: ['article', id],
+    queryFn: () => api.article(id),
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+  }
+}
+
 function adjustSourceUnread(qc: QueryClient, sourceId: number, delta: number) {
   qc.setQueryData<Source[]>(['sources'], (old) =>
     old?.map((s) =>
@@ -252,14 +267,8 @@ export default function App() {
   })
 
   const openArticleQuery = useQuery({
-    queryKey: ['article', openArticleId],
-    queryFn: () => api.article(openArticleId!),
+    ...articleQueryOptions(openArticleId ?? 0),
     enabled: openArticleId !== null,
-    // An article body never changes after hydration (read/star mutations
-    // patch the cache in place — see patchArticleCaches), so once fetched
-    // there's no reason to ever refetch or evict it just from time passing.
-    staleTime: Infinity,
-    gcTime: 30 * 60 * 1000,
   })
 
   const refreshMutation = useMutation({
@@ -437,6 +446,21 @@ export default function App() {
   const openArticleIndex = articles.findIndex((a) => a.id === openArticleId)
   const hasPrev = openArticleIndex > 0
   const hasNext = openArticleIndex !== -1 && openArticleIndex < articles.length - 1
+
+  // Prefetch the articles on either side once the open one has loaded, so
+  // Next/Previous (and ←/→) render from cache instead of showing the
+  // skeleton for a full round trip. Waiting for the current article keeps
+  // the prefetches from competing with it on a slow connection. Fetching an
+  // article doesn't mark it read — only openArticle does that.
+  const prevArticleId = hasPrev ? articles[openArticleIndex - 1].id : null
+  const nextArticleId = hasNext ? articles[openArticleIndex + 1].id : null
+  const openArticleLoaded = openArticleQuery.isSuccess
+  useEffect(() => {
+    if (!openArticleLoaded) return
+    for (const id of [nextArticleId, prevArticleId]) {
+      if (id !== null) void qc.prefetchQuery(articleQueryOptions(id))
+    }
+  }, [qc, openArticleLoaded, nextArticleId, prevArticleId])
 
   const goToOffset = useCallback(
     (offset: number) => {

@@ -248,3 +248,84 @@ def test_hydrate_pending_no_eligible_sources_is_a_cheap_noop(tmp_path):
     hydrated = hydrate_pending(conn, {"s1": False}, fetcher=lambda url, timeout: "<html></html>")
 
     assert hydrated == 0
+
+
+def _seed_feed_articles(conn, n):
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder, url) VALUES ('s1', 'rss', 'S', 'F', 'https://x')"
+    )
+    for i in range(n):
+        conn.execute(
+            """INSERT INTO articles (source_id, guid, url, title, origin)
+               VALUES (1, ?, ?, 'T', 'feed')""",
+            (f"g{i}", f"https://example.com/{i}"),
+        )
+    conn.commit()
+
+
+def _wait_for_background_hydration(timeout=5.0):
+    import time
+
+    import app.ingest.hydrate as hydrate_module
+
+    deadline = time.monotonic() + timeout
+    while hydrate_module._background_running:
+        assert time.monotonic() < deadline, "background hydration never finished"
+        time.sleep(0.01)
+
+
+def test_hydrate_in_background_hydrates_on_its_own_connection(tmp_path, monkeypatch):
+    import app.ingest.hydrate as hydrate_module
+
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    _seed_feed_articles(conn, 3)
+    monkeypatch.setattr(
+        hydrate_module, "fetch_and_extract", lambda url, timeout, fetcher=None: "<p>full body</p>"
+    )
+
+    hydrate_module.hydrate_in_background(db_path, {"s1": True})
+    _wait_for_background_hydration()
+
+    rows = conn.execute("SELECT hydrated_at FROM articles").fetchall()
+    assert all(r[0] is not None for r in rows)
+
+
+def test_hydrate_in_background_queues_a_refresh_that_arrives_mid_batch(tmp_path, monkeypatch):
+    # A second refresh while a batch is running must not start a parallel
+    # batch over the same articles — it queues one more pass instead.
+    import threading
+
+    import app.ingest.hydrate as hydrate_module
+
+    db_path = tmp_path / "reader.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    _seed_feed_articles(conn, 2)
+
+    release = threading.Event()
+    batches = []
+    real_hydrate_pending = hydrate_module.hydrate_pending
+
+    def gated_hydrate_pending(conn, scope, **kw):
+        batches.append(dict(scope))
+        release.wait(5)
+        return real_hydrate_pending(conn, scope, fetcher=lambda url, timeout: "")
+
+    monkeypatch.setattr(hydrate_module, "hydrate_pending", gated_hydrate_pending)
+
+    hydrate_module.hydrate_in_background(db_path, {"s1": True})
+    hydrate_module.hydrate_in_background(db_path, {"s1": True})
+    hydrate_module.hydrate_in_background(db_path, {"s2": True})
+    release.set()
+    _wait_for_background_hydration()
+
+    assert batches == [{"s1": True}, {"s1": True, "s2": True}]
+
+
+def test_hydrate_in_background_does_nothing_without_eligible_sources(tmp_path):
+    import app.ingest.hydrate as hydrate_module
+
+    hydrate_module.hydrate_in_background(tmp_path / "missing.db", {"s1": False})
+    assert hydrate_module._background_running is False
