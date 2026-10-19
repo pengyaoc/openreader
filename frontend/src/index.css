@@ -144,6 +144,12 @@ button {
 button:focus {
   outline: none;
 }
+/* Programmatic-only focus targets (e.g. the reader title, focused on every
+   article open/swipe so screen readers start there) — never draw the
+   browser's focus ring around them. */
+[tabindex="-1"]:focus {
+  outline: none;
+}
 button:focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 1px;
