@@ -9,6 +9,7 @@ interface Props {
   loading: boolean
   onClose: () => void
   onToggleStar: () => void
+  onToggleRead: () => void
   onPullFull: () => void
   pullingFull: boolean
   onSummarize: () => void
@@ -50,6 +51,7 @@ export function ArticleReader({
   loading,
   onClose,
   onToggleStar,
+  onToggleRead,
   onPullFull,
   pullingFull,
   onSummarize,
@@ -67,10 +69,11 @@ export function ArticleReader({
       if (e.key === 'Escape') onClose()
       else if (e.key === 'ArrowLeft' && hasPrev) onPrev()
       else if (e.key === 'ArrowRight' && hasNext) onNext()
+      else if (e.key === 'm' && !e.metaKey && !e.ctrlKey && !e.altKey) onToggleRead()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [onClose, onPrev, onNext, hasPrev, hasNext])
+  }, [onClose, onPrev, onNext, onToggleRead, hasPrev, hasNext])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
@@ -177,6 +180,18 @@ export function ArticleReader({
             title="Star"
           >
             ★
+          </button>
+          {/* Opening an article marks it read; this undoes that (or redoes
+              it) without leaving the reader. Moving on to prev/next doesn't
+              re-mark it, so an article flagged here stays unread. */}
+          <button
+            className={`icon-btn ${article.is_read ? '' : 'active'}`}
+            onClick={onToggleRead}
+            title={article.is_read ? 'Mark as unread (m)' : 'Mark as read (m)'}
+            aria-pressed={!article.is_read}
+            aria-label="Unread"
+          >
+            ●
           </button>
           {article.url && (
             <a

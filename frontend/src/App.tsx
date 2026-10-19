@@ -288,7 +288,7 @@ export default function App() {
   })
 
   const toggleReadMutation = useMutation({
-    mutationFn: (article: ArticleListItem) => api.toggleRead(article.id),
+    mutationFn: (article: Pick<ArticleListItem, 'id' | 'source_id'>) => api.toggleRead(article.id),
     onSuccess: (data, article) => {
       patchArticleCaches(qc, article.id, { is_read: data.is_read })
       adjustSourceUnread(qc, article.source_id, data.is_read ? -1 : 1)
@@ -428,8 +428,20 @@ export default function App() {
   // skeleton rather than flashing empty content. The query result swaps in
   // once it lands.
   const openArticleListItem = articles.find((a) => a.id === openArticleId)
+  // When both exist, read/star flags come from the list item: opening an
+  // article fires markRead alongside the article fetch, and if the GET was
+  // served before the POST landed its stale is_read: false overwrites the
+  // patch in the ['article', id] cache. The list cache is only ever patched
+  // in place, so it doesn't race — and the reader's unread toggle shows it.
   const openArticleDisplayData: Article | undefined =
-    openArticleQuery.data ??
+    (openArticleQuery.data &&
+      (openArticleListItem
+        ? {
+            ...openArticleQuery.data,
+            is_read: openArticleListItem.is_read,
+            is_starred: openArticleListItem.is_starred,
+          }
+        : openArticleQuery.data)) ??
     (openArticleListItem && {
       ...openArticleListItem,
       content_html: '',
@@ -666,6 +678,11 @@ export default function App() {
             isAnonymous
               ? showNotice("Starring isn't available in this read-only demo — sign in to save articles.")
               : toggleStarMutation.mutate(openArticleId)
+          }
+          onToggleRead={() =>
+            isAnonymous
+              ? showNotice("Read state isn't saved in this read-only demo — sign in to track unread articles.")
+              : toggleReadMutation.mutate(openArticleDisplayData)
           }
           onPullFull={() =>
             isAnonymous
