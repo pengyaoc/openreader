@@ -14,6 +14,12 @@ import { useEffect, useLayoutEffect, useRef, type RefObject } from 'react'
 // Trackpad: a sideways two-finger swipe (deltaX dominant) turns once its
 // travel passes WHEEL_THRESHOLD, then ignores the rest of that gesture's
 // momentum until the wheel has been quiet for WHEEL_QUIET_MS.
+//
+// The browser sends a trackpad gesture's wheel events to the node under the
+// cursor, and keeps sending them there after a turn has swapped that node out
+// of the document, until the pointer moves or clicks. Events on a detached
+// node never bubble up to the surface, so the turn also listens on the node
+// it came from to keep hearing the following swipes.
 
 const AXIS_LOCK_PX = 10
 const TURN_FRACTION = 0.25
@@ -170,7 +176,22 @@ export function useSwipeNav({ trackRef, surfaceRef, canPrev, canNext, onPrev, on
     let wheelTravel = 0
     let wheelSpent = false
     let wheelQuietTimer: number | undefined
+    // Nodes that wheel events were aimed at when a turn replaced the article.
+    const wheelOrphans = new Set<EventTarget>()
+    const dropOrphans = () => {
+      wheelOrphans.forEach((node) => node.removeEventListener('wheel', onOrphanWheel))
+      wheelOrphans.clear()
+    }
+    // While the node is still in the document its events reach the surface
+    // anyway; only handle the ones stranded on it after it was removed.
+    const onOrphanWheel = (e: Event) => {
+      if (e.target instanceof Node && !e.target.isConnected) onWheel(e as WheelEvent)
+    }
     const onWheel = (e: WheelEvent) => {
+      // A live node other than the stranded ones: the browser has re-aimed.
+      if (e.currentTarget === surface && wheelOrphans.size && e.target && !wheelOrphans.has(e.target)) {
+        dropOrphans()
+      }
       if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return
       if (inHorizontalScroller(e.target, surface)) return
       // Keep the sideways swipe from also becoming browser back/forward.
@@ -186,6 +207,10 @@ export function useSwipeNav({ trackRef, surfaceRef, canPrev, canNext, onPrev, on
       const forward = wheelTravel > 0
       wheelSpent = true
       if (forward ? live.current.canNext : live.current.canPrev) {
+        if (e.target && e.target !== surface && !wheelOrphans.has(e.target)) {
+          e.target.addEventListener('wheel', onOrphanWheel, { passive: false })
+          wheelOrphans.add(e.target)
+        }
         if (forward) live.current.onNext()
         else live.current.onPrev()
       }
@@ -205,6 +230,7 @@ export function useSwipeNav({ trackRef, surfaceRef, canPrev, canNext, onPrev, on
       window.clearTimeout(settleTimer)
       window.clearTimeout(wheelQuietTimer)
       window.clearTimeout(staleTimer.current)
+      dropOrphans()
     }
   }, [surfaceRef, trackRef])
 }

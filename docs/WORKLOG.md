@@ -3027,3 +3027,16 @@ Deployed 2026-10-18 with `scripts/deploy.sh` (this also shipped the 2026-10-17 p
 including its one-time table-rebuild migration). The verify curl right after restart got 503 while
 the service was still starting; 200 within 10s after, startup logs clean, live bundle matches the
 local build.
+
+## 2026-10-18 — Trackpad swipe only worked once per click
+
+*"trackpad gesture weirdly only work for once if there is no mouse click."* The browser aims a
+trackpad gesture's wheel events at the node under the cursor and keeps aiming there after the turn
+has replaced that node, until the pointer moves or clicks. Events on a detached node don't bubble
+to `.reader-stage`, so every later swipe was lost. `useSwipeNav` now also listens on the node a
+turn came from, acts only on events that arrive after it's detached, and drops those listeners once
+a live node other than them reaches the stage (the browser has re-aimed).
+
+Verified in the in-app browser by dispatching wheel events on one paragraph across turns (as a
+stationary cursor does): three swipes forward and one back each turned one article; after
+re-aiming at a live node, the stale node stops turning. Not tested with a physical trackpad.
