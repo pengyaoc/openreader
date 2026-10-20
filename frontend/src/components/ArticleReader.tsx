@@ -88,6 +88,8 @@ export function ArticleReader({
     articleKey: article.id,
   })
   const hint = usePageTurnHint(stageRef, hasPrev || hasNext)
+  const progressRef = useRef<HTMLDivElement>(null)
+  useReadingProgress(scrollRef, progressRef)
   const titleRef = useRef<HTMLHeadingElement>(null)
   const titleId = useId()
   const [viewMode, setViewMode] = useState<ViewMode>('full')
@@ -136,6 +138,9 @@ export function ArticleReader({
   return (
     <div className="reader-overlay" role="dialog" aria-modal="true" aria-labelledby={titleId}>
       <div className="reader-bar">
+        {/* iOS only shows its overlay scroll indicator mid-scroll, so this
+            is the always-visible "where am I" cue. */}
+        <div className="reader-progress" ref={progressRef} aria-hidden="true" />
         <div className="reader-bar__left">
           <button className="icon-btn" onClick={onClose} title="Close (Esc)">
             ←
@@ -191,7 +196,7 @@ export function ArticleReader({
             aria-pressed={!article.is_read}
             aria-label="Unread"
           >
-            ●
+            <span className="icon-btn__dot" />
           </button>
           {article.url && (
             <a
@@ -341,6 +346,42 @@ type HintKind = 'touch' | 'margins' | 'keys'
 // First time only, like Summra's showPageTurnHintOnce: tell a touch reader
 // the article swipes (label plus a nudge), or a mouse reader about the
 // margins and keys. Gone after 6s or the first interaction.
+// Writes scroll progress straight to the bar's transform instead of through
+// state, so scrolling doesn't re-render the article body. A ResizeObserver
+// on the content covers what changes scrollHeight without a scroll event:
+// the body loading in, Full/Summary toggles, prev/next, late images.
+function useReadingProgress(
+  scrollRef: RefObject<HTMLDivElement | null>,
+  barRef: RefObject<HTMLDivElement | null>,
+) {
+  useEffect(() => {
+    const el = scrollRef.current
+    const bar = barRef.current
+    if (!el || !bar) return
+    let frame = 0
+    const update = () => {
+      frame = 0
+      const max = el.scrollHeight - el.clientHeight
+      bar.style.opacity = max > 1 ? '1' : '0'
+      const p = max > 1 ? Math.min(1, Math.max(0, el.scrollTop / max)) : 0
+      bar.style.transform = `scaleX(${p})`
+    }
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(update)
+    }
+    el.addEventListener('scroll', schedule, { passive: true })
+    const ro = new ResizeObserver(schedule)
+    ro.observe(el)
+    if (el.firstElementChild) ro.observe(el.firstElementChild)
+    update()
+    return () => {
+      el.removeEventListener('scroll', schedule)
+      ro.disconnect()
+      cancelAnimationFrame(frame)
+    }
+  }, [scrollRef, barRef])
+}
+
 function usePageTurnHint(
   stageRef: RefObject<HTMLDivElement | null>,
   navigable: boolean,

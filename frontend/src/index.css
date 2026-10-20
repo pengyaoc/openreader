@@ -833,12 +833,29 @@ kbd {
 }
 
 .reader-bar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 14px 24px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
+}
+
+/* Reading progress, laid over the bar's bottom border. Driven from
+   useReadingProgress in ArticleReader.tsx. */
+.reader-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--amber);
+  transform: scaleX(0);
+  transform-origin: left;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
 }
 
 .reader-bar__left,
@@ -869,6 +886,13 @@ kbd {
   color: var(--amber);
   border-color: var(--amber-dim);
   background: var(--amber-wash);
+}
+/* Mirrors .article-row__unread-dot so the toggle reads as "unread". */
+.icon-btn__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .reader-source {
