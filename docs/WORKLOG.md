@@ -3040,3 +3040,24 @@ a live node other than them reaches the stage (the browser has re-aimed).
 Verified in the in-app browser by dispatching wheel events on one paragraph across turns (as a
 stationary cursor does): three swipes forward and one back each turned one article; after
 re-aiming at a live node, the stale node stops turning. Not tested with a physical trackpad.
+
+## 2026-10-20 — Slow article opens: VM swap tuning
+
+Report: a short article ("How I AI: How Meta designed Muse…", #1370) took 1–2s to open.
+
+**Measured.** Not live hydration: #1370 stored a 6,563-char body at ingest, so the open never
+fetched. Over 3 days of `TIMING` lines, 157 article GETs had median 22ms, p90 332ms, max 1.5s;
+all 7 over 500ms had ≥50 major faults, none slow without them. Warm, the same request was ~100ms
+end to end from a laptop with `server-timing: app;dur=1.8`. The uvicorn worker held 48MB resident
+vs 71MB swapped; Apache ran 7 prefork processes (~200MB RSS) and `vm.swappiness` was the default 60.
+Same cause as 2026-10-17's finding: the idle worker gets swapped out on the 1GB box.
+
+**Changes (on the VM, not in this repo).**
+- `/etc/sysctl.d/99-swappiness.conf`: `vm.swappiness = 10`, so the kernel drops page cache
+  before swapping out idle anonymous memory.
+- `mpm_prefork.conf`: `StartServers 3→2`, `MinSpareServers 2→1`, `MaxSpareServers 6→3`,
+  `MaxRequestWorkers 16→10`. Backup at `/etc/apache2/mpm_prefork.conf.bak-20261021-0502`.
+  Apache went from 7 processes to 3; WordPress and /reader/ both 200 after the reload.
+
+Not yet confirmed: whether the first open after an idle gap gets faster. Check `TIMING`
+`majflt_delta` on cold opens after a day of normal use. If still slow, the remaining fix is 2GB RAM.

@@ -1,0 +1,7 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "backend", "runtimeExecutable": "uv", "runtimeArgs": ["run", "--directory", "backend", "uvicorn", "app.asgi:app", "--host", "127.0.0.1", "--port", "8787"], "port": 8787 },
+    { "name": "frontend", "runtimeExecutable": "npm", "runtimeArgs": ["--prefix", "frontend", "run", "dev"], "port": 5173 }
+  ]
+}
