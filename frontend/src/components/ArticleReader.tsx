@@ -27,7 +27,14 @@ interface Props {
 
 function fullDate(iso: string | null): string {
   if (!iso) return ''
-  return new Date(iso).toLocaleDateString(undefined, {
+  const d = new Date(iso)
+  // Compare local calendar days, not 24h windows, so 11pm yesterday still
+  // reads "Yesterday" at 1am today.
+  const startOfDay = (t: Date) => new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime()
+  const dayDiff = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86_400_000)
+  if (dayDiff === 0) return 'Today'
+  if (dayDiff === 1) return 'Yesterday'
+  return d.toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'long',
     day: 'numeric',
