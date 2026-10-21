@@ -41,6 +41,12 @@ Rules:
 - Use only information explicitly stated in the article text below. Never
   add outside knowledge, speculation, or invented facts, figures, or
   quotes. If the article doesn't say it, the summary doesn't say it.
+- Write in the author's own voice, as a condensed version of the article
+  itself — not as a narrator describing it. State the article's claims and
+  points directly ("Rates will stay high through 2027 because..."), never
+  as reported speech ("The author argues that...", "This piece by X
+  describes...", "The article explains..."). Keep the author's person: if
+  the article is written in first person, the summary uses "I"/"we" too.
 - Optimize for readability: use bullet points (<ul>/<li>) to break up
   distinct points, and <b> or <strong> to highlight key terms, numbers, or
   names where it helps scanning.
