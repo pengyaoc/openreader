@@ -514,7 +514,11 @@ def test_get_article_hydrates_full_text_via_the_threaded_fetch_path(tmp_path, mo
         def raise_for_status(self):
             pass
 
-    monkeypatch.setattr("app.ingest.hydrate.httpx.get", lambda *a, **kw: FakeResponse())
+    class FakeClient:
+        def get(self, *a, **kw):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.ingest.hydrate._shared_client", FakeClient())
 
     article_id = client.get("/api/articles").json()[0]["id"]
     resp = client.get(f"/api/articles/{article_id}")

@@ -13,12 +13,6 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"
     />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Archivo:wght@400;500;600;700&family=Archivo+Expanded:wght@600;700&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
-      rel="stylesheet"
-    />
     <title>OpenReader</title>
     <script>
       (function () {
@@ -26,21 +20,8 @@
         document.documentElement.dataset.theme = t === 'dark' ? 'dark' : 'light'
       })()
     </script>
-    <!-- TEMPORARY — standalone-PWA bottom-gap-after-resume investigation
-         (docs/WORKLOG.md, 2026-08-19). Passive viewport logger, no fix, no
-         layout change. Must run from first page load (not injected
-         mid-session) so it can't go stale across a suspend/resume cycle —
-         that's the whole point: last round's probe was re-injected over a
-         live page and produced a clientHeight/innerHeight contradiction
-         that couldn't be trusted. Remove this whole block, and the
-         Sidebar "Copy viewport log" button, once root cause is confirmed
-         and a fix ships (see the plan). -->
     <script>
       ;(function () {
-        var KEY = '__vplog'
-        var MAX = 200
-        var probe = null
-
         // Root-cause fix — standalone-PWA gap after resume/cold-launch
         // (docs/WORKLOG.md, 2026-08-19), corrected 2026-08-20. Confirmed by
         // three real captured occurrences on 2026-08-20: window.innerHeight
@@ -69,160 +50,17 @@
           document.documentElement.style.setProperty('--app-height', h + 'px')
         }
         setAppHeight()
-
-        function readBuf() {
-          try {
-            return JSON.parse(localStorage.getItem(KEY) || '[]')
-          } catch {
-            return []
-          }
+        window.addEventListener('orientationchange', setAppHeight)
+        window.addEventListener('resize', setAppHeight)
+        // The viewport logger that ran alongside this (vv-scroll/resize
+        // snapshots into localStorage) was removed 2026-10-27, once this fix
+        // had shipped. It forced a layout and rewrote a 200-entry JSON
+        // buffer in localStorage on every visualViewport scroll event.
+        try {
+          localStorage.removeItem('__vplog')
+        } catch {
+          /* storage unavailable — nothing left behind to clear */
         }
-
-        function writeBuf(buf) {
-          try {
-            localStorage.setItem(KEY, JSON.stringify(buf.slice(-MAX)))
-          } catch {
-            /* storage full/unavailable — nothing to do, this is best-effort */
-          }
-        }
-
-        // Heights alone cannot reveal WebKit visually panning the document
-        // while leaving the layout/visual viewport sizes unchanged. Capture
-        // element positions too, so a negative root/body/shell top can be
-        // distinguished from a native compositor shift that the DOM cannot
-        // observe at all.
-        function rectFor(node) {
-          if (!node) return null
-          var rect = node.getBoundingClientRect()
-          return {
-            top: rect.top,
-            bottom: rect.bottom,
-            height: rect.height,
-            left: rect.left,
-            right: rect.right,
-            width: rect.width,
-          }
-        }
-
-        function snap(label) {
-          var vv = window.visualViewport
-          var cs = probe ? getComputedStyle(probe) : null
-          var root = document.documentElement
-          var body = document.body
-          var entry = {
-            label: label,
-            t: Date.now(),
-            innerWidth: window.innerWidth,
-            innerHeight: window.innerHeight,
-            outerHeight: window.outerHeight,
-            vvHeight: vv ? vv.height : null,
-            vvOffsetTop: vv ? vv.offsetTop : null,
-            vvPageTop: vv ? vv.pageTop : null,
-            vvPageLeft: vv ? vv.pageLeft : null,
-            vvScale: vv ? vv.scale : null,
-            scrollX: window.scrollX,
-            scrollY: window.scrollY,
-            rootScrollTop: root.scrollTop,
-            bodyScrollTop: body ? body.scrollTop : null,
-            clientWidth: root.clientWidth,
-            clientHeight: root.clientHeight,
-            screenHeight: screen.height,
-            screenWidth: screen.width,
-            probeOffsetHeight: probe ? probe.offsetHeight : null,
-            rootRect: rectFor(root),
-            bodyRect: rectFor(body),
-            probeRect: rectFor(probe),
-            shellRect: rectFor(document.querySelector('.shell')),
-            bannerRect: rectFor(document.querySelector('.readonly-banner')),
-            headerRect: rectFor(document.querySelector('.main__header')),
-            articleListRect: rectFor(document.querySelector('.article-list')),
-            safeTop: cs ? cs.paddingTop : null,
-            safeBottom: cs ? cs.paddingBottom : null,
-            visibilityState: document.visibilityState,
-            wasDiscarded: !!document.wasDiscarded,
-          }
-          writeBuf(readBuf().concat([entry]))
-        }
-
-        function snapSeries(label) {
-          snap(label + ':0')
-          requestAnimationFrame(function () {
-            requestAnimationFrame(function () {
-              snap(label + ':raf2')
-            })
-          })
-          setTimeout(function () {
-            snap(label + ':+300')
-          }, 300)
-          setTimeout(function () {
-            snap(label + ':+1000')
-          }, 1000)
-          setTimeout(function () {
-            snap(label + ':+3000')
-          }, 3000)
-        }
-
-        window.__vplogSnap = snap
-        window.__vplogDump = function () {
-          snap('dump')
-          return readBuf()
-        }
-
-        snap('script-start')
-
-        function init() {
-          probe = document.createElement('div')
-          probe.style.cssText =
-            'position:fixed;inset:0;visibility:hidden;pointer-events:none;' +
-            'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);'
-          document.body.appendChild(probe)
-          snap('probe-attached')
-
-          document.addEventListener('visibilitychange', function () {
-            if (document.visibilityState === 'visible') {
-              snapSeries('visible')
-            } else {
-              snap('hidden')
-            }
-          })
-          window.addEventListener('pageshow', function (e) {
-            snap('pageshow:persisted=' + e.persisted)
-          })
-          window.addEventListener('pagehide', function (e) {
-            snap('pagehide:persisted=' + e.persisted)
-          })
-          document.addEventListener('freeze', function () {
-            snap('freeze')
-          })
-          document.addEventListener('resume', function () {
-            snapSeries('resume')
-          })
-          window.addEventListener('orientationchange', function () {
-            setAppHeight()
-            snapSeries('orientationchange')
-          })
-          window.addEventListener('resize', function () {
-            setAppHeight()
-            snap('window-resize')
-          })
-          if (window.visualViewport) {
-            window.visualViewport.addEventListener('resize', function () {
-              snap('vv-resize')
-            })
-            window.visualViewport.addEventListener('scroll', function () {
-              snap('vv-scroll')
-            })
-          }
-        }
-
-        if (document.readyState === 'loading') {
-          document.addEventListener('DOMContentLoaded', init)
-        } else {
-          init()
-        }
-        window.addEventListener('load', function () {
-          snapSeries('load')
-        })
       })()
     </script>
   </head>

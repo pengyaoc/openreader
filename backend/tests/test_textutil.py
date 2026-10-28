@@ -185,3 +185,11 @@ def test_tighten_newsletter_whitespace_keeps_a_table_with_only_real_rows_intact(
     result = tighten_newsletter_whitespace(html)
     assert result.count("<tr>") == 2
     assert "<table" in result
+
+
+def test_proxy_image_urls_lazy_loads_every_image_but_the_first():
+    result = proxy_image_urls('<p><img src="https://x/a.jpg"><img src="https://x/b.jpg"></p>')
+    first, second = result.split("<img")[1:]
+    assert 'loading="lazy"' not in first
+    assert 'loading="lazy"' in second
+    assert result.count('decoding="async"') == 2

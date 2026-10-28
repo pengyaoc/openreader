@@ -58,13 +58,22 @@ async def list_articles(request: Request) -> JSONResponse:
     return JSONResponse(articles)
 
 
-async def get_article(request: Request) -> JSONResponse:
-    conn = request.app.state.get_conn()
-    article_id = int(request.path_params["article_id"])
-    user_id = current_user_id(request)
+def _refresh_hydration_fields(conn: sqlite3.Connection, article: dict, result: dict) -> None:
+    """Folds a hydrate_article result back into `article`. hydrate_article
+    may have just updated the full-text-derived feed subtitle as well as
+    hydration state, so those are re-read for DB truth."""
+    if result["content_html"]:
+        article["content_html"] = result["content_html"]
+    row = conn.execute(
+        "SELECT excerpt, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article["id"],)
+    ).fetchone()
+    article["excerpt"], article["hydrated_at"], article["hydrate_failed_at"] = row
+
+
+def _load_article(conn: sqlite3.Connection, user_id: int | None, article_id: int, config) -> dict | None:
     article = store.get_article(conn, user_id, article_id)
     if article is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
+        return None
 
     # An anonymous article open is read-only and must never trigger a
     # full-text network fetch or database write. Signed-in readers retain
@@ -79,23 +88,28 @@ async def get_article(request: Request) -> JSONResponse:
             "SELECT key FROM sources WHERE id = ?", (article["source_id"],)
         ).fetchone()
         source_key = row[0] if row else None
-        config = request.app.state.config
         source_cfg = config.source(source_key)
         fetch_full_text = (
             source_cfg.fetch_full_text if source_cfg else config.defaults.fetch_full_text
         )
-        result = await run_off_thread(
-            request.app.state.db_path, hydrate_article, article_id, fetch_full_text
-        )
-        if result["content_html"]:
-            article["content_html"] = result["content_html"]
-        # hydrate_article may have just updated the full-text-derived feed
-        # subtitle as well as hydration state; re-read them for DB truth.
-        row = conn.execute(
-            "SELECT excerpt, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article_id,)
-        ).fetchone()
-        article["excerpt"], article["hydrated_at"], article["hydrate_failed_at"] = row
+        result = hydrate_article(conn, article_id, fetch_full_text)
+        _refresh_hydration_fields(conn, article, result)
+    return article
 
+
+async def get_article(request: Request) -> JSONResponse:
+    # All of it on one worker thread, the possible hydration fetch included:
+    # the article body is tens of KB, and reading it on the event loop held
+    # up every other request (image loads, the list) for as long as it took.
+    article = await run_off_thread(
+        request.app.state.db_path,
+        _load_article,
+        current_user_id(request),
+        int(request.path_params["article_id"]),
+        request.app.state.config,
+    )
+    if article is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(article)
 
 
@@ -110,21 +124,17 @@ async def pull_full_article(request: Request) -> JSONResponse:
     except AnonymousUserError:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
 
-    conn = request.app.state.get_conn()
-    article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, user_id, article_id)
+    def pull(conn: sqlite3.Connection, article_id: int) -> dict | None:
+        article = store.get_article(conn, user_id, article_id)
+        if article is not None:
+            _refresh_hydration_fields(conn, article, hydrate_article(conn, article_id, True))
+        return article
+
+    article = await run_off_thread(
+        request.app.state.db_path, pull, int(request.path_params["article_id"])
+    )
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-
-    result = await run_off_thread(
-        request.app.state.db_path, hydrate_article, article_id, True
-    )
-    if result["content_html"]:
-        article["content_html"] = result["content_html"]
-    row = conn.execute(
-        "SELECT excerpt, hydrated_at, hydrate_failed_at FROM articles WHERE id = ?", (article_id,)
-    ).fetchone()
-    article["excerpt"], article["hydrated_at"], article["hydrate_failed_at"] = row
 
     return JSONResponse(
         {
@@ -136,10 +146,9 @@ async def pull_full_article(request: Request) -> JSONResponse:
     )
 
 
-def _run_summarize(
-    conn: sqlite3.Connection, article_id: int, text: str, word_count: int
-) -> tuple[str, str]:
-    summary_html = summarize_text(text, word_count)
+def _run_summarize(conn: sqlite3.Connection, article_id: int, content_html: str) -> tuple[str, str]:
+    text = plain_text_excerpt(content_html, limit=None)
+    summary_html = summarize_text(text, len(text.split()))
     llm_summary_at = store.save_summary(conn, article_id, summary_html)
     return summary_html, llm_summary_at
 
@@ -159,9 +168,8 @@ async def summarize(request: Request) -> JSONResponse:
     if not config.llm.enabled:
         return JSONResponse({"error": "LLM generation is disabled"}, status_code=404)
 
-    conn = request.app.state.get_conn()
     article_id = int(request.path_params["article_id"])
-    article = store.get_article(conn, user_id, article_id)
+    article = await run_off_thread(request.app.state.db_path, store.get_article, user_id, article_id)
     if article is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -173,12 +181,9 @@ async def summarize(request: Request) -> JSONResponse:
             }
         )
 
-    text = plain_text_excerpt(article["content_html"], limit=None)
-    word_count = len(text.split())
-
     try:
         summary_html, llm_summary_at = await run_off_thread(
-            request.app.state.db_path, _run_summarize, article_id, text, word_count
+            request.app.state.db_path, _run_summarize, article_id, article["content_html"]
         )
     except ClaudeError as exc:
         return JSONResponse({"error": str(exc)}, status_code=503)
@@ -195,8 +200,7 @@ async def mark_all_read(request: Request) -> JSONResponse:
         user_id = require_user_id(request)
     except AnonymousUserError:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
-    conn = request.app.state.get_conn()
-    marked = store.mark_all_read_global(conn, user_id)
+    marked = await run_off_thread(request.app.state.db_path, store.mark_all_read_global, user_id)
     return JSONResponse({"ok": True, "marked": marked})
 
 
@@ -205,9 +209,9 @@ async def mark_read(request: Request) -> JSONResponse:
         user_id = require_user_id(request)
     except AnonymousUserError:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
-    conn = request.app.state.get_conn()
-    article_id = int(request.path_params["article_id"])
-    ok = store.mark_read(conn, user_id, article_id)
+    ok = await run_off_thread(
+        request.app.state.db_path, store.mark_read, user_id, int(request.path_params["article_id"])
+    )
     if not ok:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True})
@@ -218,9 +222,9 @@ async def toggle_star(request: Request) -> JSONResponse:
         user_id = require_user_id(request)
     except AnonymousUserError:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
-    conn = request.app.state.get_conn()
-    article_id = int(request.path_params["article_id"])
-    result = store.toggle_star(conn, user_id, article_id)
+    result = await run_off_thread(
+        request.app.state.db_path, store.toggle_star, user_id, int(request.path_params["article_id"])
+    )
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(result)
@@ -231,9 +235,9 @@ async def toggle_read(request: Request) -> JSONResponse:
         user_id = require_user_id(request)
     except AnonymousUserError:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
-    conn = request.app.state.get_conn()
-    article_id = int(request.path_params["article_id"])
-    result = store.toggle_read(conn, user_id, article_id)
+    result = await run_off_thread(
+        request.app.state.db_path, store.toggle_read, user_id, int(request.path_params["article_id"])
+    )
     if result is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(result)

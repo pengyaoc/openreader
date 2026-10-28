@@ -64,8 +64,7 @@ async def add_source(request: Request) -> JSONResponse:
     # Make it appear in the sidebar immediately — GET /api/sources reads the
     # DB, and without this the source would be invisible until the next
     # refresh happens to create its row as a side effect.
-    conn = request.app.state.get_conn()
-    get_or_create_source(conn, source)
+    await run_off_thread(request.app.state.db_path, get_or_create_source, source)
 
     return JSONResponse({"ok": True, "key": source.key}, status_code=201)
 
@@ -76,9 +75,10 @@ async def get_source(request: Request) -> JSONResponse:
     rules) that the lean sidebar listing doesn't include. Backs the edit
     modal's pre-fill — editing needs the actual feed URL or IMAP query,
     not just what the sidebar shows."""
-    conn = request.app.state.get_conn()
     source_id = int(request.path_params["source_id"])
-    row = store.get_source(conn, current_user_id(request), source_id)
+    row = await run_off_thread(
+        request.app.state.db_path, store.get_source, current_user_id(request), source_id
+    )
     if row is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
@@ -103,6 +103,11 @@ async def get_source(request: Request) -> JSONResponse:
     )
 
 
+def _source_key(conn, source_id: int) -> str | None:
+    row = conn.execute("SELECT key FROM sources WHERE id = ?", (source_id,)).fetchone()
+    return row[0] if row else None
+
+
 async def update_source(request: Request) -> JSONResponse:
     """Edits an existing source's fields in place — title, folder,
     url/query/mailbox_folder, fetch_full_text, rules. `key` and `type` are
@@ -124,12 +129,10 @@ async def update_source(request: Request) -> JSONResponse:
     if (resp := readonly_response()) is not None:
         return resp
 
-    conn = request.app.state.get_conn()
     source_id = int(request.path_params["source_id"])
-    row = conn.execute("SELECT key FROM sources WHERE id = ?", (source_id,)).fetchone()
-    if row is None:
+    key = await run_off_thread(request.app.state.db_path, _source_key, source_id)
+    if key is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    key = row[0]
 
     config = request.app.state.config
     existing = config.source(key)
@@ -154,20 +157,23 @@ async def update_source(request: Request) -> JSONResponse:
 
     save_config(request, new_config)
 
-    conn.execute(
-        "UPDATE sources SET title = ?, folder = ?, url = ? WHERE id = ?",
-        (updated.title, updated.folder, updated.url, source_id),
-    )
-    if updated.url != existing.url or updated.item_selector != existing.item_selector:
-        # Forget the cached validators, or the next refresh gets a 304 for
-        # the unchanged page and a fixed web-feed selector would sit unused
-        # until the site happens to publish something.
-        conn.execute("UPDATE sources SET etag = NULL, last_modified = NULL WHERE id = ?", (source_id,))
-    conn.commit()
+    def apply(conn) -> int:
+        conn.execute(
+            "UPDATE sources SET title = ?, folder = ?, url = ? WHERE id = ?",
+            (updated.title, updated.folder, updated.url, source_id),
+        )
+        if updated.url != existing.url or updated.item_selector != existing.item_selector:
+            # Forget the cached validators, or the next refresh gets a 304 for
+            # the unchanged page and a fixed web-feed selector would sit unused
+            # until the site happens to publish something.
+            conn.execute("UPDATE sources SET etag = NULL, last_modified = NULL WHERE id = ?", (source_id,))
+        conn.commit()
 
-    # Rules may have changed — sweep articles that no longer pass, same as
-    # a raw-YAML config save does.
-    reconciled = reconcile_read_state(conn, new_config)
+        # Rules may have changed — sweep articles that no longer pass, same as
+        # a raw-YAML config save does.
+        return reconcile_read_state(conn, new_config)
+
+    reconciled = await run_off_thread(request.app.state.db_path, apply)
 
     return JSONResponse({"ok": True, "key": updated.key, "reconciled": reconciled})
 
@@ -186,12 +192,10 @@ async def remove_source(request: Request) -> JSONResponse:
     if (resp := readonly_response()) is not None:
         return resp
 
-    conn = request.app.state.get_conn()
     source_id = int(request.path_params["source_id"])
-    row = conn.execute("SELECT key FROM sources WHERE id = ?", (source_id,)).fetchone()
-    if row is None:
+    key = await run_off_thread(request.app.state.db_path, _source_key, source_id)
+    if key is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    key = row[0]
 
     config = request.app.state.config
     new_sources = [s for s in config.sources if s.key != key]
@@ -201,7 +205,7 @@ async def remove_source(request: Request) -> JSONResponse:
 
     save_config(request, new_config)
 
-    reconciled = reconcile_read_state(conn, new_config)
+    reconciled = await run_off_thread(request.app.state.db_path, reconcile_read_state, new_config)
 
     return JSONResponse({"ok": True, "reconciled": reconciled})
 
@@ -211,9 +215,9 @@ async def mark_all_read(request: Request) -> JSONResponse:
         user_id = require_user_id(request)
     except AnonymousUserError:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
-    conn = request.app.state.get_conn()
-    source_id = int(request.path_params["source_id"])
-    marked = store.mark_all_read(conn, user_id, source_id)
+    marked = await run_off_thread(
+        request.app.state.db_path, store.mark_all_read, user_id, int(request.path_params["source_id"])
+    )
     if marked is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"ok": True, "marked": marked})

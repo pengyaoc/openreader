@@ -3,6 +3,7 @@ from starlette.responses import JSONResponse
 
 from app.api._common import AnonymousUserError, readonly_response, require_user_id
 from app.config import ConfigError, parse_config
+from app.db import run_off_thread
 from app.ingest.refresh import reconcile_read_state, sync_sources
 
 
@@ -31,8 +32,10 @@ async def put_config(request: Request) -> JSONResponse:
     request.app.state.config_path.write_text(raw_yaml)
     request.app.state.config = config
 
-    conn = request.app.state.get_conn()
-    sync_sources(conn, config)
-    reconciled = reconcile_read_state(conn, config)
+    def apply(conn) -> int:
+        sync_sources(conn, config)
+        return reconcile_read_state(conn, config)
+
+    reconciled = await run_off_thread(request.app.state.db_path, apply)
 
     return JSONResponse({"ok": True, "reconciled": reconciled})

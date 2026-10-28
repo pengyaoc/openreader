@@ -28,6 +28,7 @@ from app.api import (
 from app.auth import auth_configured, load_auth_config, upsert_user
 from app.config import Config, load_config
 from app.db import connect, init_schema
+from app.imgcache import ImageCache
 from app.ingest.refresh import sync_sources
 from app.pchauth.starlette_adapter import PchauthMiddleware
 from app.timing import TimingMiddleware
@@ -97,11 +98,12 @@ def create_app(
     # output. Images are already compressed and in Starlette's exclude list.
     middleware = [Middleware(TimingMiddleware), Middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)]
     if require_auth:
+        user_ids: dict[str, int] = {}
         middleware.append(
             Middleware(
                 PchauthMiddleware,
                 config=load_auth_config(),
-                upsert_user=lambda identity: upsert_user(identity, get_conn),
+                upsert_user=lambda identity: upsert_user(identity, get_conn, user_ids),
             )
         )
     app = Starlette(routes=routes, middleware=middleware)
@@ -109,6 +111,8 @@ def create_app(
     app.state.config = config
     app.state.config_path = config_path
     app.state.db_path = db_path
+    image_cache_dir = Path(settings.IMAGE_CACHE_DIR) if settings.IMAGE_CACHE_DIR else Path(db_path).parent / "imgcache"
+    app.state.image_cache = ImageCache(image_cache_dir, settings.IMAGE_CACHE_MAX_MB * 1024 * 1024)
     return app
 
 

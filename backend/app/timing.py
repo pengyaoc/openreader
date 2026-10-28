@@ -21,9 +21,31 @@ Two things per API request:
 """
 from __future__ import annotations
 
+import atexit
+import logging
+import logging.handlers
+import queue
+import sys
 import time
 
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+
+# TIMING lines go out through a queue drained by a listener thread, not a
+# print() on the request path: print(..., flush=True) was a blocking write
+# to journald's pipe on the event loop, once per request (2026-10-27). Same
+# line format on stdout as before, so existing journalctl greps still work.
+_log_queue: queue.SimpleQueue = queue.SimpleQueue()
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setFormatter(logging.Formatter("%(message)s"))
+_listener = logging.handlers.QueueListener(_log_queue, _stdout_handler)
+_listener.start()
+atexit.register(_listener.stop)
+
+_log = logging.getLogger("reader.timing")
+_log.setLevel(logging.INFO)
+_log.propagate = False
+_log.addHandler(logging.handlers.QueueHandler(_log_queue))
 
 
 def _majflt() -> int | None:
@@ -78,9 +100,11 @@ class TimingMiddleware:
                 if faults_before is not None and faults_after is not None
                 else None
             )
-            print(
-                f"TIMING {scope['method']} {scope['path']} "
-                f"status={status_holder.get('status', '?')} "
-                f"dur_ms={elapsed_ms:.1f} majflt_delta={fault_delta}",
-                flush=True,
+            _log.info(
+                "TIMING %s %s status=%s dur_ms=%.1f majflt_delta=%s",
+                scope["method"],
+                scope["path"],
+                status_holder.get("status", "?"),
+                elapsed_ms,
+                fault_delta,
             )

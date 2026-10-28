@@ -59,18 +59,33 @@ def auth_configured() -> bool:
     return load_auth_config().mode != "off"
 
 
-def upsert_user(identity, get_conn) -> int | None:
+def upsert_user(identity, get_conn, cache: dict[str, int] | None = None) -> int | None:
     """pchauth's upsert_user callback. The off-mode sentinel identity
     (empty email) maps straight to DEFAULT_USER_ID with no DB write at
     all — reproducing the old no-login behavior exactly, rather than
-    creating a spurious empty-email account."""
+    creating a spurious empty-email account.
+
+    `cache` (email -> user id, one per app) skips the database after the
+    first request from each account. The middleware calls this for every
+    /api/ request, image proxy loads included, and it runs on the event
+    loop: before the cache, an article with 20 images meant 20 blocking
+    connect-and-SELECTs ahead of the handlers (2026-10-27). Ids never
+    change once assigned. The one catch: after `useradm link` re-points an
+    email that has already signed in, restart the service so the old
+    mapping is dropped."""
     if not identity.email:
         return DEFAULT_USER_ID
+    email = identity.email.strip().lower()
+    if cache is not None and email in cache:
+        return cache[email]
     conn = get_conn()
     try:
-        return upsert_user_by_email(conn, identity.email)
+        user_id = upsert_user_by_email(conn, email)
     finally:
         conn.close()
+    if cache is not None:
+        cache[email] = user_id
+    return user_id
 
 
 def verify_password(plain: str, password_hash: str | None) -> bool:

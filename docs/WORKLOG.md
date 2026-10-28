@@ -3061,3 +3061,67 @@ Same cause as 2026-10-17's finding: the idle worker gets swapped out on the 1GB 
 
 Not yet confirmed: whether the first open after an idle gap gets faster. Check `TIMING`
 `majflt_delta` on cold opens after a day of normal use. If still slow, the remaining fix is 2GB RAM.
+
+## 2026-10-27 — Performance/latency pass
+
+A code review for latency, then fixes for what it found. Verified locally:
+backend suite (320 tests) plus a browser pass against the dev servers.
+
+**Request path**
+- Auth middleware looked up the user (fresh SQLite connection + SELECT)
+  on the event loop for every `/api/*` request, image proxy loads
+  included. → per-app `email → user id` cache in `upsert_user`. After
+  `useradm link` re-points an email that has already signed in, restart.
+- `get_article`, mark-read/star/toggle, mark-all-read, source edit/remove
+  and `PUT /api/config` still ran their SQLite work on the event loop. →
+  all via `run_off_thread` now.
+- `run_off_thread` opened (and `get_conn` leaked) a fresh connection per
+  request, so the per-connection 16MB page cache started empty every time.
+  → one long-lived connection per worker thread (`db._thread_conn`),
+  rolled back if a call leaves a transaction open.
+- `idx_articles_source_pub` gained the `id DESC` tiebreaker; a
+  single-source list no longer sorts ties in a temp b-tree. Existing DBs
+  get the index rebuilt on startup.
+- TIMING log lines go through a queue listener instead of a blocking
+  `print(flush=True)` per request. Same line format on stdout.
+
+**Images**
+- Every image after an article's first is `loading="lazy"` (at ingest,
+  and at render time for older rows). An article with 53 images went from
+  53 proxy requests on open to 1.
+- The proxy streams with a hard 15MB cap (it used to read the whole body
+  first), and keeps fetched images in a size-capped LRU disk cache
+  (`app/imgcache.py`; `data/imgcache`, 256MB by default, configurable with
+  `READER_IMAGE_CACHE` / `READER_IMAGE_CACHE_MB`). Locally, a cache hit
+  took about 1-5ms, against about 50ms from the origin in the same test.
+
+**Startup and ingest**
+- `_backfill_hydrated_excerpts` parsed every hydrated body on every
+  startup. → runs once, recorded in `PRAGMA user_version`.
+- Batch hydration writes each article as its fetch finishes instead of
+  after the whole batch, so opening one mid-batch no longer triggers a
+  second inline fetch. The on-open fetch reuses one pooled HTTP client.
+- Refresh dedup: two point lookups instead of `guid = ? OR content_hash = ?`
+  (planned as a scan of the whole source per entry), checked before the
+  rules engine runs. A refresh report's `filtered` now counts only new
+  entries that the rules dropped.
+- `reconcile_read_state` loads one article body at a time instead of all
+  of them.
+
+**Frontend**
+- Fonts are self-hosted from @fontsource packages instead of Google Fonts
+  (no third-party DNS/TLS/CSS before first paint). Archivo Expanded is
+  variable Archivo at `font-stretch: 125%`. Noto Sans SC's ~400KB of
+  @font-face rules load as separate async chunks after startup, with
+  PingFang SC standing in until then.
+- Removed the 2026-08-19 viewport logger and its "Copy viewport log"
+  button. The `--app-height` fix stays. The logger forced a layout and
+  rewrote a localStorage JSON buffer on every visualViewport scroll.
+- After a refresh or settings save, the list on screen reloads all its
+  loaded pages in one request (up to 200 rows) instead of one request per
+  page, and keeps its scroll position.
+
+**Not changed:** sidebar unread counts still scan every article per
+`/api/sources` call. A maintained per-(user, source) counter would have to
+be kept in step by every read/unread/insert/reconcile path, which isn't
+worth the drift risk at a few thousand articles.

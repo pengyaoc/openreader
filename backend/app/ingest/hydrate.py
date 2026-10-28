@@ -47,8 +47,21 @@ _HYDRATE_CONCURRENCY = 10
 _HYDRATE_BATCH_LIMIT = 100
 
 
+_shared_client: httpx.Client | None = None
+_shared_client_lock = threading.Lock()
+
+
 def _default_fetcher(url: str, timeout: float) -> str:
-    resp = httpx.get(url, headers={"User-Agent": USER_AGENT}, timeout=timeout, follow_redirects=True)
+    """The on-open fetch's fetcher. One pooled client for the process
+    (httpx.Client is thread-safe), so opening several articles from the
+    same site reuses a connection instead of a new TCP+TLS handshake
+    each time."""
+    global _shared_client
+    with _shared_client_lock:
+        if _shared_client is None:
+            _shared_client = httpx.Client(headers={"User-Agent": USER_AGENT}, follow_redirects=True)
+        client = _shared_client
+    resp = client.get(url, timeout=timeout)
     resp.raise_for_status()
     return resp.text
 
@@ -180,31 +193,40 @@ def hydrate_pending(
         return 0
 
     # Network+parse fan-out happens off the calling connection entirely —
-    # fetch_and_extract is pure, so results are collected here and written
-    # back on the calling thread in one pass, avoiding any cross-thread
-    # sqlite3 connection use.
+    # fetch_and_extract is pure, and every write happens here on the
+    # calling thread, avoiding any cross-thread sqlite3 connection use.
+    # Each result is written as soon as its fetch finishes rather than after
+    # the whole batch (2026-10-27): a batch is up to 100 fetches with 5s
+    # timeouts, and until an article's row was written, opening it fell
+    # back to a second, inline fetch that the reader had to wait for.
+    hydrated = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=_HYDRATE_CONCURRENCY) as pool:
         futures = {
-            article_id: pool.submit(fetch_and_extract, url, timeout, fetcher)
+            pool.submit(fetch_and_extract, url, timeout, fetcher): article_id
             for article_id, url in rows
             if url
         }
-        results = {article_id: fut.result() for article_id, fut in futures.items()}
-
-    now = datetime.now(UTC).isoformat()
-    hydrated = 0
-    for article_id, extracted in results.items():
-        if extracted:
-            conn.execute(
-                "UPDATE articles SET content_html = ?, excerpt = ?, hydrated_at = ? WHERE id = ?",
-                (extracted, plain_text_excerpt(extracted, limit=EXCERPT_LIMIT), now, article_id),
-            )
-            hydrated += 1
-        else:
-            conn.execute(
-                "UPDATE articles SET hydrate_failed_at = ? WHERE id = ?", (now, article_id)
-            )
-    conn.commit()
+        for fut in concurrent.futures.as_completed(futures):
+            article_id = futures[fut]
+            extracted = fut.result()
+            now = datetime.now(UTC).isoformat()
+            # The hydrated_at/hydrate_failed_at IS NULL guard: an on-open
+            # fetch may have settled this article while its batch fetch was
+            # in flight, and the first result written stays.
+            if extracted:
+                cur = conn.execute(
+                    """UPDATE articles SET content_html = ?, excerpt = ?, hydrated_at = ?
+                       WHERE id = ? AND hydrated_at IS NULL AND hydrate_failed_at IS NULL""",
+                    (extracted, plain_text_excerpt(extracted, limit=EXCERPT_LIMIT), now, article_id),
+                )
+                hydrated += cur.rowcount
+            else:
+                conn.execute(
+                    """UPDATE articles SET hydrate_failed_at = ?
+                       WHERE id = ? AND hydrated_at IS NULL AND hydrate_failed_at IS NULL""",
+                    (now, article_id),
+                )
+            conn.commit()
     return hydrated
 
 
@@ -227,7 +249,8 @@ def hydrate_in_background(db_path: str | Path, source_fetch_full_text: dict[str,
 
     Still triggered only by a refresh someone asked for, never by a timer.
     If the process stops mid-batch nothing is lost: hydrate_pending writes
-    only at the end, so the next refresh picks the same articles up again."""
+    each article as it finishes, and the next refresh picks up the ones it
+    hadn't reached."""
     global _background_running, _background_queued
     if not any(source_fetch_full_text.values()):
         return

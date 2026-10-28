@@ -9,6 +9,11 @@ CONFIG_PATH = Path(os.environ.get("READER_CONFIG", REPO_ROOT / "config" / "feeds
 DB_PATH = Path(os.environ.get("READER_DB", REPO_ROOT / "data" / "reader.db"))
 MEDIA_DIR = Path(os.environ.get("READER_MEDIA", REPO_ROOT / "data" / "media"))
 
+# Image proxy's disk cache (see app/imgcache.py). Default: an `imgcache`
+# directory next to the database. The size cap is in megabytes.
+IMAGE_CACHE_DIR = os.environ.get("READER_IMAGE_CACHE")
+IMAGE_CACHE_MAX_MB = int(os.environ.get("READER_IMAGE_CACHE_MB", "256"))
+
 # type=imap sources. Deliberately env-only, never feeds.yaml — see
 # app.config._check_no_credentials. All three must be set for IMAP refresh
 # to run; a partial set is treated as "not configured" (see api/refresh_api).

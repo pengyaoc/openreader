@@ -16,6 +16,7 @@ import asyncio
 import html
 import re
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -76,7 +77,10 @@ CREATE TABLE IF NOT EXISTS articles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_articles_content_hash ON articles(content_hash);
-CREATE INDEX IF NOT EXISTS idx_articles_source_pub ON articles(source_id, published_at DESC);
+-- Trailing `, id DESC` for the same reason as idx_articles_pub below:
+-- without it a single-source list sorted its published_at ties in a temp
+-- b-tree. See _ensure_source_pub_tiebreak for existing databases.
+CREATE INDEX IF NOT EXISTS idx_articles_source_pub ON articles(source_id, published_at DESC, id DESC);
 -- Trailing `, id DESC` matches list_articles' ORDER BY tiebreaker (ties on
 -- published_at aren't rare — many feeds/newsletters share a timestamp) so
 -- SQLite can satisfy the sort straight from the index instead of falling
@@ -167,8 +171,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
     ensure_default_user(conn)
     _migrate_per_user_state(conn)
     _move_bodies_to_row_end(conn)
+    _ensure_source_pub_tiebreak(conn)
     _backfill_decoded_entities(conn)
-    _backfill_hydrated_excerpts(conn)
+    if conn.execute("PRAGMA user_version").fetchone()[0] < _HYDRATED_EXCERPTS_VERSION:
+        _backfill_hydrated_excerpts(conn)
+        conn.execute(f"PRAGMA user_version = {_HYDRATED_EXCERPTS_VERSION}")
+        conn.commit()
 
     # Consolidated login, 2026-09-05 (see docs/WORKLOG.md and pchauth's
     # spec). subject/name are reserved for the deferred self_oidc source
@@ -176,6 +184,14 @@ def init_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "users", "email", "TEXT")
     _add_column_if_missing(conn, "users", "subject", "TEXT")
     _add_column_if_missing(conn, "users", "name", "TEXT")
+
+
+# PRAGMA user_version marks one-time repairs as done. Most migrations here
+# detect "already done" from the schema itself, but the excerpt backfill
+# can't: telling whether a row needs it means parsing its body, so running
+# it to find out cost a read and parse of every hydrated article on every
+# startup (2026-10-27).
+_HYDRATED_EXCERPTS_VERSION = 1
 
 
 def upsert_user_by_email(conn: sqlite3.Connection, email: str) -> int:
@@ -322,6 +338,22 @@ def _move_bodies_to_row_end(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _ensure_source_pub_tiebreak(conn: sqlite3.Connection) -> None:
+    """CREATE INDEX IF NOT EXISTS keeps an existing index as it is, so a
+    database made before idx_articles_source_pub gained its `id DESC`
+    tiebreaker (2026-10-27) needs the index rebuilt to pick it up."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_articles_source_pub'"
+    ).fetchone()
+    if row is None or "id DESC" in row[0]:
+        return
+    conn.execute("DROP INDEX idx_articles_source_pub")
+    conn.execute(
+        "CREATE INDEX idx_articles_source_pub ON articles(source_id, published_at DESC, id DESC)"
+    )
+    conn.commit()
+
+
 def _backfill_decoded_entities(conn: sqlite3.Connection) -> None:
     """Fixes articles ingested before connectors/rss.py started decoding
     double-encoded entities (`&amp;#8217;` where a feed meant `&#8217;`,
@@ -417,13 +449,33 @@ def _drop_column_if_present(conn: sqlite3.Connection, table: str, column: str) -
             raise
 
 
+_thread_local = threading.local()
+
+
+def _thread_conn(db_path: str | Path) -> sqlite3.Connection:
+    """This worker thread's connection to `db_path`, opened on first use
+    and kept. asyncio.to_thread's executor threads live as long as the
+    process, so this is one connection per thread rather than one per
+    request. That keeps SQLite's page cache (cache_size, per connection)
+    warm across requests instead of starting empty every time, and skips
+    re-running connect()'s PRAGMAs. A thread only ever holds one: a
+    different path (a test's fresh tmp DB) closes the previous one."""
+    key = str(db_path)
+    cached = getattr(_thread_local, "conn", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    if cached is not None:
+        cached[1].close()
+    conn = connect(db_path)
+    _thread_local.conn = (key, conn)
+    return conn
+
+
 async def run_off_thread(db_path: str | Path, fn: Callable[..., T], *args, **kwargs) -> T:
     """Runs `fn(conn, *args)` on a worker thread via asyncio.to_thread,
-    against its own fresh connection — sqlite3 connections default to
-    check_same_thread=True, so the request's connection (opened on the
-    event loop thread) can't cross into a worker thread. A fresh connection
-    here is cheap and matches the app's existing "fresh connection per use"
-    pattern (see app.state.get_conn).
+    against that thread's own connection (see _thread_conn) — sqlite3
+    connections default to check_same_thread=True, so a connection can't
+    cross between threads.
 
     Needed anywhere a handler calls into synchronous, potentially slow I/O
     (a blocking HTTP fetch, an IMAP session) — called directly from an
@@ -432,10 +484,14 @@ async def run_off_thread(db_path: str | Path, fn: Callable[..., T], *args, **kwa
     process is handling until it returns."""
 
     def run() -> T:
-        conn = connect(db_path)
+        conn = _thread_conn(db_path)
         try:
             return fn(conn, *args, **kwargs)
         finally:
-            conn.close()
+            # The connection outlives this call, so a write `fn` left
+            # uncommitted (it raised partway) must not leak into the next
+            # request served on this thread.
+            if conn.in_transaction:
+                conn.rollback()
 
     return await asyncio.to_thread(run)

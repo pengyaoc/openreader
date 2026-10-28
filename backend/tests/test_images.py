@@ -81,3 +81,93 @@ def test_assert_safe_url_rejects_private_network_ranges():
             assert False, f"expected SsrfBlocked for {url}"
         except SsrfBlocked:
             pass
+
+
+# --- proxy_image end to end, against a mock upstream ----------------------
+
+import httpx
+import pytest
+from starlette.testclient import TestClient
+
+from app.api import images
+from app.db import connect, init_schema
+from app.imgcache import ImageCache
+from app.main import create_app
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+@pytest.fixture()
+def proxy(tmp_path, monkeypatch):
+    """A test client whose image fetches go to `upstream` (a handler the
+    test sets) instead of the network, with the SSRF DNS check stubbed out
+    (it has its own tests above). Returns (client, calls)."""
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.close()
+    calls: list[str] = []
+    state = {"handler": lambda request: httpx.Response(200, headers={"Content-Type": "image/png"}, content=_PNG)}
+
+    def transport_handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return state["handler"](request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(transport_handler))
+    monkeypatch.setattr(images, "_shared_client", lambda: client)
+    monkeypatch.setattr(images, "_assert_safe_url", lambda url: None)
+    app = create_app(db_path=tmp_path / "reader.db", require_auth=False)
+    return TestClient(app), calls, state
+
+
+def test_proxy_serves_a_repeat_request_from_the_disk_cache(proxy):
+    client, calls, _ = proxy
+    first = client.get("/api/img", params={"url": "https://cdn.example.com/a.png"})
+    second = client.get("/api/img", params={"url": "https://cdn.example.com/a.png"})
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content == _PNG
+    assert second.headers["content-type"] == "image/png"
+    assert len(calls) == 1
+
+
+def test_proxy_does_not_cache_failures(proxy):
+    client, calls, state = proxy
+    state["handler"] = lambda request: httpx.Response(404)
+    assert client.get("/api/img", params={"url": "https://cdn.example.com/x.png"}).status_code == 502
+    assert client.get("/api/img", params={"url": "https://cdn.example.com/x.png"}).status_code == 502
+    assert len(calls) == 2
+
+
+def test_proxy_rejects_an_image_over_the_size_cap(proxy, monkeypatch):
+    client, _, state = proxy
+    monkeypatch.setattr(images, "_MAX_BYTES", 32)
+    state["handler"] = lambda request: httpx.Response(
+        200, headers={"Content-Type": "image/png"}, content=_PNG
+    )
+    assert client.get("/api/img", params={"url": "https://cdn.example.com/big.png"}).status_code == 502
+
+
+def test_proxy_follows_a_redirect_with_the_targets_own_referer(proxy):
+    client, calls, state = proxy
+
+    def handler(request):
+        if request.url.host == "old.example.com":
+            return httpx.Response(302, headers={"Location": "https://new.example.com/a.png"})
+        assert request.headers["Referer"] == "https://new.example.com/"
+        return httpx.Response(200, headers={"Content-Type": "application/octet-stream"}, content=_PNG)
+
+    state["handler"] = handler
+    resp = client.get("/api/img", params={"url": "https://old.example.com/a.png"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/png"  # sniffed
+    assert calls == ["https://old.example.com/a.png", "https://new.example.com/a.png"]
+
+
+def test_image_cache_prunes_least_recently_used_entries(tmp_path):
+    cache = ImageCache(tmp_path, max_bytes=1000)
+    for i in range(5):
+        cache.put(f"https://x/{i}", "image/png", b"x" * 300)
+    cache.get("https://x/0")  # most recently used now
+    cache.prune()
+    remaining = {i for i in range(5) if cache.get(f"https://x/{i}") is not None}
+    assert 0 in remaining
+    assert sum(p.stat().st_size for p in tmp_path.iterdir()) <= 800

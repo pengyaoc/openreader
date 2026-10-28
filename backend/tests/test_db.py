@@ -90,6 +90,9 @@ def test_init_schema_rebuilds_subtitles_for_previously_hydrated_articles(tmp_pat
            VALUES (?, 'g1', 'https://example.com/post', 'Title', '', ?, '2026-09-06T00:00:00Z', 'feed')""",
         (source_id, content),
     )
+    # A database from before the repair existed: init_schema records that
+    # it ran in user_version, so reset that to stand in for one.
+    conn.execute("PRAGMA user_version = 0")
     conn.commit()
 
     init_schema(conn)
@@ -103,6 +106,49 @@ def test_init_schema_rebuilds_subtitles_for_previously_hydrated_articles(tmp_pat
     assert conn.execute("SELECT excerpt FROM articles WHERE guid = 'g1'").fetchone()[0] == (
         "The extracted website lead is now the subtitle."
     )
+
+
+def test_hydrated_excerpt_backfill_runs_only_once(tmp_path):
+    """Recorded in user_version so later startups skip the body scan: a row
+    left with a stale excerpt after the repair is not rewritten again."""
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute(
+        "INSERT INTO sources (key, type, title, folder) VALUES ('s1', 'rss', 'S', 'F')"
+    )
+    source_id = conn.execute("SELECT id FROM sources WHERE key = 's1'").fetchone()[0]
+    conn.execute(
+        """INSERT INTO articles
+           (source_id, guid, url, title, excerpt, content_html, hydrated_at, origin)
+           VALUES (?, 'g1', 'https://x/1', 'T', 'kept', '<p>body</p>', '2026-09-06', 'feed')""",
+        (source_id,),
+    )
+    conn.commit()
+
+    init_schema(conn)
+
+    assert conn.execute("SELECT excerpt FROM articles").fetchone()[0] == "kept"
+    assert conn.execute("PRAGMA user_version").fetchone()[0] >= 1
+
+
+def test_init_schema_adds_id_tiebreak_to_existing_source_pub_index(tmp_path):
+    conn = connect(tmp_path / "reader.db")
+    init_schema(conn)
+    conn.execute("DROP INDEX idx_articles_source_pub")
+    conn.execute("CREATE INDEX idx_articles_source_pub ON articles(source_id, published_at DESC)")
+    conn.commit()
+
+    init_schema(conn)
+
+    plan = " ".join(
+        row[3]
+        for row in conn.execute(
+            """EXPLAIN QUERY PLAN SELECT a.id FROM articles a WHERE a.source_id = 1
+               ORDER BY a.published_at DESC, a.id DESC LIMIT 50"""
+        )
+    )
+    assert "idx_articles_source_pub" in plan
+    assert "TEMP B-TREE" not in plan
 
 
 def test_init_schema_drops_jobs_table_and_generation_columns_from_an_older_db(tmp_path):

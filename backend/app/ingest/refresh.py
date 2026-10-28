@@ -98,6 +98,26 @@ def _entry_to_raw_article(entry: NormalizedEntry) -> RawArticle:
     )
 
 
+def _already_stored(conn: sqlite3.Connection, source_id: int, entry: NormalizedEntry) -> bool:
+    """The dedup check (see _persist_entry for why both keys). Two point
+    lookups rather than one `guid = ? OR content_hash = ?`: SQLite planned
+    the OR as a range scan over every stored article of the source, once
+    per feed entry on every refresh (2026-10-27)."""
+    if conn.execute(
+        "SELECT 1 FROM articles WHERE source_id = ? AND guid = ?", (source_id, entry.guid)
+    ).fetchone():
+        return True
+    if not entry.url:
+        return False
+    return (
+        conn.execute(
+            "SELECT 1 FROM articles WHERE content_hash = ? AND source_id = ?",
+            (content_hash(entry.url, entry.title), source_id),
+        ).fetchone()
+        is not None
+    )
+
+
 def _persist_entry(
     conn: sqlite3.Connection,
     source_id: int,
@@ -120,15 +140,9 @@ def _persist_entry(
     content_hash column and its index already existed for this — this was
     the missing other half, wiring the lookup up to actually use it.
     """
-    chash = content_hash(entry.url, entry.title) if entry.url else None
-    existing = conn.execute(
-        """SELECT id FROM articles
-           WHERE source_id = ?
-             AND (guid = ? OR (content_hash IS NOT NULL AND content_hash = ?))""",
-        (source_id, entry.guid, chash),
-    ).fetchone()
-    if existing:
+    if _already_stored(conn, source_id, entry):
         return False
+    chash = content_hash(entry.url, entry.title) if entry.url else None
 
     # Prefer content:encoded, but many feeds (dapenti.com/xilei among them)
     # put the full HTML body — images included — straight into <description>
@@ -230,6 +244,11 @@ def _persist_rss_result(
     new_count = 0
     filtered_count = 0
     for entry in entries:
+        # Already-stored entries (most of any feed, on most refreshes) are
+        # skipped before the rules, not after: their regex pass decided
+        # nothing. Same order as the IMAP path below.
+        if _already_stored(conn, source_id, entry):
+            continue
         passed, matched = evaluate_rules(_entry_to_raw_article(entry), rules)
         if not passed:
             filtered_count += 1
@@ -681,14 +700,24 @@ def reconcile_read_state(conn: sqlite3.Connection, config: Config) -> int:
             continue  # no rules on this source -> nothing can fail to pass
 
         # Rules are evaluated once per article regardless of how many
-        # accounts are behind on it.
-        rows = conn.execute(
-            f"""SELECT a.id, a.title, a.excerpt, a.content_html, a.author, a.url
-                FROM articles a
-                WHERE a.source_id = ? AND {unread_for_anyone}""",
-            (source_id,),
-        ).fetchall()
-        for article_id, title, excerpt, content_html, author, url in rows:
+        # accounts are behind on it. Ids first, then one row at a time:
+        # fetching every candidate's content_html up front held all of
+        # those bodies in memory at once, on a ~1GB VM. The id list is
+        # materialized before any write, so the sweeps below can't disturb
+        # the query that found them.
+        article_ids = [
+            row[0]
+            for row in conn.execute(
+                f"""SELECT a.id FROM articles a
+                    WHERE a.source_id = ? AND {unread_for_anyone}""",
+                (source_id,),
+            )
+        ]
+        for article_id in article_ids:
+            title, excerpt, content_html, author, url = conn.execute(
+                "SELECT title, excerpt, content_html, author, url FROM articles WHERE id = ?",
+                (article_id,),
+            ).fetchone()
             raw = RawArticle(
                 title=title or "", summary=excerpt or "", content=content_html or "",
                 author=author or "", url=url or "",

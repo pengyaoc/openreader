@@ -29,11 +29,18 @@
   /* Every text stack ends in a CJK-native companion (Noto Sans/Serif SC)
      before the generic fallback — Newsreader/Archivo have no CJK glyphs, so
      without this the browser cross-font-falls-back to whatever the OS
-     happens to pick, which looks inconsistent across platforms. */
-  --font-display: 'Archivo Expanded', 'Archivo', 'Noto Sans SC', sans-serif;
-  --font-ui: 'Archivo', 'Noto Sans SC', -apple-system, sans-serif;
-  --font-read: 'Hanken Grotesk', 'Noto Sans SC', -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
+     happens to pick, which looks inconsistent across platforms.
+     All self-hosted from the @fontsource packages imported in main.tsx
+     (2026-10-27), not Google Fonts. Noto Sans SC loads after first paint
+     (see main.tsx), so PingFang SC stands in for CJK text until it does.
+     The display face is variable Archivo at 125% width, which is what
+     Archivo Expanded is: every --font-display rule sets
+     font-stretch: var(--display-stretch). */
+  --font-display: 'Archivo Variable', 'Noto Sans SC', 'PingFang SC', sans-serif;
+  --display-stretch: 125%;
+  --font-ui: 'Archivo Variable', 'Noto Sans SC', 'PingFang SC', -apple-system, sans-serif;
+  --font-read: 'Hanken Grotesk Variable', 'Noto Sans SC', 'PingFang SC', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', ui-monospace, monospace;
 
   --radius: 6px;
   --shadow-lift: 0 8px 32px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
@@ -228,6 +235,7 @@ a {
 
 .sidebar__brand-name {
   font-family: var(--font-display);
+  font-stretch: var(--display-stretch);
   font-weight: 700;
   font-size: 16.5px;
   letter-spacing: 0.01em;
@@ -543,6 +551,7 @@ a {
 
 .main__title {
   font-family: var(--font-display);
+  font-stretch: var(--display-stretch);
   font-weight: 700;
   font-size: 20px;
   letter-spacing: 0.005em;
@@ -1382,6 +1391,7 @@ html:has(.reader-overlay) {
 
 .config-drawer__title {
   font-family: var(--font-display);
+  font-stretch: var(--display-stretch);
   font-weight: 700;
   font-size: 15px;
 }

@@ -77,48 +77,84 @@ def sniff_image_type(body: bytes) -> str | None:
     return None
 
 
+class _FetchFailed(Exception):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+async def _fetch_image(client: httpx.AsyncClient, url: str) -> tuple[str, bytes]:
+    """Follows redirects by hand and returns (content type, body), raising
+    _FetchFailed with the status to answer otherwise.
+
+    follow_redirects=False and a manual hop loop, rather than httpx's
+    built-in follow_redirects=True: each redirect target has to pass the
+    same public-address check as the original URL, or a private/loopback
+    SSRF becomes reachable via a 302 from an otherwise-public host.
+
+    The body is streamed and abandoned past _MAX_BYTES. Reading it whole
+    first (resp.content) held an oversized image entirely in memory before
+    the cap could apply, on a ~1GB VM."""
+    current_url = url
+    headers = {"User-Agent": USER_AGENT, "Referer": referer_for(current_url)}
+    for _ in range(_MAX_REDIRECTS):
+        async with client.stream("GET", current_url, headers=headers) as resp:
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("Location")
+                if not location:
+                    raise _FetchFailed(502)
+                current_url = urljoin(current_url, location)
+                try:
+                    await asyncio.to_thread(_assert_safe_url, current_url)
+                except SsrfBlocked:
+                    raise _FetchFailed(400) from None
+                headers["Referer"] = referer_for(current_url)
+                continue
+            if resp.status_code != 200:
+                raise _FetchFailed(502)
+            chunks = []
+            size = 0
+            async for chunk in resp.aiter_bytes():
+                size += len(chunk)
+                if size > _MAX_BYTES:
+                    raise _FetchFailed(502)
+                chunks.append(chunk)
+            return resp.headers.get("Content-Type", ""), b"".join(chunks)
+    raise _FetchFailed(502)  # too many redirects
+
+
+def _image_response(content_type: str, body: bytes) -> Response:
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 async def proxy_image(request: Request) -> Response:
     url = request.query_params.get("url")
     if not url:
         return Response(status_code=400)
+
+    # A cached image already passed the SSRF check (and the type check
+    # below) when it was first fetched, so a hit skips straight to it — no
+    # DNS lookup, no origin round trip.
+    cache = request.app.state.image_cache
+    cached = await asyncio.to_thread(cache.get, url)
+    if cached is not None:
+        return _image_response(*cached)
 
     try:
         await asyncio.to_thread(_assert_safe_url, url)
     except SsrfBlocked:
         return Response(status_code=400)
 
-    # follow_redirects=False and a manual hop loop, rather than httpx's
-    # built-in follow_redirects=True: each redirect target has to pass the
-    # same public-address check as the original URL, or a private/loopback
-    # SSRF becomes reachable via a 302 from an otherwise-public host.
     try:
-        client = _shared_client()
-        current_url = url
-        headers = {"User-Agent": USER_AGENT, "Referer": referer_for(current_url)}
-        for _ in range(_MAX_REDIRECTS):
-            resp = await client.get(current_url, headers=headers)
-            if resp.status_code not in (301, 302, 303, 307, 308):
-                break
-            location = resp.headers.get("Location")
-            if not location:
-                return Response(status_code=502)
-            current_url = urljoin(current_url, location)
-            try:
-                await asyncio.to_thread(_assert_safe_url, current_url)
-            except SsrfBlocked:
-                return Response(status_code=400)
-            headers["Referer"] = referer_for(current_url)
-        else:
-            return Response(status_code=502)  # too many redirects
+        content_type, body = await _fetch_image(_shared_client(), url)
+    except _FetchFailed as exc:
+        return Response(status_code=exc.status_code)
     except httpx.HTTPError:
         return Response(status_code=502)
 
-    if resp.status_code != 200:
-        return Response(status_code=502)
-
-    body = resp.content[:_MAX_BYTES]
-
-    content_type = resp.headers.get("Content-Type", "")
     if not content_type.startswith("image/"):
         # Origin mislabeled it (a real, observed case: Qiniu-backed
         # s3.ifanr.com serves genuine PNGs as application/octet-stream) —
@@ -127,8 +163,5 @@ async def proxy_image(request: Request) -> Response:
         if sniffed is None:
             return Response(status_code=415)
         content_type = sniffed
-    return Response(
-        content=body,
-        media_type=content_type,
-        headers={"Cache-Control": "public, max-age=86400"},
-    )
+    await asyncio.to_thread(cache.put, url, content_type, body)
+    return _image_response(content_type, body)

@@ -32,6 +32,53 @@ const VIEW_TITLES: Record<string, string> = {
 // rather than the old behavior of silently capping at the server default
 // with no way to see anything past it.
 const ARTICLES_PAGE_SIZE = 50
+// The backend's cap on ?limit (app/api/articles.py's list_articles).
+const ARTICLES_MAX_LIMIT = 200
+
+type ArticleListParams = { view: string; source_id?: number; folder?: string }
+
+// After a refresh or a settings save. A plain invalidateQueries refetched an
+// infinite list one page after another: 5 loaded pages meant 5 sequential
+// requests before the list settled. The list on screen instead reloads its
+// loaded pages (up to the backend's limit) in one request, split back into
+// pages, so it keeps its length and scroll position. Lists not on screen
+// keep only their first page and refetch that when next shown.
+async function refetchArticleLists(qc: QueryClient) {
+  const queries = qc.getQueryCache().findAll({ queryKey: ['articles'] })
+  await Promise.all(
+    queries.map(async (query) => {
+      const data = query.state.data as ArticlesPages | undefined
+      const trimAndInvalidate = () => {
+        if (data) {
+          qc.setQueryData<ArticlesPages>(query.queryKey, {
+            pages: data.pages.slice(0, 1),
+            pageParams: data.pageParams.slice(0, 1),
+          })
+        }
+        return qc.invalidateQueries({ queryKey: query.queryKey, exact: true })
+      }
+      if (!data || data.pages.length <= 1 || !query.isActive()) return trimAndInvalidate()
+
+      const pageCount = Math.min(data.pages.length, ARTICLES_MAX_LIMIT / ARTICLES_PAGE_SIZE)
+      const params = query.queryKey[1] as ArticleListParams
+      let rows: ArticleListItem[]
+      try {
+        rows = await api.articles({ ...params, limit: pageCount * ARTICLES_PAGE_SIZE })
+      } catch {
+        return trimAndInvalidate()
+      }
+      const pages: ArticleListItem[][] = []
+      for (let i = 0; i < rows.length; i += ARTICLES_PAGE_SIZE) {
+        pages.push(rows.slice(i, i + ARTICLES_PAGE_SIZE))
+      }
+      if (pages.length === 0) pages.push([])
+      qc.setQueryData<ArticlesPages>(query.queryKey, {
+        pages,
+        pageParams: pages.map((_, i) => i * ARTICLES_PAGE_SIZE),
+      })
+    }),
+  )
+}
 
 type ArticlesPages = { pages: ArticleListItem[][]; pageParams: number[] }
 
@@ -275,7 +322,7 @@ export default function App() {
     mutationFn: () => api.refresh(),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sources'] })
-      qc.invalidateQueries({ queryKey: ['articles'] })
+      void refetchArticleLists(qc)
     },
   })
 
@@ -713,7 +760,7 @@ export default function App() {
           initialPane={settings === 'add' ? { kind: 'add' } : { kind: 'list' }}
           onSaved={() => {
             qc.invalidateQueries({ queryKey: ['sources'] })
-            qc.invalidateQueries({ queryKey: ['articles'] })
+            void refetchArticleLists(qc)
           }}
         />
       )}

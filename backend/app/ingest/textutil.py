@@ -123,13 +123,22 @@ def proxy_image_urls(html: str | None) -> str:
     sites (dapenti.com's image CDN among them) hotlink-protect on Referer,
     which breaks direct <img src> loads from our own origin. Routing through
     our server sidesteps that and avoids leaking the reader's IP/referrer to
-    third-party image hosts on every article view."""
+    third-party image hosts on every article view.
+
+    Every image after the first is also marked loading="lazy" (2026-10-27):
+    opening an article otherwise fetched all of its images through the
+    proxy at once, including ones far below the fold. The first is usually
+    in view on open, where lazy loading would only delay it. Added after
+    sanitizing, since nh3's allowlist would strip them."""
     clean = sanitize_html(html)
     if not clean:
         return clean
     tree = HTMLParser(clean)
-    for img in tree.css("img"):
+    for i, img in enumerate(tree.css("img")):
         src = img.attributes.get("src")
         if src:
             img.attrs["src"] = f"/api/img?url={quote(src, safe='')}"
+        if i > 0:
+            img.attrs["loading"] = "lazy"
+        img.attrs["decoding"] = "async"
     return tree.body.html[len("<body>") : -len("</body>")] if tree.body else clean

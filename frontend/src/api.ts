@@ -232,12 +232,19 @@ export const api = {
 
   sources: () => apiFetch('/api/sources').then((r) => json<Source[]>(r)),
 
-  articles: (params: { view?: string; source_id?: number; folder?: string; offset?: number }) => {
+  articles: (params: {
+    view?: string
+    source_id?: number
+    folder?: string
+    offset?: number
+    limit?: number
+  }) => {
     const qs = new URLSearchParams()
     if (params.view) qs.set('view', params.view)
     if (params.source_id) qs.set('source_id', String(params.source_id))
     if (params.folder) qs.set('folder', params.folder)
     if (params.offset) qs.set('offset', String(params.offset))
+    if (params.limit) qs.set('limit', String(params.limit))
     return apiFetch(`/api/articles?${qs}`).then((r) => json<ArticleListItem[]>(r))
   },
 

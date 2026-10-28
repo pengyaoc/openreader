@@ -53,6 +53,15 @@ function withApiBase(html: string): string {
   return html.replaceAll('"/api/img?', `"${API_BASE}/api/img?`)
 }
 
+// Rows ingested since 2026-10-27 already carry loading="lazy" on every image
+// after the first (proxy_image_urls). This gives older rows the same
+// treatment at render time, so opening one doesn't fetch every image through
+// the proxy at once. Images that already say how to load are left alone.
+function withLazyImages(html: string): string {
+  let seen = 0
+  return html.replace(/<img\b(?![^>]*\sloading=)/gi, (tag) => (seen++ === 0 ? tag : `${tag} loading="lazy"`))
+}
+
 export function ArticleReader({
   article,
   loading,
@@ -287,7 +296,7 @@ export function ArticleReader({
                 <div
                   className="reader-body"
                   dangerouslySetInnerHTML={{
-                    __html: withApiBase(article.content_html || `<p>${article.excerpt}</p>`),
+                    __html: withLazyImages(withApiBase(article.content_html || `<p>${article.excerpt}</p>`)),
                   }}
                 />
               )}
