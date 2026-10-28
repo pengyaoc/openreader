@@ -3125,3 +3125,9 @@ backend suite (320 tests) plus a browser pass against the dev servers.
 `/api/sources` call. A maintained per-(user, source) counter would have to
 be kept in step by every read/unread/insert/reconcile path, which isn't
 worth the drift risk at a few thousand articles.
+
+Deployed 2026-10-27 (a9b82c1). First boot on the VM took ~4s including
+the one-time migrations (`user_version` = 1, `idx_articles_source_pub`
+rebuilt, 1544 articles). deploy.sh's check runs 3s after the restart, so
+it reported a 503 while the process was still starting; a manual recheck
+gave 200, and the API answered (`/api/articles` in ~106ms server-side).
