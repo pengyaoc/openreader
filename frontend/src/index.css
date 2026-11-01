@@ -33,11 +33,10 @@
      All self-hosted from the @fontsource packages imported in main.tsx
      (2026-10-27), not Google Fonts. Noto Sans SC loads after first paint
      (see main.tsx), so PingFang SC stands in for CJK text until it does.
-     The display face is variable Archivo at 125% width, which is what
-     Archivo Expanded is: every --font-display rule sets
-     font-stretch: var(--display-stretch). */
+     Keep display text at normal width: the self-hosting migration's
+     explicit 125% stretch made headings wider than the previous rendering. */
   --font-display: 'Archivo Variable', 'Noto Sans SC', 'PingFang SC', sans-serif;
-  --display-stretch: 125%;
+  --display-stretch: 100%;
   --font-ui: 'Archivo Variable', 'Noto Sans SC', 'PingFang SC', -apple-system, sans-serif;
   --font-read: 'Hanken Grotesk Variable', 'Noto Sans SC', 'PingFang SC', -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', 'Noto Sans SC', 'PingFang SC', ui-monospace, monospace;

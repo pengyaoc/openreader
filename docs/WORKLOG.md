@@ -3131,3 +3131,29 @@ the one-time migrations (`user_version` = 1, `idx_articles_source_pub`
 rebuilt, 1544 articles). deploy.sh's check runs 3s after the restart, so
 it reported a 503 while the process was still starting; a manual recheck
 gave 200, and the API answered (`/api/articles` in ~106ms server-side).
+
+### 2026-10-28 — Restore normal heading width
+
+The self-hosted font migration introduced explicit `font-stretch: 125%`
+for the brand, list heading, and configuration heading. The previous
+styles did not specify stretch; the new setting made the headings look
+too wide. Set the shared display stretch to 100%, keeping self-hosted
+Archivo and the existing sizes and weights.
+
+Deployed with `scripts/deploy.sh` on 2026-10-28. Frontend typecheck/build
+and all 320 backend tests passed. The initial post-restart probe returned
+503 during startup; the follow-up returned HTTP 200 and the public
+stylesheet confirmed `--display-stretch:100%`.
+
+### 2026-10-29 — Seed Chamath newsletter from Gmail
+
+At the user's request, read the October 28 Gmail issue "Has AI turned
+memory into a lasting franchise?" without modifying Gmail. Added the
+live IMAP source `chamath-learn-with-me` under Newsletters, matching
+`from:chamath@mail.beehiiv.com newer_than:30d` for future refreshes of the
+existing newsletter mailbox. Imported the message through the existing
+IMAP parser and email persistence path (original Message-ID/date retained
+for provenance and dedup), as article 1590. Restarted the service to load
+the configuration and verified both source and article through the live
+API. The imported email contains the introductory issue; its full deep
+dive requires the publisher's paid membership.
