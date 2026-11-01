@@ -3157,3 +3157,12 @@ for provenance and dedup), as article 1590. Restarted the service to load
 the configuration and verified both source and article through the live
 API. The imported email contains the introductory issue; its full deep
 dive requires the publisher's paid membership.
+
+### 2026-11-01 — Wheel scrolling over the reader's margin arrows
+
+The prev/next margin strips in the article reader are siblings of
+`.reader-scroll`, not inside it, so a mouse wheel over them scrolled
+nothing. They now forward the wheel's vertical delta (normalized for
+line/page `deltaMode`) to the article's scroll container; horizontal
+travel still bubbles to `useSwipeNav` for page turns. Verified in the dev
+preview: a wheel event on the next arrow scrolled the article 0 → 300px.

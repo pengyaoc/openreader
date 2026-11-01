@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type RefObject } from 'react'
+import { useEffect, useId, useRef, useState, type RefObject, type WheelEvent as ReactWheelEvent } from 'react'
 import { API_BASE, type Article, type ArticleListItem } from '../api'
 import { useSwipeNav } from '../useSwipeNav'
 
@@ -104,6 +104,15 @@ export function ArticleReader({
     articleKey: article.id,
   })
   const hint = usePageTurnHint(stageRef, hasPrev || hasNext)
+  // The margin strips sit beside the scroll container, not inside it, so a
+  // wheel over them would otherwise scroll nothing. Hand the vertical part
+  // to the article; horizontal travel still bubbles up to useSwipeNav.
+  const forwardWheel = (e: ReactWheelEvent) => {
+    const el = scrollRef.current
+    if (!el || !e.deltaY) return
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1
+    el.scrollTop += e.deltaY * unit
+  }
   const progressRef = useRef<HTMLDivElement>(null)
   useReadingProgress(scrollRef, progressRef)
   const titleRef = useRef<HTMLHeadingElement>(null)
@@ -236,6 +245,7 @@ export function ArticleReader({
           <button
             className="reader-margin-nav reader-margin-nav--prev"
             onClick={onPrev}
+            onWheel={forwardWheel}
             aria-label="Previous article"
             title="Previous article (←)"
           >
@@ -246,6 +256,7 @@ export function ArticleReader({
           <button
             className="reader-margin-nav reader-margin-nav--next"
             onClick={onNext}
+            onWheel={forwardWheel}
             aria-label="Next article"
             title="Next article (→)"
           >
