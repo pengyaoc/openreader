@@ -3166,3 +3166,8 @@ nothing. They now forward the wheel's vertical delta (normalized for
 line/page `deltaMode`) to the article's scroll container; horizontal
 travel still bubbles to `useSwipeNav` for page turns. Verified in the dev
 preview: a wheel event on the next arrow scrolled the article 0 → 300px.
+
+Deployed with `scripts/deploy.sh` on 2026-11-01 (8706d6a). Typecheck,
+backend tests and build passed; the post-restart probe hit the usual
+startup 503, a recheck returned 200 and the live bundle contains the
+forwarding handler.
