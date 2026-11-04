@@ -1185,9 +1185,21 @@ html:has(.reader-overlay) {
 
 .reader-body img {
   max-width: 100%;
+  /* A `width` attribute (the source's declared display width, kept by
+     ingestion) sets the size; height follows the image's own ratio. */
+  height: auto;
   border-radius: var(--radius);
   margin: 8px 0 26px;
   display: block;
+}
+
+/* Small declared-width images (link arrows, social glyphs) — tagged at
+   ingest — sit inline with their text instead of as block figures. */
+.reader-body img.icon {
+  display: inline-block;
+  vertical-align: middle;
+  margin: 0 4px;
+  border-radius: 0;
 }
 
 .reader-body a {

@@ -193,3 +193,71 @@ def test_proxy_image_urls_lazy_loads_every_image_but_the_first():
     assert 'loading="lazy"' not in first
     assert 'loading="lazy"' in second
     assert result.count('decoding="async"') == 2
+
+
+# --- Presentation that lived only in inline CSS (stripped by sanitizing) ---
+
+
+def test_sanitize_html_drops_elements_hidden_by_inline_style():
+    # Email preheaders and dark-mode image swaps are hidden with inline
+    # CSS; once sanitizing strips `style`, they'd otherwise surface.
+    html = (
+        '<div style="display:none;max-height:0">Inbox preview text</div>'
+        '<span style="DISPLAY: NONE !important">dark logo</span>'
+        '<div style="visibility:hidden">ghost</div>'
+        '<div style="mso-hide:all">outlook only</div>'
+        '<div style="max-height:0;overflow:hidden">collapsed</div>'
+        '<div style="opacity:0">invisible</div>'
+        '<div hidden>hidden attr</div>'
+        "<p>Real content</p>"
+    )
+    result = sanitize_html(html)
+    assert "Real content" in result
+    for gone in ("Inbox preview", "dark logo", "ghost", "outlook only", "collapsed", "invisible", "hidden attr"):
+        assert gone not in result
+
+
+def test_sanitize_html_keeps_layout_styles_that_do_not_hide_content():
+    html = '<td style="font-size:0;line-height:0"><p>kept</p></td><div style="display:block">also kept</div>'
+    result = sanitize_html(html)
+    assert "kept" in result and "also kept" in result
+
+
+def test_sanitize_html_keeps_the_email_declared_image_width():
+    result = sanitize_html('<img src="https://x/logo.png" width="184" style="max-height:16px;height:auto">')
+    assert 'width="184"' in result
+
+
+def test_sanitize_html_takes_image_width_from_inline_style_px():
+    result = sanitize_html('<img src="https://x/a.png" style="max-width:120px;max-height:24px">')
+    assert 'width="120"' in result
+
+
+def test_sanitize_html_ignores_percent_and_auto_widths():
+    result = sanitize_html('<img src="https://x/a.png" width="100%" style="width:100%">')
+    assert "width=" not in result
+
+
+def test_sanitize_html_drops_tracking_pixels():
+    html = '<p>hi</p><img src="https://trk.example.com/o.gif" width="1" height="1">'
+    assert "<img" not in sanitize_html(html)
+
+
+def test_proxy_image_urls_marks_small_images_as_inline_icons():
+    result = proxy_image_urls(
+        '<a href="https://x">View <img src="https://x/arrow.png" width="16"></a>'
+        '<img src="https://x/photo.jpg" width="600">'
+    )
+    icon, photo = result.split("<img")[1:]
+    assert 'class="icon"' in icon
+    assert 'class="icon"' not in photo
+
+
+def test_sanitize_html_on_a_full_email_document_leaks_no_body_attributes():
+    html = (
+        '<html><head><style>.x{}</style></head>'
+        '<body style="background-color:#f4f4f4">Tom &amp; Jerry <p style="color:red">Hi</p></body></html>'
+    )
+    result = sanitize_html(html)
+    assert "background-color" not in result
+    assert "Tom &amp; Jerry" in result and "<p>Hi</p>" in result

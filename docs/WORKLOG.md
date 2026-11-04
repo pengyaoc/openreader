@@ -3171,3 +3171,35 @@ Deployed with `scripts/deploy.sh` on 2026-11-01 (8706d6a). Typecheck,
 backend tests and build passed; the post-restart probe hit the usual
 startup 503, a recheck returned 200 and the live bundle contains the
 forwarding handler.
+
+## 2026-11-03 — Newsletter headers: hidden elements, image sizing
+
+Request: WSJ What's News articles always opened on a broken header — the
+inbox preview line duplicated above the real standfirst, two bare `>`
+arrows, a giant masthead logo plus a second washed-out copy of it — and
+the fix should be global, not WSJ-specific.
+
+Root causes, all generic to email HTML (confirmed against raw WSJ, Snacks,
+and The Batch messages pulled read-only over IMAP):
+
+- **Inline-hidden elements resurfaced.** Emails hide the preheader and
+  dark-mode image variants with inline `display:none` (also
+  `visibility:hidden`, `mso-hide:all`, `max-height:0`, `opacity:0`).
+  Sanitizing strips `style`, un-hiding all of them. `sanitize_html` now
+  drops such elements (and `[hidden]`) first — for every source, since a
+  feed that hides something inline meant it hidden too. `font-size:0` is
+  deliberately not treated as hidden (builders use it on layout cells).
+- **Images lost their declared size.** `width="184"` / `max-width:120px`
+  were stripped, so 2x-retina logos rendered at natural width. The
+  declared px width is now normalized into a kept `width` attribute; CSS
+  `max-width:100%; height:auto` keeps it responsive. Percent/auto widths
+  are ignored; ≤2px tracking pixels are dropped.
+- **Small icons rendered as block figures.** Images with declared width
+  ≤48px get `class="icon"` (added post-sanitize in `proxy_image_urls`) and
+  render inline.
+- Found while verifying: the `<body>{html}</body>` wrap-and-slice pattern
+  leaked a `style="…"` fragment as text when the input was a full email
+  document with its own `<body style>`; replaced with `_body_inner_html`.
+
+Only newly ingested articles get this — raw email HTML isn't stored, so
+already-ingested ones keep their old rendering.
