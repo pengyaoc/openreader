@@ -3203,3 +3203,7 @@ and The Batch messages pulled read-only over IMAP):
 
 Only newly ingested articles get this — raw email HTML isn't stored, so
 already-ingested ones keep their old rendering.
+
+Deployed via `scripts/deploy.sh` (f1db9cf). Same cold-start 503 on the
+script's immediate check as earlier deploys; `/reader/` returned 200 a few
+seconds later, and the served CSS bundle contains the new `img.icon` rule.
