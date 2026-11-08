@@ -78,6 +78,8 @@ export function ChatPanel({ articleId, onClose }: Props) {
   const [full, setFull] = useState(false)
   const [dragY, setDragY] = useState(0)
   const [dragging, setDragging] = useState(false)
+  // The finger driving the current drag; other fingers are ignored.
+  const dragPointer = useRef<number | null>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -141,17 +143,26 @@ export function ChatPanel({ articleId, onClose }: Props) {
 
   // Sheet handle drag (mobile only). Move/up are read on window, not the
   // handle: the sheet moves under the finger mid-drag, and a release the
-  // handle never sees would leave the sheet stuck half-dragged.
+  // handle never sees would leave the sheet stuck half-dragged. Only the
+  // finger that started the drag counts: a second touch (a thumb resting on
+  // the article, or another finger on the handle) neither moves the sheet
+  // nor ends the drag.
   const onHandleDown = (e: PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
+    if (dragPointer.current !== null) return
+    const id = e.pointerId
+    dragPointer.current = id
     const startY = e.clientY
     let dy = 0
     setDragging(true)
     const move = (ev: globalThis.PointerEvent) => {
+      if (ev.pointerId !== id) return
       dy = ev.clientY - startY
       setDragY(dy)
     }
-    const end = () => {
+    const end = (ev: globalThis.PointerEvent) => {
+      if (ev.pointerId !== id) return
+      dragPointer.current = null
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', end)
       window.removeEventListener('pointercancel', end)
@@ -168,9 +179,12 @@ export function ChatPanel({ articleId, onClose }: Props) {
     window.addEventListener('pointercancel', end)
   }
 
+  // Full height leaves 44px of article showing; dragging up never grows the
+  // sheet past that, or its handle and header would slide off the top.
+  const fullHeight = viewport.height - 44
   const sheetStyle = isMobile
     ? {
-        height: `${Math.round((full ? viewport.height - 44 : viewport.height * 0.5) - Math.min(0, dragY))}px`,
+        height: `${Math.round(Math.min(fullHeight, (full ? fullHeight : viewport.height * 0.5) - Math.min(0, dragY)))}px`,
         bottom: `${viewport.keyboard}px`,
         // The home-bar inset only matters while the keyboard is down.
         paddingBottom: viewport.keyboard > 0 ? 0 : undefined,
