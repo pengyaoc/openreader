@@ -2422,6 +2422,19 @@ html:has(.reader-overlay) {
     border-left: none;
     animation: chat-panel-in 0.22s ease-out;
   }
+  /* The panel ends where the keyboard starts, but the iOS keyboard and
+     its floating ^ ∨ ✓ bar are see-through: without this the article
+     showed through below the composer. Extends the panel's background
+     down under the keyboard. */
+  .chat-panel--full::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    height: 100vh;
+    background: var(--bg-overlay);
+  }
   .chat-panel--full .chat-panel__head {
     /* Below the status bar / camera island. */
     padding: calc(env(safe-area-inset-top) + 8px) 14px 10px;

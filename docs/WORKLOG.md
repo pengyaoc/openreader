@@ -3358,3 +3358,16 @@ text in a shaded box, with its label on its own line. Quotes from the
 article are upright and full-strength, keeping the amber bar. Measured
 contrast (light/dark): note text 12.1/13.5, label 4.7/6.3, quotes
 15.2/15.6. The old label was 2.7. Articles keep their own quote style.
+
+Second follow-up, from the owner's iPhone: the keyboard now comes up on
+open (the throwaway-input handoff works in the PWA). Two problems remained:
+- The article showed through just above the keyboard. The panel ends at
+  the visual viewport's bottom, and the iOS keyboard and its floating
+  ^ ∨ ✓ bar are see-through. `.chat-panel--full::after` now extends the
+  panel's background down under the keyboard.
+- Dragging on the chat scrolled the article behind it, or panned the
+  visible area while the keyboard was up, and the panel jumped to follow.
+  A non-passive touchmove handler on the full-screen panel now blocks any
+  drag the thread can't use: on the header or composer, or past the
+  thread's top or bottom. The input keeps its own touches. Checked with
+  synthetic touch events in the preview; still needs a real iPhone.

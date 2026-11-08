@@ -81,6 +81,7 @@ export function ChatPanel({ articleId, articleTitle, autoFocus, onClose }: Props
   const [draft, setDraft] = useState('')
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null)
   const [error, setError] = useState<{ message: string; question: string } | null>(null)
+  const panelRef = useRef<HTMLElement>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -148,6 +149,42 @@ export function ChatPanel({ articleId, articleTitle, autoFocus, onClose }: Props
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Full screen: a drag anywhere on the chat moves only the conversation.
+  // Left alone, iOS hands a drag the thread can't take (it's at its top or
+  // bottom, or the finger is on the header or composer) to the article
+  // behind, or pans the whole visible area while the keyboard is up, and
+  // the panel jumps to follow. The input keeps its own touches, so moving
+  // the cursor and scrolling a long question still work.
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!fullscreen || !panel) return
+    let lastY = 0
+    const onStart = (e: TouchEvent) => {
+      lastY = e.touches[0]?.clientY ?? 0
+    }
+    const onMove = (e: TouchEvent) => {
+      const target = e.target as Node
+      if (inputRef.current?.contains(target)) return
+      const y = e.touches[0]?.clientY ?? lastY
+      const dy = y - lastY
+      lastY = y
+      const thread = threadRef.current
+      if (!thread || !thread.contains(target)) {
+        e.preventDefault()
+        return
+      }
+      const atTop = thread.scrollTop <= 0
+      const atBottom = thread.scrollTop + thread.clientHeight >= thread.scrollHeight - 1
+      if ((dy > 0 && atTop) || (dy < 0 && atBottom)) e.preventDefault()
+    }
+    panel.addEventListener('touchstart', onStart, { passive: true })
+    panel.addEventListener('touchmove', onMove, { passive: false })
+    return () => {
+      panel.removeEventListener('touchstart', onStart)
+      panel.removeEventListener('touchmove', onMove)
+    }
+  }, [fullscreen])
+
   const panelStyle = fullscreen
     ? { top: `${viewport.top}px`, height: `${Math.round(viewport.height)}px` }
     : undefined
@@ -157,6 +194,7 @@ export function ChatPanel({ articleId, articleTitle, autoFocus, onClose }: Props
 
   return (
     <aside
+      ref={panelRef}
       className={`chat-panel ${fullscreen ? 'chat-panel--full' : ''} ${keyboardUp ? 'chat-panel--keyboard' : ''}`}
       style={panelStyle}
       aria-label="Ask about this article"
