@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, type RefObject, type WheelEvent as ReactWheelEvent } from 'react'
-import { API_BASE, type Article, type ArticleListItem } from '../api'
+import { useQuery } from '@tanstack/react-query'
+import { API_BASE, api, chatQueryKey, type Article, type ArticleListItem } from '../api'
 import { useSwipeNav } from '../useSwipeNav'
+import { ChatPanel } from './ChatPanel'
 
 type ViewMode = 'full' | 'summary'
 
@@ -15,6 +17,8 @@ interface Props {
   onSummarize: () => void
   summarizing: boolean
   llmEnabled: boolean
+  /** Article chat available: LLM on and a signed-in account. */
+  chatEnabled: boolean
   onPrev: () => void
   onNext: () => void
   hasPrev: boolean
@@ -73,6 +77,7 @@ export function ArticleReader({
   onSummarize,
   summarizing,
   llmEnabled,
+  chatEnabled,
   onPrev,
   onNext,
   hasPrev,
@@ -80,16 +85,40 @@ export function ArticleReader({
   prevItem,
   nextItem,
 }: Props) {
+  // The chat panel belongs to the article it was opened on: moving to
+  // another article closes it.
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatFor, setChatFor] = useState(article.id)
+  if (chatFor !== article.id) {
+    setChatFor(article.id)
+    setChatOpen(false)
+  }
+  // Loaded on open (cheap) so 💬 can show a dot for an existing thread and
+  // the panel opens already filled.
+  const chatThread = useQuery({
+    queryKey: chatQueryKey(article.id),
+    queryFn: () => api.getChat(article.id),
+    enabled: chatEnabled,
+  })
+  const hasChat = (chatThread.data?.messages.length ?? 0) > 0
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      const target = e.target as HTMLElement | null
+      if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) {
+        // Typing in the chat box: only Esc means something here — close chat.
+        if (e.key === 'Escape') setChatOpen(false)
+        return
+      }
+      if (e.key === 'c' && chatEnabled && !e.metaKey && !e.ctrlKey && !e.altKey) setChatOpen((o) => !o)
+      else if (e.key === 'Escape') onClose()
       else if (e.key === 'ArrowLeft' && hasPrev) onPrev()
       else if (e.key === 'ArrowRight' && hasNext) onNext()
       else if (e.key === 'm' && !e.metaKey && !e.ctrlKey && !e.altKey) onToggleRead()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [onClose, onPrev, onNext, onToggleRead, hasPrev, hasNext])
+  }, [onClose, onPrev, onNext, onToggleRead, hasPrev, hasNext, chatEnabled])
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
@@ -102,6 +131,7 @@ export function ArticleReader({
     onPrev,
     onNext,
     articleKey: article.id,
+    enabled: !chatOpen,
   })
   const hint = usePageTurnHint(stageRef, hasPrev || hasNext)
   // The margin strips sit beside the scroll container, not inside it, so a
@@ -204,6 +234,17 @@ export function ArticleReader({
               {summarizing ? <span className="spinner" /> : '✨'}
             </button>
           )}
+          {chatEnabled && (
+            <button
+              className={`icon-btn chat-toggle ${chatOpen ? 'active' : ''}`}
+              onClick={() => setChatOpen((o) => !o)}
+              title={chatOpen ? 'Close chat (c)' : 'Ask about this article (c)'}
+              aria-pressed={chatOpen}
+            >
+              💬
+              {hasChat && !chatOpen && <span className="chat-toggle__dot" aria-label="has conversation" />}
+            </button>
+          )}
           <button
             className={`icon-btn ${article.is_starred ? 'active' : ''}`}
             onClick={onToggleStar}
@@ -237,6 +278,7 @@ export function ArticleReader({
         </div>
       </div>
 
+      <div className="reader-main">
       <div className="reader-stage" ref={stageRef}>
         {/* Margin strips for mouse readers (hidden on touch and on windows
             too narrow to fit them beside the column; see index.css). Kept
@@ -331,6 +373,8 @@ export function ArticleReader({
             </article>
           </div>
         </div>
+      </div>
+      {chatOpen && <ChatPanel articleId={article.id} onClose={() => setChatOpen(false)} />}
       </div>
       {hint && (
         <div className="page-turn-hint" role="status">

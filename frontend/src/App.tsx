@@ -744,6 +744,7 @@ export default function App() {
           }
           summarizing={summarizeMutation.isPending}
           llmEnabled={llmStatusQuery.data?.enabled ?? false}
+          chatEnabled={(llmStatusQuery.data?.enabled ?? false) && !isAnonymous}
           onPrev={goPrev}
           onNext={goNext}
           hasPrev={hasPrev}

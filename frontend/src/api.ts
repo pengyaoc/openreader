@@ -21,6 +21,18 @@ export const SIGNIN_URL = `/oidc/callback?logout=${encodeURIComponent(LOGIN_URL)
 
 export type ArticleOrigin = 'feed' | 'email'
 
+/** One message of an article chat thread. `body` is plain text for the
+ *  user's questions and server-sanitized HTML for answers. */
+export interface ChatMessage {
+  id: number
+  role: 'user' | 'assistant'
+  body: string
+  created_at: string
+}
+
+/** React Query key for one article's chat thread. */
+export const chatQueryKey = (articleId: number) => ['chat', articleId] as const
+
 export interface Article {
   id: number
   source_id: number
@@ -262,6 +274,21 @@ export const api = {
     apiFetch(`/api/articles/${id}/summarize`, { method: 'POST' }).then((r) =>
       json<{ summary_html: string; llm_summary_at: string }>(r),
     ),
+
+  getChat: (id: number) =>
+    apiFetch(`/api/articles/${id}/chat`).then((r) => json<{ messages: ChatMessage[] }>(r)),
+
+  sendChat: (id: number, question: string) =>
+    apiFetch(`/api/articles/${id}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    }).then((r) => json<{ messages: ChatMessage[] }>(r)),
+
+  clearChat: async (id: number): Promise<void> => {
+    const res = await apiFetch(`/api/articles/${id}/chat`, { method: 'DELETE' })
+    if (!res.ok) await json<unknown>(res)
+  },
 
   pullFullArticle: (id: number) =>
     apiFetch(`/api/articles/${id}/hydrate`, { method: 'POST' }).then((r) =>

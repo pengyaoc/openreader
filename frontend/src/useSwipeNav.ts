@@ -44,6 +44,9 @@ interface Options {
   onNext: () => void
   /** Changes when the shown article changes; ends a pending turn. */
   articleKey: number
+  /** False while something above the article owns touch (the chat sheet):
+   *  touches then never start a swipe. Defaults to true. */
+  enabled?: boolean
 }
 
 function reducedMotion(): boolean {
@@ -64,10 +67,19 @@ function inHorizontalScroller(target: EventTarget | null, root: HTMLElement): bo
   return false
 }
 
-export function useSwipeNav({ trackRef, surfaceRef, canPrev, canNext, onPrev, onNext, articleKey }: Options) {
+export function useSwipeNav({
+  trackRef,
+  surfaceRef,
+  canPrev,
+  canNext,
+  onPrev,
+  onNext,
+  articleKey,
+  enabled = true,
+}: Options) {
   // Latest values for the listeners, which are attached once.
-  const live = useRef({ canPrev, canNext, onPrev, onNext })
-  live.current = { canPrev, canNext, onPrev, onNext }
+  const live = useRef({ canPrev, canNext, onPrev, onNext, enabled })
+  live.current = { canPrev, canNext, onPrev, onNext, enabled }
   // Direction of a turn that has been committed but whose article hasn't
   // rendered yet: 1 next, -1 previous.
   const pendingTurn = useRef<0 | 1 | -1>(0)
@@ -124,6 +136,7 @@ export function useSwipeNav({ trackRef, surfaceRef, canPrev, canNext, onPrev, on
       const selection = window.getSelection()
       const touch = e.touches[0]
       if (
+        !live.current.enabled ||
         e.touches.length !== 1 ||
         pendingTurn.current ||
         (selection && !selection.isCollapsed) ||
