@@ -3371,3 +3371,10 @@ open (the throwaway-input handoff works in the PWA). Two problems remained:
   drag the thread can't use: on the header or composer, or past the
   thread's top or bottom. The input keeps its own touches. Checked with
   synthetic touch events in the preview; still needs a real iPhone.
+
+Third follow-up: a ~44pt gap stayed between the input and the iOS
+keyboard. That was the home-bar spacing, which should drop while the
+keyboard is up. The keyboard check (`innerHeight - visualViewport.height`)
+read 0 in the Home Screen app, because innerHeight shrinks with the
+keyboard there. It now compares the visible height with the screen's
+height: under 75% means the keyboard is up.

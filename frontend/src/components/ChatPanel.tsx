@@ -22,17 +22,23 @@ function useMediaQuery(query: string): boolean {
   return matches
 }
 
-/** The visible viewport: iOS shrinks visualViewport for the keyboard, not
- *  the page, and may scroll it down (offsetTop) when an input takes focus. */
-function useVisualViewport(active: boolean): { height: number; top: number; keyboard: number } {
+/** The visible viewport: iOS shrinks visualViewport for the keyboard and
+ *  may scroll it down (offsetTop) when an input takes focus.
+ *
+ *  Whether the keyboard is up is judged against the screen's height, not
+ *  window.innerHeight: in the iOS Home Screen app innerHeight shrinks with
+ *  the keyboard too, so "innerHeight minus visible height" read 0 and the
+ *  home-bar spacing stayed under the input (2026-11-08). The keyboard
+ *  takes ~40% of the screen; browser toolbars alone stay well under 25%. */
+function useVisualViewport(active: boolean): { height: number; top: number; keyboardUp: boolean } {
   const read = () => {
     const vv = window.visualViewport
-    if (!vv) return { height: window.innerHeight, top: 0, keyboard: 0 }
-    return {
-      height: vv.height,
-      top: vv.offsetTop,
-      keyboard: Math.max(0, window.innerHeight - vv.height - vv.offsetTop),
-    }
+    if (!vv) return { height: window.innerHeight, top: 0, keyboardUp: false }
+    const landscape = window.matchMedia('(orientation: landscape)').matches
+    const screenHeight = landscape
+      ? Math.min(window.screen.width, window.screen.height)
+      : Math.max(window.screen.width, window.screen.height)
+    return { height: vv.height, top: vv.offsetTop, keyboardUp: vv.height < screenHeight * 0.75 }
   }
   const [state, setState] = useState(read)
   useEffect(() => {
@@ -188,7 +194,7 @@ export function ChatPanel({ articleId, articleTitle, autoFocus, onClose }: Props
   const panelStyle = fullscreen
     ? { top: `${viewport.top}px`, height: `${Math.round(viewport.height)}px` }
     : undefined
-  const keyboardUp = fullscreen && viewport.keyboard > 0
+  const keyboardUp = fullscreen && viewport.keyboardUp
 
   const empty = messages.length === 0 && !shownPending
 
