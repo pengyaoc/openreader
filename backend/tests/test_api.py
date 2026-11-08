@@ -1169,3 +1169,21 @@ def test_refresh_responds_without_waiting_for_hydration(client, monkeypatch):
     assert client.post("/api/refresh").status_code == 200
     assert calls[0]["hydrate"] is False
     assert calls[1] == {"s1": False}
+
+
+def test_summarize_goes_through_the_claude_slot(monkeypatch, tmp_path):
+    # Summarize must share the one-at-a-time slot with chat: with the slot
+    # held and no room to wait, it answers 503 busy and never runs claude.
+    from app.api import articles
+    from app.claude_cli import ClaudeSlot
+
+    busy = ClaudeSlot(max_waiting=0)
+    busy._lock.acquire()
+    monkeypatch.setattr(articles, "CLAUDE_SLOT", busy)
+    monkeypatch.setattr(articles, "summarize_text", lambda *a, **k: pytest.fail("claude ran"))
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    resp = test_client.post(f"/api/articles/{article_id}/summarize")
+    assert resp.status_code == 503
+    assert "busy" in resp.json()["error"]

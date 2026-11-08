@@ -1,36 +1,26 @@
 """Wraps the `claude` CLI for on-demand, single-article summarization —
-the reader's only LLM feature (topic-generation was removed 2026-08-14,
+one of the reader's two LLM features, next to article chat (topic-generation was removed 2026-08-14,
 see docs/WORKLOG.md; this module absorbed the parts of it worth keeping).
 
-Runs against the Claude subscription (OAuth keychain), not the API key —
-two rules make that true and must never be relaxed:
-  1. Never pass --bare (its own help text: under --bare, "Anthropic auth is
-     strictly ANTHROPIC_API_KEY or apiKeyHelper ... OAuth and keychain are
-     never read" — that would silently bill the API).
-  2. Scrub ANTHROPIC_API_KEY from the child environment.
-
---strict-mcp-config and --setting-sources "" matter for footprint and
-determinism: without them every call would boot whatever MCP servers,
-CLAUDE.md files, and hooks happen to be configured locally. --tools ""
-disables all tools — nothing to research, the article text is handed to
-the model directly.
+The subscription-auth rules (never --bare, scrub ANTHROPIC_API_KEY), the
+shared footprint flags, envelope parsing and the one-at-a-time slot live in
+app/claude_cli.py, shared with article chat (app/chat.py). Summarize adds
+--no-session-persistence: it is a one-shot call with nothing to resume.
 """
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from typing import Callable
 
+from app.claude_cli import BASE_FLAGS, ClaudeError, default_runner, run_structured
 from app.ingest.textutil import sanitize_html
 
+__all__ = ["ClaudeError", "build_summarize_command", "build_user_prompt", "summarize_text"]
 
-class ClaudeError(Exception):
-    """Raised for any failure in the summarization call — non-zero exit,
-    timeout, malformed output, or a reported model-side error."""
-
-
+# Summarize's runner takes (cmd, stdin, timeout) — no cwd; it never resumes.
 Runner = Callable[[list[str], str, float], subprocess.CompletedProcess]
+
 
 SUMMARIZE_SYSTEM_PROMPT = """You are summarizing a single article for a personal RSS reader.
 
@@ -69,15 +59,8 @@ def build_summarize_command(model: str) -> list[str]:
         model,
         "--system-prompt",
         SUMMARIZE_SYSTEM_PROMPT,
-        "--tools",
-        "",
-        "--strict-mcp-config",
-        "--setting-sources",
-        "",
-        "--disable-slash-commands",
+        *BASE_FLAGS,
         "--no-session-persistence",
-        "--output-format",
-        "json",
         "--json-schema",
         json.dumps(SUMMARY_JSON_SCHEMA),
     ]
@@ -93,10 +76,7 @@ def build_user_prompt(article_text: str, word_count: int) -> str:
 
 
 def _default_runner(cmd: list[str], stdin_text: str, timeout: float) -> subprocess.CompletedProcess:
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    return subprocess.run(
-        cmd, input=stdin_text, capture_output=True, text=True, timeout=timeout, env=env
-    )
+    return default_runner(cmd, stdin_text, timeout, None)
 
 
 def summarize_text(
@@ -111,25 +91,7 @@ def summarize_text(
     malformed output, or a reported model-side error."""
     cmd = build_summarize_command(model)
     prompt = build_user_prompt(article_text, word_count)
-
-    try:
-        result = runner(cmd, prompt, timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise ClaudeError(f"summarization timed out after {timeout}s") from exc
-
-    if result.returncode != 0:
-        raise ClaudeError(f"claude exited {result.returncode}: {result.stderr[:500]}")
-
-    try:
-        envelope = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise ClaudeError(f"could not parse claude output as JSON: {exc}") from exc
-
-    if envelope.get("is_error"):
-        raise ClaudeError(f"claude reported an error: {envelope.get('result')}")
-
-    structured = envelope.get("structured_output")
-    if not isinstance(structured, dict) or "summary_html" not in structured:
-        raise ClaudeError("claude output missing structured_output.summary_html")
-
-    return sanitize_html(structured["summary_html"])
+    summary_html = run_structured(
+        cmd, prompt, timeout, None, lambda c, s, t, _cwd: runner(c, s, t), key="summary_html"
+    )
+    return sanitize_html(summary_html)

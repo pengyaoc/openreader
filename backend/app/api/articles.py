@@ -8,7 +8,8 @@ from app.api._common import AnonymousUserError, current_user_id, require_user_id
 from app.db import run_off_thread
 from app.ingest.hydrate import hydrate_article
 from app.ingest.textutil import plain_text_excerpt
-from app.summarize import ClaudeError, summarize_text
+from app.claude_cli import CLAUDE_SLOT, DEADLINE_S, ClaudeError
+from app.summarize import summarize_text
 
 
 async def llm_status(request: Request) -> JSONResponse:
@@ -148,7 +149,8 @@ async def pull_full_article(request: Request) -> JSONResponse:
 
 def _run_summarize(conn: sqlite3.Connection, article_id: int, content_html: str) -> tuple[str, str]:
     text = plain_text_excerpt(content_html, limit=None)
-    summary_html = summarize_text(text, len(text.split()))
+    with CLAUDE_SLOT.acquire(DEADLINE_S) as remaining:
+        summary_html = summarize_text(text, len(text.split()), timeout=remaining)
     llm_summary_at = store.save_summary(conn, article_id, summary_html)
     return summary_html, llm_summary_at
 
