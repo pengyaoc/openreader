@@ -117,39 +117,6 @@ async def get_article(request: Request) -> JSONResponse:
     return JSONResponse(article)
 
 
-async def pull_full_article(request: Request) -> JSONResponse:
-    """Explicit, on-demand full-text pull — same hydrate_article used by
-    get_article's passive hydration, but forcing fetch_full_text=True
-    regardless of source config, since the user asked for it directly.
-    Still one-shot: a prior hydrated_at/hydrate_failed_at short-circuits,
-    same as the passive path."""
-    try:
-        user_id = require_user_id(request)
-    except AnonymousUserError:
-        return JSONResponse({"error": "not authenticated"}, status_code=401)
-
-    def pull(conn: sqlite3.Connection, article_id: int) -> dict | None:
-        article = store.get_article(conn, user_id, article_id)
-        if article is not None:
-            _refresh_hydration_fields(conn, article, hydrate_article(conn, article_id, True))
-        return article
-
-    article = await run_off_thread(
-        request.app.state.db_path, pull, int(request.path_params["article_id"])
-    )
-    if article is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-    return JSONResponse(
-        {
-            "content_html": article["content_html"],
-            "excerpt": article["excerpt"],
-            "hydrated_at": article["hydrated_at"],
-            "hydrate_failed_at": article["hydrate_failed_at"],
-        }
-    )
-
-
 def _run_summarize(conn: sqlite3.Connection, article_id: int, content_html: str) -> tuple[str, str]:
     text = plain_text_excerpt(content_html, limit=None)
     with CLAUDE_SLOT.acquire(DEADLINE_S) as remaining:

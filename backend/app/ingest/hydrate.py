@@ -2,8 +2,7 @@
 
 Two entry points:
   hydrate_article  — synchronous, one article, backs GET /api/articles/:id's
-                      passive on-open hydration and POST .../hydrate's
-                      explicit pull. Fetches at most once ever — a stored
+                      passive on-open hydration. Fetches at most once ever — a stored
                       hydrated_at or hydrate_failed_at short-circuits every
                       call after the first, whether it succeeded or not.
   hydrate_pending   — batch, run after a refresh so most articles are

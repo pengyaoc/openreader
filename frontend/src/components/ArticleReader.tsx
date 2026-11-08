@@ -12,8 +12,6 @@ interface Props {
   onClose: () => void
   onToggleStar: () => void
   onToggleRead: () => void
-  onPullFull: () => void
-  pullingFull: boolean
   onSummarize: () => void
   summarizing: boolean
   llmEnabled: boolean
@@ -72,8 +70,6 @@ export function ArticleReader({
   onClose,
   onToggleStar,
   onToggleRead,
-  onPullFull,
-  pullingFull,
   onSummarize,
   summarizing,
   llmEnabled,
@@ -166,7 +162,7 @@ export function ArticleReader({
   // overlay container or the toolbar above it — a screen reader's forward
   // navigation starts from wherever focus is and reads on from there, so
   // focusing the container (whose first descendant in the DOM is the
-  // toolbar) meant Close/Pull-full/Summarize/Star were announced before the
+  // toolbar) meant Close/Summarize/Star were announced before the
   // article itself. The toolbar is still reachable by swiping backward.
   useEffect(() => {
     titleRef.current?.focus()
@@ -209,16 +205,6 @@ export function ArticleReader({
           <span className="reader-source">{article.source_title}</span>
         </div>
         <div className="reader-bar__right">
-          {article.url && !article.hydrated_at && !article.hydrate_failed_at && (
-            <button
-              className={`icon-btn ${pullingFull ? 'icon-btn--busy' : ''}`}
-              onClick={onPullFull}
-              disabled={pullingFull}
-              title={pullingFull ? 'Pulling full article…' : 'Pull full article'}
-            >
-              {pullingFull ? <span className="spinner" /> : '⤓'}
-            </button>
-          )}
           {llmEnabled && (
             <button
               className={`icon-btn ${summarizing ? 'icon-btn--busy' : ''} ${
@@ -270,17 +256,6 @@ export function ArticleReader({
           >
             <span className="icon-btn__dot" />
           </button>
-          {article.url && (
-            <a
-              className="icon-btn"
-              href={article.url}
-              target="_blank"
-              rel="noreferrer"
-              title="Open original"
-            >
-              ↗
-            </a>
-          )}
         </div>
       </div>
 

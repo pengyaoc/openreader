@@ -48,8 +48,6 @@ export interface Article {
   top_image_path: string | null
   matched_rule: string | null
   origin: ArticleOrigin
-  hydrated_at: string | null
-  hydrate_failed_at: string | null
   is_read: boolean
   read_at: string | null
   is_starred: boolean
@@ -293,17 +291,6 @@ export const api = {
     if (!res.ok) await json<unknown>(res)
   },
 
-  pullFullArticle: (id: number) =>
-    apiFetch(`/api/articles/${id}/hydrate`, { method: 'POST' }).then((r) =>
-      json<{
-        content_html: string
-        excerpt: string
-        hydrated_at: string | null
-        hydrate_failed_at: string | null
-      }>(
-        r,
-      ),
-    ),
 
   toggleRead: (id: number) =>
     apiFetch(`/api/articles/${id}/toggle-read`, { method: 'POST' }).then((r) =>

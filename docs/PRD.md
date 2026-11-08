@@ -179,15 +179,6 @@ with a message rather than silently failing — see §4.6.
   than purely on open — opening an article usually hits an already-cached
   row; the on-open fetch is still there as a fallback for anything the
   batch hasn't reached yet.
-- A **Pull full article** button in the reader (left of Summarize) lets you
-  force that same fetch-and-extract on demand, regardless of the source's
-  `fetch_full_text` setting — for sources that leave it off, or whenever
-  the auto-hydrated text came back thin. Same one-shot semantics as the
-  passive path: it disappears once an attempt has been made (success or
-  failure) for that article, and the pulled full text replaces the partial
-  one in place — a later Summarize click naturally summarizes the full
-  article, not the truncated excerpt, since it reads whatever `content_html`
-  is stored at that point.
 - Images always render through a same-origin proxy, so hotlink-protected
   images (a real issue with several real-world feeds) still load, and the
   reader's IP/referrer is never leaked to third-party image hosts.
@@ -229,7 +220,7 @@ with a message rather than silently failing — see §4.6.
   - Refresh feeds, Settings (feed add/edit/delete), and the per-source
     "mark all read" controls are **not shown at all** — they'd 401 anyway,
     and a visible dead button is worse than no button.
-  - Star, Summarize, and Pull-full-article on an open article are shown
+  - Star and Summarize on an open article are shown
     but **don't perform the action** — clicking any of them shows a brief,
     plain-language explanation instead (e.g. "AI summaries are turned off
     in this read-only demo to avoid unexpected costs."). Summarize

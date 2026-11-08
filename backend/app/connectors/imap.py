@@ -214,7 +214,7 @@ def parse_message(raw: bytes) -> NormalizedEntry:
     """Pure — no network. Extracts a NormalizedEntry from a raw RFC822
     message. `url` is deliberately left empty: unlike Gmail's API, which
     hands back an internal id usable in a mail.google.com deep link, plain
-    IMAP has no equivalent — the frontend already hides the 'open original'
+    IMAP has no equivalent — the frontend already hides the 'original source'
     link when url is falsy."""
     _, entry = _parse(raw)
     return entry

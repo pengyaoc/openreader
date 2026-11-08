@@ -204,7 +204,7 @@ export default function App() {
   const [settings, setSettings] = useState<'list' | 'add' | null>(null)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   // Brief friendly message shown when an anonymous visitor clicks an action
-  // that's turned off in the public read-only demo (Star/Summarize/Download
+  // that's turned off in the public read-only demo (Star/Summarize
   // — see the .toast rule in index.css). Auto-dismisses.
   const [notice, setNotice] = useState<string | null>(null)
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -355,18 +355,6 @@ export default function App() {
       patchArticleCaches(qc, id, {
         llm_summary_html: data.summary_html,
         llm_summary_at: data.llm_summary_at,
-      })
-    },
-  })
-
-  const pullFullMutation = useMutation({
-    mutationFn: (id: number) => api.pullFullArticle(id),
-    onSuccess: (data, id) => {
-      patchArticleCaches(qc, id, {
-        content_html: data.content_html,
-        excerpt: data.excerpt,
-        hydrated_at: data.hydrated_at,
-        hydrate_failed_at: data.hydrate_failed_at,
       })
     },
   })
@@ -731,12 +719,6 @@ export default function App() {
               ? showNotice("Read state isn't saved in this read-only demo — sign in to track unread articles.")
               : toggleReadMutation.mutate(openArticleDisplayData)
           }
-          onPullFull={() =>
-            isAnonymous
-              ? showNotice("Pulling the full article isn't available in this read-only demo.")
-              : pullFullMutation.mutate(openArticleId)
-          }
-          pullingFull={pullFullMutation.isPending}
           onSummarize={() =>
             isAnonymous
               ? showNotice('AI summaries are turned off in this read-only demo to avoid unexpected costs.')

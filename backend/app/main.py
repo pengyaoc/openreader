@@ -83,7 +83,6 @@ def create_app(
         Route("/api/articles/{article_id}/toggle-read", articles.toggle_read, methods=["POST"]),
         Route("/api/articles/{article_id}/summarize", articles.summarize, methods=["POST"]),
         Route("/api/articles/{article_id}/chat", articles.chat, methods=["GET", "POST", "DELETE"]),
-        Route("/api/articles/{article_id}/hydrate", articles.pull_full_article, methods=["POST"]),
         Route("/api/llm-status", articles.llm_status),
         Route("/api/refresh", refresh_api.refresh, methods=["POST"]),
         Route("/api/config", config_api.get_config, methods=["GET"]),

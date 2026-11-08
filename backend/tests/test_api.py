@@ -953,7 +953,6 @@ def test_anonymous_writes_401_in_optional_mode(anon_client):
     assert client.post(f"/api/articles/{article_id}/star").status_code == 401
     assert client.post(f"/api/articles/{article_id}/toggle-read").status_code == 401
     assert client.post(f"/api/articles/{article_id}/summarize").status_code == 401
-    assert client.post(f"/api/articles/{article_id}/hydrate").status_code == 401
     assert client.put("/api/config", json={"yaml": "sources: []"}).status_code == 401
     assert client.post("/api/refresh").status_code == 401
 
