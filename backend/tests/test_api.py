@@ -1327,3 +1327,59 @@ def test_chat_post_passes_cwd_and_deadline(monkeypatch, tmp_path):
     assert calls[0]["cwd"] == str(tmp_path / "claude-chat")
     assert (tmp_path / "claude-chat").is_dir()
     assert 0 < calls[0]["timeout"] <= 300
+
+
+def _in_flight_client(monkeypatch, tmp_path):
+    from app.api import articles
+
+    monkeypatch.setattr(articles, "chat_turn", lambda *a, **k: pytest.fail("claude ran"))
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+    return articles, test_client, article_id
+
+
+def test_chat_post_409_while_same_thread_in_flight(monkeypatch, tmp_path):
+    articles, test_client, article_id = _in_flight_client(monkeypatch, tmp_path)
+    articles.CHAT_IN_FLIGHT.start(1, article_id, "First?")
+    try:
+        resp = test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Again?"})
+        assert resp.status_code == 409
+    finally:
+        articles.CHAT_IN_FLIGHT.finish(1, article_id)
+
+
+def test_chat_get_reports_pending_question(monkeypatch, tmp_path):
+    articles, test_client, article_id = _in_flight_client(monkeypatch, tmp_path)
+    assert test_client.get(f"/api/articles/{article_id}/chat").json()["pending"] is None
+    articles.CHAT_IN_FLIGHT.start(1, article_id, "First?")
+    try:
+        assert test_client.get(f"/api/articles/{article_id}/chat").json()["pending"] == "First?"
+    finally:
+        articles.CHAT_IN_FLIGHT.finish(1, article_id)
+
+
+def test_chat_delete_409_while_pending(monkeypatch, tmp_path):
+    articles, test_client, article_id = _in_flight_client(monkeypatch, tmp_path)
+    articles.CHAT_IN_FLIGHT.start(1, article_id, "First?")
+    try:
+        assert test_client.delete(f"/api/articles/{article_id}/chat").status_code == 409
+    finally:
+        articles.CHAT_IN_FLIGHT.finish(1, article_id)
+
+
+def test_chat_in_flight_cleared_after_success_and_failure(monkeypatch, tmp_path):
+    from app.api import articles
+    from app.claude_cli import ClaudeError
+
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+    monkeypatch.setattr(articles, "chat_turn", _fake_chat_turn())
+    test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"})
+    assert test_client.get(f"/api/articles/{article_id}/chat").json()["pending"] is None
+
+    def boom(*a, **k):
+        raise ClaudeError("x")
+
+    monkeypatch.setattr(articles, "chat_turn", boom)
+    test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"})
+    assert test_client.get(f"/api/articles/{article_id}/chat").json()["pending"] is None

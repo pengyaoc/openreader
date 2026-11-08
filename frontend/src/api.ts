@@ -275,8 +275,11 @@ export const api = {
       json<{ summary_html: string; llm_summary_at: string }>(r),
     ),
 
+  /** `pending` is the question still being answered on the server, if any. */
   getChat: (id: number) =>
-    apiFetch(`/api/articles/${id}/chat`).then((r) => json<{ messages: ChatMessage[] }>(r)),
+    apiFetch(`/api/articles/${id}/chat`).then((r) =>
+      json<{ messages: ChatMessage[]; pending: string | null }>(r),
+    ),
 
   sendChat: (id: number, question: string) =>
     apiFetch(`/api/articles/${id}/chat`, {

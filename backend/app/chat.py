@@ -136,6 +136,14 @@ def chat_turn(
     else:
         session_id, answer = start_new(build_first_prompt(article_text, question))
 
-    return store.save_chat_turn(
-        conn, user_id, article_id, session_id, question, sanitize_chat_html(answer)
-    )
+    try:
+        return store.save_chat_turn(
+            conn, user_id, article_id, session_id, question, sanitize_chat_html(answer)
+        )
+    except sqlite3.Error as exc:
+        # The CLI has this turn but SQLite doesn't: never resume a session
+        # holding a turn the user can't see. (A first turn has no row to
+        # mark; its next attempt mints a new session anyway.)
+        conn.rollback()
+        store.mark_chat_needs_reseed(conn, user_id, article_id)
+        raise ClaudeError(f"could not save the answer: {exc}") from exc

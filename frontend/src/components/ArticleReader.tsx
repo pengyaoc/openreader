@@ -88,6 +88,8 @@ export function ArticleReader({
   // The chat panel belongs to the article it was opened on: moving to
   // another article closes it.
   const [chatOpen, setChatOpen] = useState(false)
+  const chatOpenRef = useRef(chatOpen)
+  chatOpenRef.current = chatOpen
   const [chatFor, setChatFor] = useState(article.id)
   if (chatFor !== article.id) {
     setChatFor(article.id)
@@ -111,7 +113,11 @@ export function ArticleReader({
         return
       }
       if (e.key === 'c' && chatEnabled && !e.metaKey && !e.ctrlKey && !e.altKey) setChatOpen((o) => !o)
-      else if (e.key === 'Escape') onClose()
+      else if (e.key === 'Escape') {
+        // Esc closes the chat first, then the article.
+        if (chatOpenRef.current) setChatOpen(false)
+        else onClose()
+      }
       else if (e.key === 'ArrowLeft' && hasPrev) onPrev()
       else if (e.key === 'ArrowRight' && hasNext) onNext()
       else if (e.key === 'm' && !e.metaKey && !e.ctrlKey && !e.altKey) onToggleRead()

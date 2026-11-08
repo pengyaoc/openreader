@@ -2,6 +2,7 @@
 runner; nothing here spawns the real CLI."""
 import itertools
 import json
+import sqlite3
 import subprocess
 
 import pytest
@@ -172,3 +173,22 @@ def test_sanitize_chat_html_keeps_only_beyond_class():
     assert "onclick" not in out
     assert "<script" not in out
     assert "<a" not in out
+
+
+def test_save_failure_marks_reseed_and_raises_claude_error(env, monkeypatch):
+    # The CLI recorded the turn but SQLite didn't: the next turn must not
+    # resume a session holding a turn the user can't see.
+    runner = FakeRunner()
+    _turn(env, "Why?", runner)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "save_chat_turn", locked)
+    with pytest.raises(ClaudeError):
+        _turn(env, "And then?", runner)
+    monkeypatch.undo()
+
+    conn, user, article_id, _ = env
+    assert store.get_chat_session(conn, user, article_id)["needs_reseed"] is True
+    assert len(store.get_chat_messages(conn, user, article_id)) == 2

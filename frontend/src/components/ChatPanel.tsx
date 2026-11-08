@@ -5,7 +5,7 @@
 // keyboard (tracked through visualViewport).
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, chatQueryKey, type ChatMessage } from '../api'
+import { api, chatQueryKey } from '../api'
 
 const MOBILE_QUERY = '(max-width: 760px)'
 const STARTERS = ["What's the main argument?", 'What evidence does it give?', "What's left unsaid?"]
@@ -59,8 +59,18 @@ export function ChatPanel({ articleId, onClose }: Props) {
   const coarse = useMediaQuery('(pointer: coarse)')
   const viewport = useVisualViewport(isMobile)
 
-  const thread = useQuery({ queryKey: chatQueryKey(articleId), queryFn: () => api.getChat(articleId) })
+  const thread = useQuery({
+    queryKey: chatQueryKey(articleId),
+    queryFn: () => api.getChat(articleId),
+    // While the server is still answering (this panel's request, or one
+    // from before a remount or a dropped connection), poll until it lands.
+    refetchInterval: (q) => (q.state.data?.pending ? 2500 : false),
+    // The cached copy (from the 💬 dot's prefetch) can predate a question
+    // sent before the panel was closed and reopened.
+    refetchOnMount: 'always',
+  })
   const messages = thread.data?.messages ?? []
+  const serverPending = thread.data?.pending ?? null
 
   const [draft, setDraft] = useState('')
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null)
@@ -71,47 +81,46 @@ export function ChatPanel({ articleId, onClose }: Props) {
   const threadRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
-  const appendMessages = (added: ChatMessage[]) =>
-    qc.setQueryData<{ messages: ChatMessage[] }>(chatQueryKey(articleId), (old) => ({
-      messages: [...(old?.messages ?? []), ...added],
-    }))
-
   const send = useMutation({
     mutationFn: (question: string) => api.sendChat(articleId, question),
     onMutate: (question) => {
       setPendingQuestion(question)
       setError(null)
       setDraft('')
+      return { baseline: messages.length }
     },
-    onSuccess: (data) => {
-      appendMessages(data.messages)
+    onSuccess: async () => {
+      // Refetch rather than append: a poll may already have picked the
+      // turn up, and appending would show it twice.
+      await qc.invalidateQueries({ queryKey: chatQueryKey(articleId) })
       setPendingQuestion(null)
     },
-    onError: async (err, question) => {
-      // The server may have finished and saved the turn even though this
-      // response never arrived (the phone slept mid-request). Look before
+    onError: async (err, question, ctx) => {
+      // The response may be lost while the server keeps going (the phone
+      // slept mid-request), or the turn may already be saved. Look before
       // offering Retry, so the same question isn't asked twice.
       const fresh = await thread.refetch()
-      const list = fresh.data?.messages ?? []
-      const landed = list.length >= 2 && list[list.length - 2].role === 'user' && list[list.length - 2].body === question
       setPendingQuestion(null)
-      if (landed) return
+      if (fresh.data?.pending) return // still answering: the poll shows it
+      if ((fresh.data?.messages.length ?? 0) > (ctx?.baseline ?? Infinity)) return // it landed
       setError({ message: err instanceof Error ? err.message : 'Something went wrong', question })
       setDraft((d) => d || question)
     },
   })
+  const busy = send.isPending || serverPending !== null
+  const shownPending = pendingQuestion ?? serverPending
 
   const clear = useMutation({
     mutationFn: () => api.clearChat(articleId),
     onSuccess: () => {
-      qc.setQueryData(chatQueryKey(articleId), { messages: [] })
+      qc.setQueryData(chatQueryKey(articleId), { messages: [], pending: null })
       setError(null)
     },
   })
 
   const ask = (text: string) => {
     const question = text.trim()
-    if (!question || question.length > MAX_QUESTION || send.isPending) return
+    if (!question || question.length > MAX_QUESTION || busy || clear.isPending) return
     send.mutate(question)
   }
 
@@ -119,7 +128,7 @@ export function ChatPanel({ articleId, onClose }: Props) {
   useLayoutEffect(() => {
     const el = threadRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length, pendingQuestion, error])
+  }, [messages.length, shownPending, error])
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Desktop: Enter sends, Shift+Enter breaks the line. Touch keyboards
@@ -170,7 +179,7 @@ export function ChatPanel({ articleId, onClose }: Props) {
       }
     : undefined
 
-  const empty = messages.length === 0 && !pendingQuestion
+  const empty = messages.length === 0 && !shownPending
 
   return (
     <aside className={`chat-panel ${isMobile ? 'chat-panel--sheet' : ''}`} style={sheetStyle} aria-label="Ask about this article">
@@ -189,7 +198,7 @@ export function ChatPanel({ articleId, onClose }: Props) {
           {messages.length > 0 && (
             <button
               className="chat-panel__link"
-              disabled={clear.isPending || send.isPending}
+              disabled={clear.isPending || busy}
               onClick={() => {
                 if (window.confirm('Start a new chat? This clears the conversation for this article.')) clear.mutate()
               }}
@@ -231,9 +240,9 @@ export function ChatPanel({ articleId, onClose }: Props) {
             ),
           )
         )}
-        {pendingQuestion && (
+        {shownPending && (
           <>
-            <div className="chat-msg chat-msg--user">{pendingQuestion}</div>
+            <div className="chat-msg chat-msg--user">{shownPending}</div>
             <div className="chat-panel__status">
               <span className="spinner" /> Thinking…
             </div>
@@ -242,7 +251,7 @@ export function ChatPanel({ articleId, onClose }: Props) {
         {error && (
           <div className="chat-panel__error" role="alert">
             {error.message}{' '}
-            <button className="chat-panel__link" onClick={() => ask(error.question)} disabled={send.isPending}>
+            <button className="chat-panel__link" onClick={() => ask(error.question)} disabled={busy}>
               Retry
             </button>
           </div>
@@ -270,11 +279,11 @@ export function ChatPanel({ articleId, onClose }: Props) {
         <button
           type="submit"
           className="chat-panel__send"
-          disabled={send.isPending || !draft.trim()}
+          disabled={busy || !draft.trim()}
           aria-label="Send"
           title="Send"
         >
-          {send.isPending ? <span className="spinner" /> : '↑'}
+          {busy ? <span className="spinner" /> : '↑'}
         </button>
       </form>
     </aside>

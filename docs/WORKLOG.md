@@ -3246,6 +3246,15 @@ chat.md`.
   prev/next. A dot on 💬 marks articles with a thread. While the sheet is
   open, swipe-nav ignores touches. The reader's key handler now ignores
   keys typed in inputs (typing `m` in the chat box used to toggle read).
+- **One question per thread at a time.** `CHAT_IN_FLIGHT` (articles.py)
+  tracks threads being answered. A second POST or a DELETE on the same
+  thread gets 409, and GET returns `pending` (the question), so a panel
+  reopened mid-answer, or a phone that dropped the response, shows
+  "Thinking…" and polls instead of offering a Retry that would ask twice.
+  If saving fails after a successful CLI turn, the thread is marked
+  `needs_reseed`.
+- CLI session files are not deleted on "New chat" or reseed. The CLI's own
+  cleanup (about 30 days by default) removes them.
 - Smoke test against the real CLI (local, copy of the DB): first answer
   4.1s, resumed follow-up 2.2s (recalled the earlier question), reseed
   after deleting the session file 3.5s.

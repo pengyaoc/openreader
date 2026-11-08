@@ -1,5 +1,6 @@
 import re
 import sqlite3
+import threading
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -198,6 +199,36 @@ async def summarize(request: Request) -> JSONResponse:
 _MAX_QUESTION_CHARS = 2000
 
 
+class ChatInFlight:
+    """Threads with a question being answered right now, keyed by (user,
+    article), holding the question text. Lets the panel show "Thinking…"
+    after a dropped connection or a remount, and refuses a second send (or
+    a clear) of the same thread until the first finishes — otherwise a
+    Retry while the first answer is still running would ask twice."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._questions: dict[tuple[int, int], str] = {}
+
+    def start(self, user_id: int, article_id: int, question: str) -> bool:
+        with self._lock:
+            if (user_id, article_id) in self._questions:
+                return False
+            self._questions[(user_id, article_id)] = question
+            return True
+
+    def finish(self, user_id: int, article_id: int) -> None:
+        with self._lock:
+            self._questions.pop((user_id, article_id), None)
+
+    def pending(self, user_id: int, article_id: int) -> str | None:
+        with self._lock:
+            return self._questions.get((user_id, article_id))
+
+
+CHAT_IN_FLIGHT = ChatInFlight()
+
+
 def _claude_error_message(exc: ClaudeError) -> str:
     text = str(exc)
     if re.search(r"usage limit|rate limit", text, re.IGNORECASE):
@@ -231,9 +262,13 @@ async def chat(request: Request) -> Response:
 
     if request.method == "GET":
         messages = await run_off_thread(db_path, store.get_chat_messages, user_id, article_id)
-        return JSONResponse({"messages": messages})
+        return JSONResponse(
+            {"messages": messages, "pending": CHAT_IN_FLIGHT.pending(user_id, article_id)}
+        )
 
     if request.method == "DELETE":
+        if CHAT_IN_FLIGHT.pending(user_id, article_id) is not None:
+            return JSONResponse({"error": "still answering"}, status_code=409)
         await run_off_thread(db_path, store.clear_chat, user_id, article_id)
         return Response(status_code=204)
 
@@ -248,6 +283,8 @@ async def chat(request: Request) -> Response:
             {"error": f"question must be 1-{_MAX_QUESTION_CHARS} characters"}, status_code=400
         )
 
+    if not CHAT_IN_FLIGHT.start(user_id, article_id, question):
+        return JSONResponse({"error": "still answering"}, status_code=409)
     try:
         messages = await run_off_thread(
             db_path, _run_chat_turn, user_id, article_id, article["content_html"], question,
@@ -255,6 +292,8 @@ async def chat(request: Request) -> Response:
         )
     except ClaudeError as exc:
         return JSONResponse({"error": _claude_error_message(exc)}, status_code=503)
+    finally:
+        CHAT_IN_FLIGHT.finish(user_id, article_id)
     return JSONResponse({"messages": messages})
 
 
