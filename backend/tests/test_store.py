@@ -172,3 +172,58 @@ def test_list_sources_valid_keys_filter_still_binds_correctly(db):
     assert [s["key"] for s in store.list_sources(conn, alice, valid_keys={"s1"})] == ["s1"]
     assert store.list_sources(conn, alice, valid_keys={"s1"})[0]["unread_count"] == 2
     assert store.list_sources(conn, alice, valid_keys=set()) == []
+
+
+# --- article chat -----------------------------------------------------------
+
+
+def test_save_chat_turn_roundtrip(db):
+    conn, alice, _bob, _sid, ids = db
+    first = store.save_chat_turn(conn, alice, ids[0], "s1", "Why?", "<p>Because.</p>")
+    assert [m["role"] for m in first] == ["user", "assistant"]
+    store.save_chat_turn(conn, alice, ids[0], "s2", "And then?", "<p>Then.</p>")
+
+    messages = store.get_chat_messages(conn, alice, ids[0])
+    assert [m["role"] for m in messages] == ["user", "assistant", "user", "assistant"]
+    assert [m["body"] for m in messages] == ["Why?", "<p>Because.</p>", "And then?", "<p>Then.</p>"]
+    assert all(m["id"] and m["created_at"] for m in messages)
+    assert store.get_chat_session(conn, alice, ids[0]) == {"session_id": "s2", "needs_reseed": False}
+
+
+def test_mark_needs_reseed_then_save_clears_it(db):
+    conn, alice, _bob, _sid, ids = db
+    store.mark_chat_needs_reseed(conn, alice, ids[0])  # no row yet: no-op
+    assert store.get_chat_session(conn, alice, ids[0]) is None
+
+    store.save_chat_turn(conn, alice, ids[0], "s1", "Q", "<p>A</p>")
+    store.mark_chat_needs_reseed(conn, alice, ids[0])
+    assert store.get_chat_session(conn, alice, ids[0])["needs_reseed"] is True
+
+    store.save_chat_turn(conn, alice, ids[0], "s2", "Q2", "<p>A2</p>")
+    assert store.get_chat_session(conn, alice, ids[0]) == {"session_id": "s2", "needs_reseed": False}
+
+
+def test_clear_chat_removes_both(db):
+    conn, alice, _bob, _sid, ids = db
+    store.save_chat_turn(conn, alice, ids[0], "s1", "Q", "<p>A</p>")
+    store.clear_chat(conn, alice, ids[0])
+    assert store.get_chat_messages(conn, alice, ids[0]) == []
+    assert store.get_chat_session(conn, alice, ids[0]) is None
+
+
+def test_chat_rows_cascade_on_article_delete(db):
+    conn, alice, _bob, _sid, ids = db
+    store.save_chat_turn(conn, alice, ids[0], "s1", "Q", "<p>A</p>")
+    conn.execute("DELETE FROM articles WHERE id = ?", (ids[0],))
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM chat_sessions").fetchone()[0] == 0
+
+
+def test_chat_scoped_per_user(db):
+    conn, alice, bob, _sid, ids = db
+    store.save_chat_turn(conn, alice, ids[0], "s1", "Q", "<p>A</p>")
+    assert store.get_chat_messages(conn, bob, ids[0]) == []
+    assert store.get_chat_session(conn, bob, ids[0]) is None
+    store.clear_chat(conn, bob, ids[0])
+    assert len(store.get_chat_messages(conn, alice, ids[0])) == 2

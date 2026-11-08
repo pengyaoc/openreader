@@ -127,6 +127,38 @@ CREATE INDEX IF NOT EXISTS idx_article_states_starred
 -- users, and the article_id foreign key's ON DELETE CASCADE.
 CREATE INDEX IF NOT EXISTS idx_article_states_article
     ON article_states(article_id);
+
+-- Article chat (2026-11-07, see docs/superpowers/specs/2026-11-07-article-
+-- chat-design.md). The `claude` CLI keeps the real conversation in its own
+-- session file; chat_sessions maps (user, article) to that session's UUID.
+-- needs_reseed marks a session whose last turn failed after the CLI may
+-- already have recorded it, so the next turn starts a fresh session seeded
+-- from chat_messages (the source of truth) instead of resuming.
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    needs_reseed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, article_id)
+) WITHOUT ROWID;
+
+-- Display copy of each thread: what the chat panel renders on reopen, and
+-- what a reseed replays. body is plain text for 'user', sanitized HTML for
+-- 'assistant'.
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
+    ON chat_messages(user_id, article_id, id);
+-- The article_id foreign key's ON DELETE CASCADE.
+CREATE INDEX IF NOT EXISTS idx_chat_messages_article
+    ON chat_messages(article_id);
 """
 
 

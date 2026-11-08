@@ -361,3 +361,78 @@ def toggle_read(conn: sqlite3.Connection, user_id: int, article_id: int) -> dict
     )
     conn.commit()
     return {"is_read": bool(new_val)}
+
+
+# --- article chat -----------------------------------------------------------
+# One thread per (user, article). The CLI holds the model context; these
+# rows are the display copy and the source of truth for reseeding.
+
+_CHAT_MESSAGE_COLUMNS = ("id", "role", "body", "created_at")
+
+
+def get_chat_messages(conn: sqlite3.Connection, user_id: int, article_id: int) -> list[dict]:
+    rows = conn.execute(
+        """SELECT id, role, body, created_at FROM chat_messages
+           WHERE user_id = ? AND article_id = ? ORDER BY id""",
+        (user_id, article_id),
+    ).fetchall()
+    return [dict(zip(_CHAT_MESSAGE_COLUMNS, r)) for r in rows]
+
+
+def get_chat_session(conn: sqlite3.Connection, user_id: int, article_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT session_id, needs_reseed FROM chat_sessions WHERE user_id = ? AND article_id = ?",
+        (user_id, article_id),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"session_id": row[0], "needs_reseed": bool(row[1])}
+
+
+def save_chat_turn(
+    conn: sqlite3.Connection,
+    user_id: int,
+    article_id: int,
+    session_id: str,
+    question: str,
+    answer_html: str,
+) -> list[dict]:
+    """Records one successful turn atomically: the session mapping (clearing
+    needs_reseed) plus the question and answer. Returns the two new
+    messages, user first."""
+    now = datetime.now(UTC).isoformat()
+    with conn:
+        conn.execute(
+            """INSERT INTO chat_sessions (user_id, article_id, session_id, needs_reseed, created_at)
+               VALUES (?, ?, ?, 0, ?)
+               ON CONFLICT (user_id, article_id)
+               DO UPDATE SET session_id = excluded.session_id, needs_reseed = 0""",
+            (user_id, article_id, session_id, now),
+        )
+        saved = []
+        for role, body in (("user", question), ("assistant", answer_html)):
+            cur = conn.execute(
+                """INSERT INTO chat_messages (user_id, article_id, role, body, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (user_id, article_id, role, body, now),
+            )
+            saved.append({"id": cur.lastrowid, "role": role, "body": body, "created_at": now})
+    return saved
+
+
+def mark_chat_needs_reseed(conn: sqlite3.Connection, user_id: int, article_id: int) -> None:
+    conn.execute(
+        "UPDATE chat_sessions SET needs_reseed = 1 WHERE user_id = ? AND article_id = ?",
+        (user_id, article_id),
+    )
+    conn.commit()
+
+
+def clear_chat(conn: sqlite3.Connection, user_id: int, article_id: int) -> None:
+    with conn:
+        conn.execute(
+            "DELETE FROM chat_sessions WHERE user_id = ? AND article_id = ?", (user_id, article_id)
+        )
+        conn.execute(
+            "DELETE FROM chat_messages WHERE user_id = ? AND article_id = ?", (user_id, article_id)
+        )
