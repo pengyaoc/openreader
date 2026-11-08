@@ -3207,3 +3207,50 @@ already-ingested ones keep their old rendering.
 Deployed via `scripts/deploy.sh` (f1db9cf). Same cold-start 503 on the
 script's immediate check as earlier deploys; `/reader/` returned 200 a few
 seconds later, and the served CSS bundle contains the new `img.icon` rule.
+
+## 2026-11-07 — Article chat
+
+Multi-turn chat about the open article, on the same `claude` CLI and
+subscription as Summarize. Design: `docs/superpowers/specs/2026-11-07-
+article-chat-design.md`; plan: `docs/superpowers/plans/2026-11-07-article-
+chat.md`.
+
+- **The CLI keeps the conversation.** First turn: `claude -p --session-id
+  <uuid>` with the article plus the question. Later turns: `--resume
+  <uuid>` with only the question. Chat must not pass
+  `--no-session-persistence` (Summarize still does). The subprocess always
+  runs in `<data dir>/claude-chat/`: the CLI files sessions under
+  `~/.claude/projects/<encoded cwd>/` and `--resume` only looks there.
+- **SQLite is the source of truth.** New tables `chat_sessions` (user,
+  article → CLI session id, `needs_reseed`) and `chat_messages` (display
+  copy). A failed turn saves nothing; if it was a resume, the session is
+  marked `needs_reseed`, because the CLI may already have recorded the
+  turn. The next question then starts a fresh session seeded with the
+  article and the saved transcript. Same path when the session file is
+  gone: CLI 2.1.303 exits 1 with `No conversation found with session ID:
+  …` on stderr (verified), mapped to `SessionMissingError`.
+- **One `claude` at a time, Summarize included.** `app/claude_cli.py` now
+  holds the shared hardening (never `--bare`, `ANTHROPIC_API_KEY`
+  scrubbed, no tools/MCP/settings) and `CLAUDE_SLOT`: one process at a
+  time, at most two waiting, a third gets 503 "busy, try again". One 300s
+  deadline per request, lock wait included. Summarize previously had no
+  such guard; two concurrent calls (~300MB each) could exceed
+  `MemoryMax=700M`.
+- **Answers** go through a narrower sanitizer (`sanitize_chat_html`): no
+  links or images, and only `class="beyond"` on `<p>` survives, which marks
+  the "Beyond the article" paragraph.
+- **UI.** 💬 between ✨ and ★ (or `c`), hidden when signed out or when
+  `llm.enabled` is off. Desktop: 360px column right of the article. ≤760px:
+  bottom sheet at half height, handle drags to full/half/closed, follows
+  `visualViewport` above the iOS keyboard, 16px input. The panel closes on
+  prev/next. A dot on 💬 marks articles with a thread. While the sheet is
+  open, swipe-nav ignores touches. The reader's key handler now ignores
+  keys typed in inputs (typing `m` in the chat box used to toggle read).
+- Smoke test against the real CLI (local, copy of the DB): first answer
+  4.1s, resumed follow-up 2.2s (recalled the earlier question), reseed
+  after deleting the session file 3.5s.
+
+Not deployed yet. Before deploying, check that Apache's `ProxyTimeout` /
+`Timeout` on the VM is at least 300s (Summarize already relies on this,
+but it isn't recorded here). Still to check on a real iPhone: the keyboard
+lift and swipe suppression.

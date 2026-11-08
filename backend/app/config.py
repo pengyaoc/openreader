@@ -61,7 +61,7 @@ class Source(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class LLMSettings(msgspec.Struct, frozen=True, kw_only=True):
-    enabled: bool = False  # kill switch for the Summarize feature
+    enabled: bool = False  # kill switch for Summarize and article chat
 
 
 class Defaults(msgspec.Struct, frozen=True, kw_only=True):

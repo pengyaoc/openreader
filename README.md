@@ -60,7 +60,14 @@ subscription you're replacing.
   speculation), proportional length, formatted with bullets and bold
   highlighting. Runs on your Claude subscription (not API billing), only
   on manual trigger, generated once and cached forever per article.
-- **No scheduler, anywhere.** Refresh is a button. Summarize is a button.
+- **Article chat** — a 💬 button in the reader (or `c`) opens a chat about
+  the open article: a side panel on desktop, a bottom sheet on phones.
+  Multi-turn, one conversation per article per account, and it's still
+  there when you come back. Answers come from the article first; anything
+  from general knowledge is marked "Beyond the article". Same Claude CLI
+  and subscription as Summarize; the CLI keeps the conversation, and only
+  one Claude call runs at a time so it fits a small VM.
+- **No scheduler, anywhere.** Refresh is a button. Summarize and chat are buttons.
   Nothing runs on a timer.
 - Dark/light themes, responsive down to phone width, images proxied
   server-side (sidesteps hotlink protection and keeps your IP off
