@@ -3300,3 +3300,27 @@ app off TCP onto a Unix socket:
 - Checked: nothing listens on 8787; Apache (www-data) gets 200 through the
   socket; summra, mathpad and inkchinese are refused. Public site 200,
   unauthenticated chat API 401.
+
+## 2026-11-08 — Auto-refresh every 12 hours
+
+Owner asked for feeds to refresh by themselves every 12 hours, for
+everyone (an earlier "only users active in the last 7 days" condition was
+dropped: sources are shared, so a refresh serves every account anyway).
+
+- `app/autorefresh.py`: one asyncio task in the app's lifespan, started
+  only by `build_production_app` (`create_app(auto_refresh=True)`), so
+  tests never run a timer.
+- It counts from the last *full* refresh, button or timer
+  (`app.state.last_full_refresh`). A one-source refresh doesn't reset it.
+  After a restart the clock starts from `MAX(sources.last_fetched_at)`, so
+  a deploy doesn't add a refresh. It waits at least a minute after
+  startup.
+- `refresh_api.run_refresh` is shared by the button and the timer. Under
+  `app.state.refresh_lock`, refreshes run one at a time: the button waits
+  its turn, and the timer skips and retries a minute later. A failed timer
+  run waits a full interval before the next try.
+- `auto_refresh_hours` in feeds.yaml, default 12, 0 = off. It's read on
+  every loop, so a change made in the app takes effect without a restart
+  (within 10 minutes when turning it back on).
+- The model is never called by the timer; hydration runs after it the
+  same way it does after the button.

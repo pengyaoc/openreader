@@ -70,6 +70,8 @@ class Defaults(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class Config(msgspec.Struct, frozen=True, kw_only=True):
+    # Full refresh of every source this often (app/autorefresh.py); 0 = off.
+    auto_refresh_hours: float = 12
     llm: LLMSettings = msgspec.field(default_factory=LLMSettings)
     defaults: Defaults = msgspec.field(default_factory=Defaults)
     sources: list[Source] = msgspec.field(default_factory=list)

@@ -5,6 +5,8 @@ of accounts there is no real write contention to worry about).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import sys
 from pathlib import Path
 
@@ -15,7 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.staticfiles import StaticFiles
 
-from app import settings
+from app import autorefresh, settings
 from app.api import (
     articles,
     auth_api,
@@ -56,6 +58,7 @@ def create_app(
     config: Config | None = None,
     config_path: Path | None = None,
     require_auth: bool = True,
+    auto_refresh: bool = False,
 ) -> Starlette:
     db_path = db_path or settings.DB_PATH
     config_path = config_path or settings.CONFIG_PATH
@@ -107,11 +110,32 @@ def create_app(
                 upsert_user=lambda identity: upsert_user(identity, get_conn, user_ids),
             )
         )
-    app = Starlette(routes=routes, middleware=middleware)
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        # Production only (build_production_app): tests leave it off so no
+        # timer runs behind them. The clock starts from the newest fetch in
+        # the DB, so a restart doesn't cost an extra refresh.
+        conn = get_conn()
+        try:
+            app.state.last_full_refresh = autorefresh.latest_fetch(conn)
+        finally:
+            conn.close()
+        task = asyncio.create_task(autorefresh.auto_refresh_loop(app))
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan if auto_refresh else None)
     app.state.get_conn = get_conn
     app.state.config = config
     app.state.config_path = config_path
     app.state.db_path = db_path
+    # One refresh at a time, button or timer (app/autorefresh.py).
+    app.state.refresh_lock = asyncio.Lock()
+    app.state.last_full_refresh = None
     # Fixed cwd for every chat `claude` call: the CLI files sessions under
     # ~/.claude/projects/<encoded cwd>/, and --resume only looks there.
     app.state.chat_cwd = Path(db_path).parent / "claude-chat"
@@ -146,21 +170,22 @@ def build_production_app() -> Starlette:
     # trusted_header mode is safe only because Apache is the sole thing
     # that can reach this process — the identity header is trusted with no
     # verification of its own. uvicorn's bind address is a CLI flag
-    # (--host), invisible to this module, so this can't be a hard runtime
-    # check; it's a loud reminder instead. The deployed systemd unit binds
-    # 127.0.0.1 explicitly (see README.md's ExecStart) — never change that
-    # to 0.0.0.0 while auth_configured() is true.
+    # (--uds/--host), invisible to this module, so this can't be a hard
+    # runtime check; it's a loud reminder instead. The deployed systemd
+    # unit listens on a Unix socket only Apache can open (see README.md's
+    # ExecStart, and docs/WORKLOG.md 2026-11-08) — never move it to a TCP
+    # port, least of all 0.0.0.0, while auth_configured() is true.
     if auth_configured():
         print(
             "NOTE: READER_AUTH_MODE requires a login — this process must be "
-            "reachable ONLY via the trusted Apache gateway (bound to "
-            "127.0.0.1, never 0.0.0.0). The identity header is trusted with "
+            "reachable ONLY via the trusted Apache gateway (a Unix "
+            "socket only Apache can open; never 0.0.0.0). The identity header is trusted with "
             "no verification of its own.",
             file=sys.stderr,
             flush=True,
         )
 
-    app = create_app()
+    app = create_app(auto_refresh=True)
 
     # Sources hand-added to feeds.yaml get their DB row (and so their
     # sidebar entry) now, not on their first refresh.

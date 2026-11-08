@@ -1,3 +1,6 @@
+import asyncio
+from datetime import UTC, datetime
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -14,10 +17,30 @@ async def refresh(request: Request) -> JSONResponse:
         require_user_id(request)
     except AnonymousUserError:
         return JSONResponse({"error": "not authenticated"}, status_code=401)
+    report = await run_refresh(request.app, request.query_params.get("source"))
+    return JSONResponse(report)
 
-    config = request.app.state.config
-    only_key = request.query_params.get("source")
 
+async def run_refresh(app, only_key: str | None = None, *, wait: bool = True) -> dict | None:
+    """One refresh, shared by the Refresh button and the auto-refresh timer
+    (app/autorefresh.py). Refreshes run one at a time under
+    app.state.refresh_lock: with wait=True (the button) this waits its
+    turn; with wait=False (the timer) it returns None at once if a refresh
+    is already running. A full refresh (no only_key) records its start time
+    in app.state.last_full_refresh, which the timer counts from."""
+    lock: asyncio.Lock = app.state.refresh_lock
+    if not wait and lock.locked():
+        return None
+    async with lock:
+        started = datetime.now(UTC)
+        report = await _refresh(app, only_key)
+        if only_key is None:
+            app.state.last_full_refresh = started
+        return report
+
+
+async def _refresh(app, only_key: str | None) -> dict:
+    config = app.state.config
     # A factory, not a pre-opened connection: refresh.py's
     # _refresh_imap_sequential calls this once and reuses the one
     # connection across every IMAP source in the refresh (2026-08-13:
@@ -31,7 +54,7 @@ async def refresh(request: Request) -> JSONResponse:
     imap_connect = None
     imap_configured = settings.IMAP_HOST and settings.IMAP_USER and settings.IMAP_PASSWORD
     if any(s.type == "imap" for s in config.sources) and imap_configured:
-        imap_connect = lambda: imap_connector.connect(  # noqa: E731
+        imap_connect = lambda: imap_connector.connect(
             settings.IMAP_HOST, settings.IMAP_USER, settings.IMAP_PASSWORD
         )
 
@@ -42,7 +65,7 @@ async def refresh(request: Request) -> JSONResponse:
     # app (article reads, image loads, the sidebar) can be served while a
     # refresh via the old code path was running.
     report = await run_off_thread(
-        request.app.state.db_path,
+        app.state.db_path,
         refresh_all,
         config.sources,
         only_key=only_key,
@@ -56,6 +79,6 @@ async def refresh(request: Request) -> JSONResponse:
     # the hydration finish on its own thread. Same scope as before: only the
     # sources this refresh covered.
     refreshed = [s for s in config.sources if only_key is None or s.key == only_key]
-    hydrate_in_background(request.app.state.db_path, hydration_scope(refreshed))
+    hydrate_in_background(app.state.db_path, hydration_scope(refreshed))
 
-    return JSONResponse(report)
+    return report

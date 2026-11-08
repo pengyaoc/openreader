@@ -247,7 +247,8 @@ def hydrate_in_background(db_path: str | Path, source_fetch_full_text: dict[str,
     reaches it falls back to the lazy on-open fetch in GET
     /api/articles/:id, as before batch hydration existed.
 
-    Still triggered only by a refresh someone asked for, never by a timer.
+    Triggered by a refresh: the Refresh button or the auto-refresh timer
+    (app/autorefresh.py).
     If the process stops mid-batch nothing is lost: hydrate_pending writes
     each article as it finishes, and the next refresh picks up the ones it
     hadn't reached."""

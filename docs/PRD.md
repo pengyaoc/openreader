@@ -43,8 +43,10 @@ with a message rather than silently failing — see §4.6.
 - **Deterministic by default, LLM by exception.** RSS and newsletter
   ingestion never call a model. The one LLM feature (summarization) is
   opt-in, per-article, and only ever runs when you press the button.
-- **Manual trigger over automation.** No background scheduler. You press
-  Refresh. You press Summarize. Nothing runs on a timer.
+- **Manual trigger over automation.** You press Refresh. You press
+  Summarize. The one exception (2026-11-08): feeds also refresh on their
+  own every 12 hours (`auto_refresh_hours`, 0 = off). Nothing else runs on
+  a timer, and the model is never called by one.
 - **Small footprint.** Runs on a personal machine — or the smallest VM
   your cloud provider sells — indefinitely. It should idle near-zero, not
   run an always-on daemon farm, so self-hosting it never costs more than
@@ -63,7 +65,8 @@ with a message rather than silently failing — see §4.6.
   through (`matched_rule`), so filtering is auditable, not just applied.
 - Refresh is **synchronous and manual** — press Refresh, get a per-source
   report (`fetched` / `new` / `filtered` / errored), see immediately what
-  your rules did. No polling, no scheduler.
+  your rules did. Besides the button, one timer runs a full refresh every
+  12 hours (see app/autorefresh.py).
 - A broken source (bad feed, network error, 4xx/5xx) is isolated — it
   never blocks other sources from refreshing, and its error is visible in
   the sidebar.

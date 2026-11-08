@@ -25,9 +25,10 @@ subscription you're replacing.
   third party ever sees your reading list or your mailbox. It's a SQLite
   file on disk that you control end to end.
 - **Built for you and the people you live with.** Not a stripped-down
-  multi-tenant SaaS product — a fast reader with no scheduler, no
-  background jobs, no "upgrade to unlock this" screens. Refresh is a
-  button. Summarize is a button. Nothing runs unless you ask it to. Add
+  multi-tenant SaaS product — a fast reader with no job queue, no
+  "upgrade to unlock this" screens. Feeds refresh every 12 hours and on
+  the Refresh button. Summarize is a button. Nothing else runs unless you
+  ask it to. Add
   as many accounts as you like: each gets its own read and starred state
   over one shared feed list, and nobody is billed per seat.
 - **Cheap to run.** Small enough to co-host with something else on the
@@ -67,8 +68,10 @@ subscription you're replacing.
   from general knowledge is marked "Beyond the article". Same Claude CLI
   and subscription as Summarize; the CLI keeps the conversation, and only
   one Claude call runs at a time so it fits a small VM.
-- **No scheduler, anywhere.** Refresh is a button. Summarize and chat are buttons.
-  Nothing runs on a timer.
+- **One timer, nothing else.** Feeds refresh on their own every 12 hours
+  (`auto_refresh_hours` in `feeds.yaml`; `0` turns it off), counted from
+  the last full refresh, so pressing Refresh resets the clock. Summarize
+  and chat are buttons and never run on their own.
 - Dark/light themes, responsive down to phone width, images proxied
   server-side (sidesteps hotlink protection and keeps your IP off
   third-party image hosts).
@@ -177,8 +180,8 @@ token to refresh, nothing that expires and needs re-auth.
    years of mailbox history. `mailbox_folder` (optional, defaults to
    `INBOX`) picks which folder to SEARCH if your mail client filters
    newsletters into their own folder. Press **Refresh feeds** in the app
-   (or `POST /api/refresh`) to pull — like everything else in v1, there's
-   no scheduler, refresh is always a manual trigger.
+   (or `POST /api/refresh`) to pull now. The app also refreshes every
+   source by itself every 12 hours (`auto_refresh_hours`).
 
    All IMAP sources in one refresh share a single connection, opened once
    and reused sequentially rather than one connection per source — mail
