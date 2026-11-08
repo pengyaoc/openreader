@@ -1,17 +1,15 @@
 // Article chat (docs/superpowers/specs/2026-11-07-article-chat-design.md).
 // One thread per article per account; the server keeps it, this renders it.
-// Desktop: a column docked right of the article. ≤760px: a bottom sheet
-// that opens at half height, drags to full, and rides above the iOS
-// keyboard (tracked through visualViewport).
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
+// Desktop: a column docked right of the article. ≤760px: a full-screen
+// overlay sized to the space above the iOS keyboard (visualViewport), so
+// the input always sits right on top of it.
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, chatQueryKey } from '../api'
+import { CHAT_FULLSCREEN_QUERY } from '../chatLayout'
 
-const MOBILE_QUERY = '(max-width: 760px)'
 const STARTERS = ["What's the main argument?", 'What evidence does it give?', "What's left unsaid?"]
 const MAX_QUESTION = 2000
-// Drag distance (px) on the sheet handle that counts as a deliberate move.
-const DRAG_COMMIT_PX = 70
 
 function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
@@ -24,13 +22,17 @@ function useMediaQuery(query: string): boolean {
   return matches
 }
 
-/** Height of the visible viewport and how far the keyboard covers the
- *  layout viewport's bottom — iOS shrinks visualViewport, not the page. */
-function useVisualViewport(active: boolean): { height: number; keyboard: number } {
+/** The visible viewport: iOS shrinks visualViewport for the keyboard, not
+ *  the page, and may scroll it down (offsetTop) when an input takes focus. */
+function useVisualViewport(active: boolean): { height: number; top: number; keyboard: number } {
   const read = () => {
     const vv = window.visualViewport
-    if (!vv) return { height: window.innerHeight, keyboard: 0 }
-    return { height: vv.height, keyboard: Math.max(0, window.innerHeight - vv.height - vv.offsetTop) }
+    if (!vv) return { height: window.innerHeight, top: 0, keyboard: 0 }
+    return {
+      height: vv.height,
+      top: vv.offsetTop,
+      keyboard: Math.max(0, window.innerHeight - vv.height - vv.offsetTop),
+    }
   }
   const [state, setState] = useState(read)
   useEffect(() => {
@@ -50,14 +52,18 @@ function useVisualViewport(active: boolean): { height: number; keyboard: number 
 
 interface Props {
   articleId: number
+  articleTitle: string
+  /** Focus the input on open (ArticleReader decides; on iOS it has already
+   *  primed the keyboard during the tap — see chatLayout.ts). */
+  autoFocus: boolean
   onClose: () => void
 }
 
-export function ChatPanel({ articleId, onClose }: Props) {
+export function ChatPanel({ articleId, articleTitle, autoFocus, onClose }: Props) {
   const qc = useQueryClient()
-  const isMobile = useMediaQuery(MOBILE_QUERY)
+  const fullscreen = useMediaQuery(CHAT_FULLSCREEN_QUERY)
   const coarse = useMediaQuery('(pointer: coarse)')
-  const viewport = useVisualViewport(isMobile)
+  const viewport = useVisualViewport(fullscreen)
 
   const thread = useQuery({
     queryKey: chatQueryKey(articleId),
@@ -75,11 +81,6 @@ export function ChatPanel({ articleId, onClose }: Props) {
   const [draft, setDraft] = useState('')
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null)
   const [error, setError] = useState<{ message: string; question: string } | null>(null)
-  const [full, setFull] = useState(false)
-  const [dragY, setDragY] = useState(0)
-  const [dragging, setDragging] = useState(false)
-  // The finger driving the current drag; other fingers are ignored.
-  const dragPointer = useRef<number | null>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -141,73 +142,32 @@ export function ChatPanel({ articleId, onClose }: Props) {
     }
   }
 
-  // Sheet handle drag (mobile only). Move/up are read on window, not the
-  // handle: the sheet moves under the finger mid-drag, and a release the
-  // handle never sees would leave the sheet stuck half-dragged. Only the
-  // finger that started the drag counts: a second touch (a thumb resting on
-  // the article, or another finger on the handle) neither moves the sheet
-  // nor ends the drag.
-  const onHandleDown = (e: PointerEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    if (dragPointer.current !== null) return
-    const id = e.pointerId
-    dragPointer.current = id
-    const startY = e.clientY
-    let dy = 0
-    setDragging(true)
-    const move = (ev: globalThis.PointerEvent) => {
-      if (ev.pointerId !== id) return
-      dy = ev.clientY - startY
-      setDragY(dy)
-    }
-    const end = (ev: globalThis.PointerEvent) => {
-      if (ev.pointerId !== id) return
-      dragPointer.current = null
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', end)
-      window.removeEventListener('pointercancel', end)
-      setDragging(false)
-      setDragY(0)
-      if (dy < -DRAG_COMMIT_PX) setFull(true)
-      else if (dy > DRAG_COMMIT_PX) {
-        if (full) setFull(false)
-        else onClose()
-      }
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', end)
-    window.addEventListener('pointercancel', end)
-  }
+  useEffect(() => {
+    if (autoFocus) inputRef.current?.focus({ preventScroll: true })
+    // Once, on open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-  // Full height leaves 44px of article showing; dragging up never grows the
-  // sheet past that, or its handle and header would slide off the top.
-  const fullHeight = viewport.height - 44
-  const sheetStyle = isMobile
-    ? {
-        height: `${Math.round(Math.min(fullHeight, (full ? fullHeight : viewport.height * 0.5) - Math.min(0, dragY)))}px`,
-        bottom: `${viewport.keyboard}px`,
-        // The home-bar inset only matters while the keyboard is down.
-        paddingBottom: viewport.keyboard > 0 ? 0 : undefined,
-        transform: dragY > 0 ? `translateY(${dragY}px)` : undefined,
-        transition: dragging ? 'none' : 'height 0.2s ease, transform 0.2s ease',
-      }
+  const panelStyle = fullscreen
+    ? { top: `${viewport.top}px`, height: `${Math.round(viewport.height)}px` }
     : undefined
+  const keyboardUp = fullscreen && viewport.keyboard > 0
 
   const empty = messages.length === 0 && !shownPending
 
   return (
-    <aside className={`chat-panel ${isMobile ? 'chat-panel--sheet' : ''}`} style={sheetStyle} aria-label="Ask about this article">
-      {isMobile && (
-        <div
-          className="chat-panel__handle"
-          onPointerDown={onHandleDown}
-          aria-hidden="true"
-        >
-          <span />
-        </div>
-      )}
+    <aside
+      className={`chat-panel ${fullscreen ? 'chat-panel--full' : ''} ${keyboardUp ? 'chat-panel--keyboard' : ''}`}
+      style={panelStyle}
+      aria-label="Ask about this article"
+    >
       <div className="chat-panel__head">
-        <span>Ask about this article</span>
+        {fullscreen && (
+          <button className="chat-panel__done" onClick={onClose}>
+            Done
+          </button>
+        )}
+        <span className="chat-panel__title">{fullscreen ? articleTitle : 'Ask about this article'}</span>
         <div className="chat-panel__head-actions">
           {messages.length > 0 && (
             <button
@@ -220,9 +180,11 @@ export function ChatPanel({ articleId, onClose }: Props) {
               New chat
             </button>
           )}
-          <button className="icon-btn" onClick={onClose} title="Close chat (c)" aria-label="Close chat">
-            ✕
-          </button>
+          {!fullscreen && (
+            <button className="icon-btn" onClick={onClose} title="Close chat (c)" aria-label="Close chat">
+              ✕
+            </button>
+          )}
         </div>
       </div>
 
@@ -288,7 +250,6 @@ export function ChatPanel({ articleId, onClose }: Props) {
           placeholder={messages.length ? 'Ask a follow-up…' : 'Ask about this article…'}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={onKeyDown}
-          onFocus={() => isMobile && setFull(true)}
         />
         <button
           type="submit"

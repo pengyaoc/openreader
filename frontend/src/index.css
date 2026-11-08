@@ -2168,8 +2168,10 @@ html:has(.reader-overlay) {
 /* ---------------------------- article chat ----------------------------
    docs/superpowers/specs/2026-11-07-article-chat-design.md. Desktop: a
    column docked right of the article (the article narrows, nothing is
-   covered). ≤760px: a bottom sheet over the article, sized and lifted
-   above the keyboard from ChatPanel.tsx (visualViewport). */
+   covered), on the article's own background. ≤760px: a full-screen
+   overlay, sized to the space above the keyboard from ChatPanel.tsx
+   (visualViewport). Answers use the article's reading font and size;
+   questions the same size in the UI font. */
 
 .reader-main {
   flex: 1;
@@ -2194,13 +2196,16 @@ html:has(.reader-overlay) {
 }
 
 .chat-panel {
-  width: 360px;
+  /* Wide enough for article-size text; narrower on small laptop screens
+     so the article keeps its room. */
+  width: clamp(340px, 32vw, 440px);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   border-left: 1px solid var(--line);
-  background: var(--bg-raised);
+  /* The reader overlay's own background (.reader-overlay). */
+  background: var(--bg-overlay);
   font-family: var(--font-ui);
 }
 
@@ -2211,8 +2216,17 @@ html:has(.reader-overlay) {
   gap: 8px;
   padding: 10px 12px 10px 16px;
   border-bottom: 1px solid var(--line);
-  font-size: 12.5px;
+  font-size: 14px;
   color: var(--ink-dim);
+  flex-shrink: 0;
+}
+.chat-panel__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-panel__head-actions {
   flex-shrink: 0;
 }
 .chat-panel__head-actions {
@@ -2226,7 +2240,7 @@ html:has(.reader-overlay) {
   padding: 0;
   color: var(--amber);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 14px;
   cursor: pointer;
 }
 .chat-panel__link:disabled {
@@ -2239,34 +2253,33 @@ html:has(.reader-overlay) {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px;
+  padding: 20px 18px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 18px;
 }
 
 .chat-msg--user {
   align-self: flex-end;
   max-width: 85%;
-  padding: 8px 12px;
-  border-radius: 12px 12px 3px 12px;
+  padding: 9px 14px;
+  border-radius: 14px 14px 4px 14px;
   background: var(--amber-wash);
   color: var(--ink);
-  font-size: 14px;
+  font-size: 19px;
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 /* Answers reuse .reader-body typography at a chat-sized scale. */
 .chat-msg--answer.reader-body {
+  /* Font, size and line height come from .reader-body, as in the article. */
   align-self: stretch;
-  font-size: 14.5px;
-  line-height: 1.55;
   max-width: none;
   margin: 0;
 }
 .chat-msg--answer.reader-body p {
-  margin: 0 0 0.6em;
+  margin: 0 0 0.75em;
 }
 .chat-msg--answer.reader-body > :last-child {
   margin-bottom: 0;
@@ -2286,11 +2299,11 @@ html:has(.reader-overlay) {
   align-items: center;
   gap: 8px;
   color: var(--ink-faint);
-  font-size: 13px;
+  font-size: 15px;
 }
 .chat-panel__error {
   color: var(--red);
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .chat-panel__starters {
@@ -2304,10 +2317,10 @@ html:has(.reader-overlay) {
   background: none;
   border: 1px solid var(--line-strong);
   border-radius: 999px;
-  padding: 7px 12px;
+  padding: 9px 14px;
   color: var(--ink-dim);
   font: inherit;
-  font-size: 13px;
+  font-size: 15px;
   cursor: pointer;
   text-align: left;
 }
@@ -2324,7 +2337,7 @@ html:has(.reader-overlay) {
   padding: 6px 6px 6px 14px;
   border: 1px solid var(--line-strong);
   border-radius: 20px;
-  background: var(--bg);
+  background: var(--bg-overlay);
   flex-shrink: 0;
 }
 .chat-panel__composer:focus-within {
@@ -2339,8 +2352,8 @@ html:has(.reader-overlay) {
   background: transparent;
   color: var(--ink);
   font: inherit;
-  /* 16px or iOS zooms the page when the field takes focus. */
-  font-size: 16px;
+  /* At least 16px, or iOS zooms the page when the field takes focus. */
+  font-size: 17px;
   line-height: 1.4;
   padding: 5px 0;
   max-height: 120px;
@@ -2348,8 +2361,8 @@ html:has(.reader-overlay) {
 }
 .chat-panel__send {
   flex-shrink: 0;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   border: none;
   background: var(--amber);
@@ -2366,32 +2379,64 @@ html:has(.reader-overlay) {
   cursor: default;
 }
 
-.chat-panel__handle {
-  display: flex;
-  justify-content: center;
-  padding: 8px 0 4px;
-  touch-action: none;
-  cursor: grab;
+.chat-panel__done {
+  background: none;
+  border: none;
+  padding: 6px 4px;
+  margin-right: 4px;
+  color: var(--amber);
+  font: inherit;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
   flex-shrink: 0;
-}
-.chat-panel__handle span {
-  width: 36px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--ink-faint);
 }
 
 @media (max-width: 760px) {
-  .chat-panel--sheet {
+  .chat-msg--user {
+    font-size: 17px;
+  }
+
+  /* top/height are set inline from visualViewport: the panel is exactly
+     the visible area, so the input sits on the keyboard. */
+  .chat-panel--full {
     position: fixed;
     left: 0;
     right: 0;
     width: auto;
     z-index: 60;
     border-left: none;
-    border-top: 1px solid var(--line-strong);
-    border-radius: 14px 14px 0 0;
-    box-shadow: var(--shadow-lift);
-    padding-bottom: env(safe-area-inset-bottom);
+    animation: chat-panel-in 0.22s ease-out;
+  }
+  .chat-panel--full .chat-panel__head {
+    /* Below the status bar / camera island. */
+    padding: calc(env(safe-area-inset-top) + 8px) 14px 10px;
+    font-size: 15px;
+  }
+  .chat-panel--full .chat-panel__title {
+    flex: 1;
+    text-align: center;
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .chat-panel--full .chat-panel__composer {
+    margin: 8px 10px calc(env(safe-area-inset-bottom) + 10px);
+  }
+  /* The home-bar inset is under the keyboard while it's up. */
+  .chat-panel--full.chat-panel--keyboard .chat-panel__composer {
+    margin-bottom: 8px;
+  }
+}
+
+@keyframes chat-panel-in {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-panel--full {
+    animation: none;
   }
 }

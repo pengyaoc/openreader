@@ -3324,3 +3324,30 @@ dropped: sources are shared, so a refresh serves every account anyway).
   (within 10 minutes when turning it back on).
 - The model is never called by the timer; hydration runs after it the
   same way it does after the button.
+
+## 2026-11-08 — Chat UX pass; two reader buttons removed
+
+Owner feedback on article chat:
+- Text was too small: answers were hard-set to 14.5px in the UI font. They
+  now inherit `.reader-body` (reading font, 19px desktop, 17px phone), and
+  questions are the same size in the UI font.
+- The desktop panel used `--bg-raised`, which looked like a different
+  surface. The reader itself sits on `--bg-overlay`, so the panel does too.
+  It's also wider now (`clamp(340px, 32vw, 440px)`) to fit the larger text.
+- iPhone: the half-height sheet jumped to full height when the keyboard
+  came up, and its handle and ✕ ended up under the camera island. It's now a
+  full-screen overlay sized to `visualViewport`, with **Done** below the
+  safe-area inset. The drag code is gone.
+- The keyboard comes up on open for a new conversation only (owner
+  decision). iOS ignores focus() outside the tap, so the tap focuses a
+  throwaway input and the panel takes focus over once it mounts
+  (`chatLayout.ts`). This needs checking on a real iPhone; the fallback, if
+  iOS drops it, is one tap on the input.
+- Found while testing: the `c` hotkey typed a "c" into the newly focused
+  input. It now calls preventDefault.
+
+Separately removed the reader toolbar's ↗ Open original (the "original
+source" link under the title stays) and ⤓ Pull full article buttons, at
+the owner's request since neither was used. That drops
+`POST /api/articles/:id/hydrate`; full text still arrives after each
+refresh and on open.

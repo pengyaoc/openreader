@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { API_BASE, api, chatQueryKey, type Article, type ArticleListItem } from '../api'
 import { useSwipeNav } from '../useSwipeNav'
 import { ChatPanel } from './ChatPanel'
+import { CHAT_FULLSCREEN_QUERY, primeKeyboard } from '../chatLayout'
 
 type ViewMode = 'full' | 'summary'
 
@@ -99,6 +100,23 @@ export function ArticleReader({
     enabled: chatEnabled,
   })
   const hasChat = (chatThread.data?.messages.length ?? 0) > 0
+  // Whether the chat's input takes focus as it opens. Always on desktop.
+  // Full-screen (phone): only for a new conversation, since the keyboard
+  // would cover half of an existing one.
+  const [chatFocus, setChatFocus] = useState(false)
+  const toggleChat = () => {
+    if (chatOpenRef.current) {
+      setChatOpen(false)
+      return
+    }
+    const fullscreen = window.matchMedia(CHAT_FULLSCREEN_QUERY).matches
+    const focus = !fullscreen || !hasChat
+    if (focus && fullscreen) primeKeyboard()
+    setChatFocus(focus)
+    setChatOpen(true)
+  }
+  const toggleChatRef = useRef(toggleChat)
+  toggleChatRef.current = toggleChat
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -108,7 +126,12 @@ export function ArticleReader({
         if (e.key === 'Escape') setChatOpen(false)
         return
       }
-      if (e.key === 'c' && chatEnabled && !e.metaKey && !e.ctrlKey && !e.altKey) setChatOpen((o) => !o)
+      if (e.key === 'c' && chatEnabled && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // The chat input takes focus as this keystroke is handled; without
+        // this, the 'c' would land in it.
+        e.preventDefault()
+        toggleChatRef.current()
+      }
       else if (e.key === 'Escape') {
         // Esc closes the chat first, then the article.
         if (chatOpenRef.current) setChatOpen(false)
@@ -229,7 +252,7 @@ export function ArticleReader({
           {chatEnabled && (
             <button
               className={`icon-btn chat-toggle ${chatOpen ? 'active' : ''}`}
-              onClick={() => setChatOpen((o) => !o)}
+              onClick={toggleChat}
               title={chatOpen ? 'Close chat (c)' : 'Ask about this article (c)'}
               aria-pressed={chatOpen}
             >
@@ -355,7 +378,14 @@ export function ArticleReader({
           </div>
         </div>
       </div>
-      {chatOpen && <ChatPanel articleId={article.id} onClose={() => setChatOpen(false)} />}
+      {chatOpen && (
+        <ChatPanel
+          articleId={article.id}
+          articleTitle={article.title}
+          autoFocus={chatFocus}
+          onClose={() => setChatOpen(false)}
+        />
+      )}
       </div>
       {hint && (
         <div className="page-turn-hint" role="status">

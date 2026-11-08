@@ -218,7 +218,9 @@ auto-hydrates on open, before a question is typically asked).
 
 ### Desktop web (≥ the app's existing tablet/desktop breakpoint)
 
-- Right-docked panel ~340px; the article column narrows (no overlay).
+- Right-docked panel, 340–440px depending on window width; the article column
+  narrows (no overlay). Same background as the reader. Focuses its input on
+  open. (Revised 2026-11-08.)
 - Header: "Ask about this article" · "New chat" (confirm) · close ✕.
 - The panel belongs to the article it was opened on: moving to prev/next (or
   closing the article) closes it. Opening 💬 on another article shows that
@@ -226,16 +228,29 @@ auto-hydrates on open, before a question is typically asked).
 
 ### iPhone / narrow viewports
 
-- Bottom sheet, opens at half height; drag handle to full; drag down to close.
-- Focusing the input expands it to full and keeps the input above the keyboard
-  (`visualViewport` resize tracking); `env(safe-area-inset-bottom)` padding
-  when the keyboard is down.
+- Revised 2026-11-08 (owner): the half-height bottom sheet was replaced by a
+  full-screen overlay. The sheet jumped to full height when the keyboard
+  came up, and its drag handle and ✕ ended up under the camera island.
+- Header below the safe-area inset: **Done** (left) · article title ·
+  New chat.
+- The overlay is sized to `visualViewport` (top and height), so the input sits
+  directly on the keyboard; `env(safe-area-inset-bottom)` padding when the
+  keyboard is down.
+- Keyboard comes up on open for a new conversation only; an existing one opens
+  with the keyboard down so the last answer is readable. iOS raises the
+  keyboard only for a focus made during the tap, so the tap focuses a
+  throwaway input and the panel takes focus over on mount
+  (`frontend/src/chatLayout.ts`).
+- Same layout in a phone browser outside the PWA (owner decision).
 - Input font-size ≥ 16px (prevents iOS focus-zoom).
-- `useSwipeNav` disabled while the sheet is open.
+- `useSwipeNav` disabled while the chat is open.
 
 ### Thread
 
 - On open: `GET` history, scroll to bottom.
+- Text size matches the article: answers use the reading font at the
+  article's size (19px desktop, 17px phone); questions the same size in the
+  UI font. (2026-11-08.)
 - User messages: right-aligned amber-wash bubbles (plain text, escaped).
   Assistant messages: left, rendered HTML styled like the Summary view;
   `.beyond` paragraphs in a muted color with the bold label.
@@ -262,7 +277,7 @@ auto-hydrates on open, before a question is typically asked).
 - API tests: auth/kill-switch gating, per-user isolation, nothing saved on
   failure, DELETE clears both tables.
 - Lock test: two concurrent calls never overlap the runner.
-- Manual: desktop panel and iPhone PWA sheet with keyboard (real device).
+- Manual: desktop panel and iPhone PWA full-screen chat with keyboard (real device).
 
 ## Deployment
 
