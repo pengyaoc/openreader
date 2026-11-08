@@ -1,13 +1,15 @@
+import re
 import sqlite3
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from app import store
 from app.api._common import AnonymousUserError, current_user_id, require_user_id
 from app.db import run_off_thread
 from app.ingest.hydrate import hydrate_article
 from app.ingest.textutil import plain_text_excerpt
+from app.chat import chat_turn
 from app.claude_cli import CLAUDE_SLOT, DEADLINE_S, ClaudeError
 from app.summarize import summarize_text
 
@@ -191,6 +193,69 @@ async def summarize(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=503)
 
     return JSONResponse({"summary_html": summary_html, "llm_summary_at": llm_summary_at})
+
+
+_MAX_QUESTION_CHARS = 2000
+
+
+def _claude_error_message(exc: ClaudeError) -> str:
+    text = str(exc)
+    if re.search(r"usage limit|rate limit", text, re.IGNORECASE):
+        return "Claude usage limit reached — try later"
+    return text
+
+
+def _run_chat_turn(conn: sqlite3.Connection, user_id: int, article_id: int, content_html: str,
+                   question: str, cwd: str) -> list[dict]:
+    with CLAUDE_SLOT.acquire(DEADLINE_S) as remaining:
+        return chat_turn(conn, user_id, article_id, content_html, question, cwd=cwd, timeout=remaining)
+
+
+async def chat(request: Request) -> Response:
+    """Article chat (docs/superpowers/specs/2026-11-07-article-chat-design.md).
+    GET the thread, POST {"question"} to ask, DELETE to start over. One
+    thread per (user, article); same gating as summarize — signed in, and
+    the llm.enabled kill switch on."""
+    try:
+        user_id = require_user_id(request)
+    except AnonymousUserError:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    if not request.app.state.config.llm.enabled:
+        return JSONResponse({"error": "LLM generation is disabled"}, status_code=404)
+
+    db_path = request.app.state.db_path
+    article_id = int(request.path_params["article_id"])
+    article = await run_off_thread(db_path, store.get_article, user_id, article_id)
+    if article is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    if request.method == "GET":
+        messages = await run_off_thread(db_path, store.get_chat_messages, user_id, article_id)
+        return JSONResponse({"messages": messages})
+
+    if request.method == "DELETE":
+        await run_off_thread(db_path, store.clear_chat, user_id, article_id)
+        return Response(status_code=204)
+
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    question = body.get("question") if isinstance(body, dict) else None
+    question = question.strip() if isinstance(question, str) else ""
+    if not question or len(question) > _MAX_QUESTION_CHARS:
+        return JSONResponse(
+            {"error": f"question must be 1-{_MAX_QUESTION_CHARS} characters"}, status_code=400
+        )
+
+    try:
+        messages = await run_off_thread(
+            db_path, _run_chat_turn, user_id, article_id, article["content_html"], question,
+            str(request.app.state.chat_cwd),
+        )
+    except ClaudeError as exc:
+        return JSONResponse({"error": _claude_error_message(exc)}, status_code=503)
+    return JSONResponse({"messages": messages})
 
 
 async def mark_all_read(request: Request) -> JSONResponse:

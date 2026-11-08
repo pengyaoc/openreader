@@ -1187,3 +1187,143 @@ def test_summarize_goes_through_the_claude_slot(monkeypatch, tmp_path):
     resp = test_client.post(f"/api/articles/{article_id}/summarize")
     assert resp.status_code == 503
     assert "busy" in resp.json()["error"]
+
+
+# --- article chat -----------------------------------------------------------
+
+
+def _fake_chat_turn(calls=None, answer="<p>Because.</p>"):
+    """Stands in for app.chat.chat_turn: records kwargs, saves through the
+    real store so GET/DELETE see real rows."""
+    from app import store
+
+    def fake(conn, user_id, article_id, content_html, question, cwd, timeout, **kwargs):
+        if calls is not None:
+            calls.append({"user_id": user_id, "question": question, "cwd": cwd, "timeout": timeout})
+        return store.save_chat_turn(conn, user_id, article_id, "sid", question, answer)
+
+    return fake
+
+
+def test_chat_404_when_llm_disabled(client):
+    article_id = client.get("/api/articles").json()[0]["id"]
+    assert client.get(f"/api/articles/{article_id}/chat").status_code == 404
+    assert client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"}).status_code == 404
+    assert client.delete(f"/api/articles/{article_id}/chat").status_code == 404
+
+
+def test_chat_401_when_anonymous(anon_client):
+    client, _ = anon_client
+    article_id = client.get("/api/articles").json()[0]["id"]
+    assert client.get(f"/api/articles/{article_id}/chat").status_code == 401
+    assert client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"}).status_code == 401
+    assert client.delete(f"/api/articles/{article_id}/chat").status_code == 401
+
+
+def test_chat_404_for_unknown_article(monkeypatch, tmp_path):
+    from app.api import articles
+
+    monkeypatch.setattr(articles, "chat_turn", lambda *a, **k: pytest.fail("claude ran"))
+    test_client = _client_with_llm_enabled(tmp_path)
+    assert test_client.get("/api/articles/9999/chat").status_code == 404
+    assert test_client.post("/api/articles/9999/chat", json={"question": "Q"}).status_code == 404
+
+
+@pytest.mark.parametrize("body", [{"question": ""}, {"question": "   "}, {"question": "x" * 2001}, {}, {"question": 5}])
+def test_chat_post_validates_question(monkeypatch, tmp_path, body):
+    from app.api import articles
+
+    monkeypatch.setattr(articles, "chat_turn", lambda *a, **k: pytest.fail("claude ran"))
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+    assert test_client.post(f"/api/articles/{article_id}/chat", json=body).status_code == 400
+
+
+def test_chat_post_then_get_roundtrip(monkeypatch, tmp_path):
+    from app.api import articles
+
+    monkeypatch.setattr(articles, "chat_turn", _fake_chat_turn())
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    resp = test_client.post(f"/api/articles/{article_id}/chat", json={"question": "  Why?  "})
+    assert resp.status_code == 200
+    posted = resp.json()["messages"]
+    assert [(m["role"], m["body"]) for m in posted] == [("user", "Why?"), ("assistant", "<p>Because.</p>")]
+
+    got = test_client.get(f"/api/articles/{article_id}/chat").json()["messages"]
+    assert got == posted
+
+
+def test_chat_post_503_on_claude_error(monkeypatch, tmp_path):
+    from app.api import articles
+    from app.claude_cli import ClaudeError
+
+    def boom(*a, **k):
+        raise ClaudeError("claude exited 2: boom")
+
+    monkeypatch.setattr(articles, "chat_turn", boom)
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    resp = test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"})
+    assert resp.status_code == 503
+    assert "boom" in resp.json()["error"]
+    assert test_client.get(f"/api/articles/{article_id}/chat").json()["messages"] == []
+
+
+def test_chat_post_usage_limit_message(monkeypatch, tmp_path):
+    from app.api import articles
+    from app.claude_cli import ClaudeError
+
+    def limited(*a, **k):
+        raise ClaudeError("claude reported an error: Claude AI usage limit reached|1794200000")
+
+    monkeypatch.setattr(articles, "chat_turn", limited)
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    resp = test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"})
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "Claude usage limit reached — try later"
+
+
+def test_chat_delete_clears(monkeypatch, tmp_path):
+    from app.api import articles
+
+    monkeypatch.setattr(articles, "chat_turn", _fake_chat_turn())
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+    test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"})
+
+    assert test_client.delete(f"/api/articles/{article_id}/chat").status_code == 204
+    assert test_client.get(f"/api/articles/{article_id}/chat").json()["messages"] == []
+
+
+def test_chat_is_per_user(monkeypatch, two_account_clients):
+    from app.api import articles
+    from app.config import Config, LLMSettings
+
+    alice, bob = two_account_clients
+    alice.app.state.config = Config(llm=LLMSettings(enabled=True), sources=alice.app.state.config.sources)
+    monkeypatch.setattr(articles, "chat_turn", _fake_chat_turn())
+    article_id = alice.get("/api/articles").json()[0]["id"]
+
+    alice.post(f"/api/articles/{article_id}/chat", json={"question": "Alice asks"})
+    assert bob.get(f"/api/articles/{article_id}/chat").json()["messages"] == []
+    assert bob.delete(f"/api/articles/{article_id}/chat").status_code == 204
+    assert len(alice.get(f"/api/articles/{article_id}/chat").json()["messages"]) == 2
+
+
+def test_chat_post_passes_cwd_and_deadline(monkeypatch, tmp_path):
+    from app.api import articles
+
+    calls = []
+    monkeypatch.setattr(articles, "chat_turn", _fake_chat_turn(calls))
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+    test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"})
+
+    assert calls[0]["cwd"] == str(tmp_path / "claude-chat")
+    assert (tmp_path / "claude-chat").is_dir()
+    assert 0 < calls[0]["timeout"] <= 300

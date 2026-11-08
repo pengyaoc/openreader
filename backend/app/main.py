@@ -79,6 +79,7 @@ def create_app(
         Route("/api/articles/{article_id}/star", articles.toggle_star, methods=["POST"]),
         Route("/api/articles/{article_id}/toggle-read", articles.toggle_read, methods=["POST"]),
         Route("/api/articles/{article_id}/summarize", articles.summarize, methods=["POST"]),
+        Route("/api/articles/{article_id}/chat", articles.chat, methods=["GET", "POST", "DELETE"]),
         Route("/api/articles/{article_id}/hydrate", articles.pull_full_article, methods=["POST"]),
         Route("/api/llm-status", articles.llm_status),
         Route("/api/refresh", refresh_api.refresh, methods=["POST"]),
@@ -111,6 +112,10 @@ def create_app(
     app.state.config = config
     app.state.config_path = config_path
     app.state.db_path = db_path
+    # Fixed cwd for every chat `claude` call: the CLI files sessions under
+    # ~/.claude/projects/<encoded cwd>/, and --resume only looks there.
+    app.state.chat_cwd = Path(db_path).parent / "claude-chat"
+    app.state.chat_cwd.mkdir(parents=True, exist_ok=True)
     image_cache_dir = Path(settings.IMAGE_CACHE_DIR) if settings.IMAGE_CACHE_DIR else Path(db_path).parent / "imgcache"
     app.state.image_cache = ImageCache(image_cache_dir, settings.IMAGE_CACHE_MAX_MB * 1024 * 1024)
     return app
