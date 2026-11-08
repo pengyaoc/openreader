@@ -2284,14 +2284,28 @@ html:has(.reader-overlay) {
 .chat-msg--answer.reader-body > :last-child {
   margin-bottom: 0;
 }
+/* Readability over the article's own styles (2026-11-08): the beyond-
+   the-article note is set apart by a shaded box and a label line, not by
+   grey text, and quotes from the article are upright and full-strength,
+   keeping only the amber bar. */
 .chat-msg--answer .beyond {
-  color: var(--ink-dim);
-  border-left: 2px solid var(--line-strong);
-  padding-left: 10px;
+  color: var(--ink);
+  background: var(--bg-hover);
+  border-radius: 10px;
+  padding: 12px 14px;
 }
-.chat-msg--answer .beyond b {
-  color: var(--ink-faint);
-  font-weight: 600;
+.chat-msg--answer .beyond b:first-child {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink-dim);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.chat-msg--answer blockquote {
+  color: var(--ink);
+  font-style: normal;
 }
 
 .chat-panel__status {

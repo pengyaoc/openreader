@@ -3351,3 +3351,10 @@ source" link under the title stays) and ⤓ Pull full article buttons, at
 the owner's request since neither was used. That drops
 `POST /api/articles/:id/hydrate`; full text still arrives after each
 refresh and on open.
+
+Follow-up, same day: grey text in chat answers was hard to read (owner
+screenshot). In chat only, the beyond-the-article note is now full-strength
+text in a shaded box, with its label on its own line. Quotes from the
+article are upright and full-strength, keeping the amber bar. Measured
+contrast (light/dark): note text 12.1/13.5, label 4.7/6.3, quotes
+15.2/15.6. The old label was 2.7. Articles keep their own quote style.
