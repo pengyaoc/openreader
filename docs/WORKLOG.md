@@ -3284,6 +3284,19 @@ Fixed by hand on the VM (none of this is in the repo):
   sessions, cached images) start owner-only. Checked: the running process
   reports `Umask: 0077`, and www-data can no longer read the DB.
 
-Still open: anything running on the VM can call `127.0.0.1:8787` with a
-forged `X-Remote-Email` header. Apache strips the header from outside
-requests, so this needs a local foothold first.
+Second gap, same day: the app trusts `X-Remote-Email` from anything that
+reaches it, and it listened on `127.0.0.1:8787`, so any process on the VM
+(summra, mathpad, inkchinese, php-fpm) could claim to be an allowed user
+and use chat, and with it the `claude` subscription. Fixed by moving the
+app off TCP onto a Unix socket:
+- uvicorn runs with `--uds /var/lib/openreader-sock/reader.sock`.
+  uvicorn makes the socket itself 0666, so the folder is the gate:
+  `/var/lib/openreader-sock` is `0710 openreader:www-data` (created by
+  root, outside `/opt/openreader`, because deploy.sh's `chown -R` there
+  would reset the group). The folder was added to `ReadWritePaths`.
+- In `wordpress-https.conf`, both reader `<Location>` blocks now use
+  `ProxyPass unix:/var/lib/openreader-sock/reader.sock|http://localhost/`.
+- Backups: `*.bak-20261108-uds` next to both files.
+- Checked: nothing listens on 8787; Apache (www-data) gets 200 through the
+  socket; summra, mathpad and inkchinese are refused. Public site 200,
+  unauthenticated chat API 401.

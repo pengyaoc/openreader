@@ -325,7 +325,12 @@ below) means "don't error if the file is missing."
 
    [Service]
    WorkingDirectory=/opt/openreader/backend
-   ExecStart=%h/.local/bin/uv run uvicorn app.asgi:app --host 127.0.0.1 --port 8787
+   # A Unix socket, not a TCP port: Apache sets X-Remote-Email and the app
+   # trusts it, so nothing but Apache may reach the app. Create the folder
+   # once as root: install -d -o <service-user> -g www-data -m 0710 \
+   #   /var/lib/openreader-sock   (other local accounts can't get in), and
+   # proxy with: ProxyPass unix:/var/lib/openreader-sock/reader.sock|http://localhost/
+   ExecStart=%h/.local/bin/uv run uvicorn app.asgi:app --uds /var/lib/openreader-sock/reader.sock
    Restart=on-failure
    RestartSec=5
 
@@ -333,13 +338,14 @@ below) means "don't error if the file is missing."
 
    # Sandboxing (optional but recommended)
    NoNewPrivileges=true
+   UMask=0077          # data files readable by the service account only
    PrivateTmp=true
    ProtectSystem=strict
    ProtectHome=read-only
    # Carve out exactly what needs to be writable: app data/config, plus
    # ~/.claude if you're using article summarization (the `claude` CLI
    # needs to write there for its own OAuth token refresh).
-   ReadWritePaths=/opt/openreader/data /opt/openreader/config /home/<service-user>/.claude
+   ReadWritePaths=/opt/openreader/data /opt/openreader/config /home/<service-user>/.claude /var/lib/openreader-sock
    # Size well past a single `claude -p` call's own peak RSS (~300MB,
    # measured live) if using summarization, not just the FastAPI process's
    # own baseline — see docs/WORKLOG.md, 2026-08-14, for how this was
