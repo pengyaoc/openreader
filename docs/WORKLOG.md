@@ -3266,3 +3266,24 @@ Not deployed yet. Before deploying, check that Apache's `ProxyTimeout` /
 `Timeout` on the VM is at least 300s (Summarize already relies on this,
 but it isn't recorded here). Still to check on a real iPhone: the keyboard
 lift and swipe suppression.
+
+## 2026-11-08 — VM: data files made owner-only
+
+Audit of who can reach the `claude` CLI login on the VM. The login token
+(`/opt/openreader/openreader.env`, mode 600) and SSH were already locked
+down, but the data was world-readable: `/opt/openreader/data` was 755,
+`reader.db*` and its `.bak` copies 644, and `claude-chat`, `imgcache` and
+`~openreader/.claude` 755/775. Any other account on the VM (www-data,
+summra, mathpad, inkchinese) could read every article, summary and chat.
+
+Fixed by hand on the VM (none of this is in the repo):
+- `chmod -R go-rwx /opt/openreader/data /opt/openreader/config /home/openreader/.claude`
+- `UMask=0077` added under `[Service]` in
+  `/home/openreader/.config/systemd/user/openreader.service` (backup at
+  `openreader.service.bak-20261108-umask`), so new files (WAL, chat
+  sessions, cached images) start owner-only. Checked: the running process
+  reports `Umask: 0077`, and www-data can no longer read the DB.
+
+Still open: anything running on the VM can call `127.0.0.1:8787` with a
+forged `X-Remote-Email` header. Apache strips the header from outside
+requests, so this needs a local foothold first.
