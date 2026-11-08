@@ -3236,6 +3236,9 @@ chat.md`.
   deadline per request, lock wait included. Summarize previously had no
   such guard; two concurrent calls (~300MB each) could exceed
   `MemoryMax=700M`.
+- **One summary per article, even with concurrent clicks.** A Summarize
+  request that waited for the slot re-reads the article once it gets the
+  slot and returns the saved summary if a click ahead of it already made one.
 - **Answers** go through a narrower sanitizer (`sanitize_chat_html`): no
   links or images, and only `class="beyond"` on `<p>` survives, which marks
   the "Beyond the article" paragraph.

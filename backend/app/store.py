@@ -300,6 +300,14 @@ def mark_all_read_global(conn: sqlite3.Connection, user_id: int) -> int:
     return cur.rowcount
 
 
+def get_summary(conn: sqlite3.Connection, article_id: int) -> tuple[str, str] | None:
+    """(llm_summary_html, llm_summary_at) if the article has a summary."""
+    row = conn.execute(
+        "SELECT llm_summary_html, llm_summary_at FROM articles WHERE id = ?", (article_id,)
+    ).fetchone()
+    return (row[0], row[1]) if row and row[0] else None
+
+
 def save_summary(conn: sqlite3.Connection, article_id: int, summary_html: str) -> str:
     now = datetime.now(UTC).isoformat()
     conn.execute(

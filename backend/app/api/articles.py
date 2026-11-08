@@ -153,6 +153,12 @@ async def pull_full_article(request: Request) -> JSONResponse:
 def _run_summarize(conn: sqlite3.Connection, article_id: int, content_html: str) -> tuple[str, str]:
     text = plain_text_excerpt(content_html, limit=None)
     with CLAUDE_SLOT.acquire(DEADLINE_S) as remaining:
+        # One summary per article, ever: a click that waited in line behind
+        # another click on the same article gets that summary instead of
+        # running claude again.
+        existing = store.get_summary(conn, article_id)
+        if existing:
+            return existing
         summary_html = summarize_text(text, len(text.split()), timeout=remaining)
     llm_summary_at = store.save_summary(conn, article_id, summary_html)
     return summary_html, llm_summary_at

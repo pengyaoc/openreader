@@ -1383,3 +1383,28 @@ def test_chat_in_flight_cleared_after_success_and_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(articles, "chat_turn", boom)
     test_client.post(f"/api/articles/{article_id}/chat", json={"question": "Q"})
     assert test_client.get(f"/api/articles/{article_id}/chat").json()["pending"] is None
+
+
+def test_summarize_waiting_click_reuses_the_summary_just_made(monkeypatch, tmp_path):
+    # Two clicks on one article: both pass the "already summarized?" check
+    # before either finishes, then queue on the Claude slot. The second
+    # must return the first one's summary, not run claude again.
+    from app.api import articles
+    from app.db import connect
+
+    calls = []
+
+    def fake_summarize_text(text, word_count, **kwargs):
+        calls.append(text)
+        return "<p>Only once</p>"
+
+    monkeypatch.setattr(articles, "summarize_text", fake_summarize_text)
+    test_client = _client_with_llm_enabled(tmp_path)
+    article_id = test_client.get("/api/articles").json()[0]["id"]
+
+    conn = connect(tmp_path / "reader.db")
+    first = articles._run_summarize(conn, article_id, "<p>Body text</p>")
+    second = articles._run_summarize(conn, article_id, "<p>Body text</p>")
+
+    assert len(calls) == 1
+    assert second == first
