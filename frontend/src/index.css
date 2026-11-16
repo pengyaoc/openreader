@@ -2446,6 +2446,12 @@ html:has(.reader-overlay) {
     color: var(--ink);
     font-weight: 600;
   }
+  /* The conversation fades out as it scrolls up under the header and
+     status bar, instead of being cut off at a hard edge. */
+  .chat-panel--full .chat-panel__thread {
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 28px);
+  }
   .chat-panel--full .chat-panel__composer {
     margin: 8px 10px calc(env(safe-area-inset-bottom) + 10px);
   }

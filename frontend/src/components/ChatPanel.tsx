@@ -45,12 +45,39 @@ function useVisualViewport(active: boolean): { height: number; top: number; keyb
     const vv = window.visualViewport
     if (!active || !vv) return
     const update = () => setState(read())
+    // The page itself never scrolls (body is overflow: hidden), but iOS
+    // scrolls it anyway to bring a tapped input above the keyboard, which
+    // carried the whole panel up off the top and left an empty band above
+    // the keyboard (2026-11-16, from the second message on). Undo it.
+    const onWindowScroll = () => {
+      if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0)
+      update()
+    }
+    // iOS fires its viewport events before the keyboard finishes sliding
+    // in, so re-read for a moment after the input takes focus.
+    let raf = 0
+    const settle = () => {
+      cancelAnimationFrame(raf)
+      const until = performance.now() + 700
+      const tick = () => {
+        onWindowScroll()
+        if (performance.now() < until) raf = requestAnimationFrame(tick)
+      }
+      raf = requestAnimationFrame(tick)
+    }
     vv.addEventListener('resize', update)
     vv.addEventListener('scroll', update)
-    update()
+    window.addEventListener('scroll', onWindowScroll)
+    document.addEventListener('focusin', settle)
+    document.addEventListener('focusout', settle)
+    onWindowScroll()
     return () => {
+      cancelAnimationFrame(raf)
       vv.removeEventListener('resize', update)
       vv.removeEventListener('scroll', update)
+      window.removeEventListener('scroll', onWindowScroll)
+      document.removeEventListener('focusin', settle)
+      document.removeEventListener('focusout', settle)
     }
   }, [active])
   return state
@@ -165,8 +192,20 @@ export function ChatPanel({ articleId, articleTitle, autoFocus, onClose }: Props
     const panel = panelRef.current
     if (!fullscreen || !panel) return
     let lastY = 0
+    let startY = 0
     const onStart = (e: TouchEvent) => {
-      lastY = e.touches[0]?.clientY ?? 0
+      lastY = startY = e.touches[0]?.clientY ?? 0
+    }
+    // A tap on the input while it's not focused: focus it ourselves
+    // without scrolling, as on open. iOS's own focus scrolls the page to
+    // reveal the input, which is what threw the panel off-screen.
+    const onEnd = (e: TouchEvent) => {
+      const input = inputRef.current
+      if (!input || document.activeElement === input) return
+      if (!input.contains(e.target as Node) || e.changedTouches.length !== 1) return
+      if (Math.abs((e.changedTouches[0]?.clientY ?? startY) - startY) > 10) return // a drag, not a tap
+      e.preventDefault()
+      input.focus({ preventScroll: true })
     }
     const onMove = (e: TouchEvent) => {
       const target = e.target as Node
@@ -185,9 +224,11 @@ export function ChatPanel({ articleId, articleTitle, autoFocus, onClose }: Props
     }
     panel.addEventListener('touchstart', onStart, { passive: true })
     panel.addEventListener('touchmove', onMove, { passive: false })
+    panel.addEventListener('touchend', onEnd, { passive: false })
     return () => {
       panel.removeEventListener('touchstart', onStart)
       panel.removeEventListener('touchmove', onMove)
+      panel.removeEventListener('touchend', onEnd)
     }
   }, [fullscreen])
 

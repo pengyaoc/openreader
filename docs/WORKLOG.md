@@ -3378,3 +3378,19 @@ keyboard is up. The keyboard check (`innerHeight - visualViewport.height`)
 read 0 in the Home Screen app, because innerHeight shrinks with the
 keyboard there. It now compares the visible height with the screen's
 height: under 75% means the keyboard is up.
+
+Fourth follow-up (2026-11-16, owner's iPhone screenshot): from the second
+message on, tapping the input pushed the whole panel up. The header went
+off the top and an empty band sat between the input and the keyboard.
+Tapping the input lets iOS scroll the page to reveal it, which carries the
+fixed panel with it. The first open never hit this because it focuses with
+`preventScroll`. Fixes in `ChatPanel.tsx`:
+- A tap on the unfocused input now focuses it with `preventScroll`, the same
+  way the first open does.
+- While full screen, any page scroll is undone (`scrollTo(0, 0)`), since
+  body is `overflow: hidden` and never scrolls on purpose.
+- The viewport is re-read for 700ms after focus changes, because iOS fires
+  its events before the keyboard finishes sliding in.
+Also new: the thread fades over its top 28px instead of ending at a hard
+edge under the header. Typecheck and build pass. Chat isn't enabled in
+local dev, so this still needs a real iPhone.
