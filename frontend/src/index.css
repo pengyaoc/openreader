@@ -2266,8 +2266,11 @@ html:has(.reader-overlay) {
   border-radius: 14px 14px 4px 14px;
   background: var(--amber-wash);
   color: var(--ink);
+  /* Same face, size and leading as the article and the answers
+     (.reader-body), so the whole thread reads as one text. */
+  font-family: var(--font-read);
   font-size: 19px;
-  line-height: 1.45;
+  line-height: 1.66;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -2366,6 +2369,8 @@ html:has(.reader-overlay) {
   background: transparent;
   color: var(--ink);
   font: inherit;
+  /* What you type here becomes a question bubble: same reading face. */
+  font-family: var(--font-read);
   /* At least 16px, or iOS zooms the page when the field takes focus. */
   font-size: 17px;
   line-height: 1.4;
